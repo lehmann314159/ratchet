@@ -115,6 +115,32 @@ func TestModelConstraintAuditDiffersFromDecompose(t *testing.T) {
 	})
 }
 
+func TestModelConstraintExecuteDiffersFromAnalyze(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("same model rejected", func(t *testing.T) {
+		d := openTestDB(t)
+		seedProject(t, d, -1, "fixture: model-constraint/execute-same-as-analyze")
+		if err := d.SetVerbModelAssignment(ctx, -1, db.VerbAnalyzeExecution, "gemma4:31b"); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.SetVerbModelAssignment(ctx, -1, db.VerbExecuteBead, "gemma4:31b"); err == nil {
+			t.Error("expected rejection: EXECUTE same model as ANALYZE removes independent review")
+		}
+	})
+
+	t.Run("different model accepted", func(t *testing.T) {
+		d := openTestDB(t)
+		seedProject(t, d, -1, "fixture: model-constraint/execute-differs-from-analyze")
+		if err := d.SetVerbModelAssignment(ctx, -1, db.VerbAnalyzeExecution, "gemma4:31b"); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.SetVerbModelAssignment(ctx, -1, db.VerbExecuteBead, "glm-4.7-flash"); err != nil {
+			t.Errorf("unexpected rejection when models differ: %v", err)
+		}
+	})
+}
+
 func TestSeedVerbModelAssignmentsConstraints(t *testing.T) {
 	ctx := context.Background()
 	d := openTestDB(t)
@@ -132,18 +158,25 @@ func TestSeedVerbModelAssignmentsConstraints(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var decompose, reconcile, audit string
+	var decompose, reconcile, audit, execute, analyze string
 	_ = d.QueryRowContext(ctx, `SELECT model FROM verb_model_assignments WHERE project_id=-1 AND verb=?`,
 		db.VerbDecomposeSpec).Scan(&decompose)
 	_ = d.QueryRowContext(ctx, `SELECT model FROM verb_model_assignments WHERE project_id=-1 AND verb=?`,
 		db.VerbReconcileDecomposition).Scan(&reconcile)
 	_ = d.QueryRowContext(ctx, `SELECT model FROM verb_model_assignments WHERE project_id=-1 AND verb=?`,
 		db.VerbAuditDecomposition).Scan(&audit)
+	_ = d.QueryRowContext(ctx, `SELECT model FROM verb_model_assignments WHERE project_id=-1 AND verb=?`,
+		db.VerbExecuteBead).Scan(&execute)
+	_ = d.QueryRowContext(ctx, `SELECT model FROM verb_model_assignments WHERE project_id=-1 AND verb=?`,
+		db.VerbAnalyzeExecution).Scan(&analyze)
 
 	if decompose != reconcile {
 		t.Errorf("DECOMPOSE model %q != RECONCILE model %q after seed", decompose, reconcile)
 	}
 	if audit == decompose {
 		t.Errorf("AUDIT model %q == DECOMPOSE model %q after seed (must differ for cross-review)", audit, decompose)
+	}
+	if execute == analyze {
+		t.Errorf("EXECUTE model %q == ANALYZE model %q after seed (must differ for independent review)", execute, analyze)
 	}
 }

@@ -8,7 +8,7 @@ import (
 )
 
 // SetVerbModelAssignment upserts a verb→model assignment for a project,
-// enforcing the two model-assignment constraints from the architecture:
+// enforcing the three model-assignment constraints from the architecture:
 //
 //  1. model(DECOMPOSE_SPEC) == model(RECONCILE_DECOMPOSITION)
 //     The reconciling model must be the decomposing model; otherwise a
@@ -17,6 +17,10 @@ import (
 //  2. model(AUDIT_DECOMPOSITION) != model(DECOMPOSE_SPEC)
 //     The auditing model must differ from the decomposing model to
 //     constitute a real cross-review (OQ-049's basis).
+//
+//  3. model(EXECUTE_BEAD) != model(ANALYZE_EXECUTION)
+//     The executing model authors the work; the analyzing model reviews it.
+//     Using the same model for both removes the independent review.
 func (db *DB) SetVerbModelAssignment(ctx context.Context, projectID int64, verb, model string) error {
 	existing, err := db.verbModelMap(ctx, projectID)
 	if err != nil {
@@ -43,22 +47,21 @@ func (db *DB) SetVerbModelAssignment(ctx context.Context, projectID int64, verb,
 }
 
 // SeedVerbModelAssignments writes all 8 verb→model assignments for a new
-// project in a single transaction, enforcing both model-assignment constraints.
-// Assignments are the validated model fleet from Experiments 1–5.
+// project in a single transaction, enforcing all three model-assignment
+// constraints. Assignments are the validated model fleet from Experiments 1–5.
 //
-// adjudicateModel is passed explicitly because both glm-4.7-flash and
-// gemma4:31b are validated for ADJUDICATE_NEXT_EXECUTION (Experiment 5).
-// The seeded project default is gemma4:31b (GLM showed an internal-consistency
-// failure on the hardest Exp-5 case — a self-contradicting field declaration,
-// exactly the failure mode the architecture's consistency check targets).
+// ADJUDICATE_NEXT_EXECUTION is seeded as gemma4:31b rather than glm-4.7-flash:
+// both are validated in Experiment 5, but GLM showed an internal-consistency
+// failure on the hardest case (self-contradicting field declaration), exactly
+// the failure mode the consistency check targets.
 func SeedVerbModelAssignments(ctx context.Context, tx *sql.Tx, projectID int64) error {
 	assignments := map[string]string{
 		VerbDecomposeSpec:           "glm-4.7-flash",
 		VerbAuditDecomposition:      "gemma4:31b",
 		VerbReconcileDecomposition:  "glm-4.7-flash",
-		VerbExecuteBead:             "",  // no model; EXECUTE_BEAD is a subprocess, not a model call
+		VerbExecuteBead:             "glm-4.7-flash",
 		VerbMonitorExecution:        "mistral-small3.2:24b",
-		VerbAnalyzeExecution:        "Qwen3-Coder-30B-A3B",
+		VerbAnalyzeExecution:        "gemma4:31b",
 		VerbCompressAnalysis:        "gemma4:31b",
 		VerbAdjudicateNextExecution: "gemma4:31b",
 	}
@@ -69,9 +72,6 @@ func SeedVerbModelAssignments(ctx context.Context, tx *sql.Tx, projectID int64) 
 	}
 
 	for verb, model := range assignments {
-		if model == "" {
-			continue // EXECUTE_BEAD has no model assignment
-		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO verb_model_assignments (project_id, verb, model) VALUES (?, ?, ?)`,
 			projectID, verb, model,
@@ -104,13 +104,15 @@ func (db *DB) verbModelMap(ctx context.Context, projectID int64) (map[string]str
 	return m, rows.Err()
 }
 
-// checkModelConstraints validates the two model-assignment constraints.
+// checkModelConstraints validates the three model-assignment constraints.
 // A partial assignment (not all 8 verbs present) is allowed; constraints
 // are only violated if both verbs in a pair are present and mismatched.
 func checkModelConstraints(m map[string]string) error {
 	decompose, hasDecompose := m[VerbDecomposeSpec]
 	reconcile, hasReconcile := m[VerbReconcileDecomposition]
 	audit, hasAudit := m[VerbAuditDecomposition]
+	execute, hasExecute := m[VerbExecuteBead]
+	analyze, hasAnalyze := m[VerbAnalyzeExecution]
 
 	if hasDecompose && hasReconcile && decompose != reconcile {
 		return errors.New(
@@ -122,6 +124,12 @@ func checkModelConstraints(m map[string]string) error {
 		return errors.New(
 			"AUDIT_DECOMPOSITION must use a different model from DECOMPOSE_SPEC " +
 				"(cross-review requires a distinct auditing model — OQ-049)",
+		)
+	}
+	if hasExecute && hasAnalyze && execute == analyze {
+		return errors.New(
+			"EXECUTE_BEAD and ANALYZE_EXECUTION must use different models " +
+				"(executing model authors the work; analyzing model reviews it independently)",
 		)
 	}
 	return nil
