@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -11,24 +12,39 @@ import (
 	"time"
 
 	"ratchet/internal/db"
+	"ratchet/internal/ollama"
 )
 
-// RunExecuteBeadMain is the entry point for the `ratchet execute-bead` subcommand.
+const executeBeadSystemPrompt = `You are a coding agent. Implement the Bead specification provided.
+
+Tools:
+- write_file(path, content): create or overwrite a file (path relative to project root)
+- read_file(path): read a file (path relative to project root)
+- run_command(command): run a shell command in the project root directory
+
+Process:
+1. Implement the specification, including all code and unit tests the Bead requires.
+2. Run the tests with run_command.
+3. If tests fail, fix the code and run again. Repeat until all tests pass.
+4. When all exit criteria are confirmed met, send a final message stating this. Do not call further tools.
+
+Use relative paths for all file operations. If you cannot make progress, explain why in your final message.`
+
+// RunExecuteBeadMain is the entry point for the "ratchet execute-bead" subcommand.
 //
-// For Step 3, this is a stub that simulates a coding agent: it writes periodic
-// log lines to the trace file, then exits. Controlled by --mode:
+// --mode is available for smoke tests only:
 //
-//   - success (default): writes a short varied work log, exits with 'success'
-//   - loop:              writes repeating identical failure lines (triggers monitor)
-//   - hang:              writes periodic lines but never exits (tests timeout and SIGTERM)
+//	success: writes a short work log and exits with 'success' (25 seconds)
+//	loop:    writes repeating identical failure lines (triggers monitor)
+//	hang:    writes periodic lines but never exits (tests SIGTERM contract)
 //
-// Regardless of mode, SIGTERM always writes 'monitor_terminated' and exits
-// immediately, and the execution_budget is enforced as a hard timeout.
+// When --mode is empty (the default), the real agentic implementation runs.
 func RunExecuteBeadMain(args []string) {
 	flags := flag.NewFlagSet("execute-bead", flag.ExitOnError)
 	dbPath := flags.String("db", "ratchet.db", "path to SQLite database")
 	execID := flags.Int64("execution-id", 0, "executions row ID")
-	mode := flags.String("mode", "success", "stub mode: success|loop|hang")
+	ollamaURL := flags.String("ollama", "http://192.168.50.241:11434", "Ollama base URL")
+	mode := flags.String("mode", "", "stub mode for testing: success|loop|hang (empty = real implementation)")
 	_ = flags.Parse(args)
 
 	if *execID == 0 {
@@ -43,16 +59,135 @@ func RunExecuteBeadMain(args []string) {
 	}
 	defer d.Close()
 
-	if err := runExecuteBead(d, *execID, *mode); err != nil {
+	if *mode != "" {
+		if err := runExecuteBeadStub(d, *execID, *mode); err != nil {
+			slog.Error("execute-bead stub exiting with error", "execution_id", *execID, "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if err := runExecuteBeadReal(d, *execID, *ollamaURL); err != nil {
 		slog.Error("execute-bead exiting with error", "execution_id", *execID, "error", err)
 		os.Exit(1)
 	}
 }
 
-func runExecuteBead(d *db.DB, execID int64, mode string) error {
+// runExecuteBeadReal runs the agentic tool-calling loop against the assigned model.
+func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	ctx := context.Background()
 
-	// Load trace path and execution budget from the executions + bead_revisions join.
+	var tracePath string
+	var budget int
+	var beadFullTextJSON string
+	var model string
+	var folderPath string
+
+	if err := d.QueryRowContext(ctx, `
+		SELECT e.trace_path, br.execution_budget, br.full_text, vma.model, p.folder_path
+		FROM executions e
+		JOIN bead_revisions br ON br.id = e.bead_revision_id
+		JOIN beads b ON b.id = e.bead_id
+		JOIN projects p ON p.id = e.project_id
+		JOIN verb_model_assignments vma
+		  ON vma.project_id = e.project_id AND vma.verb = 'EXECUTE_BEAD'
+		WHERE e.id = ?`, execID,
+	).Scan(&tracePath, &budget, &beadFullTextJSON, &model, &folderPath); err != nil {
+		return fmt.Errorf("load execution %d: %w", execID, err)
+	}
+
+	// The bead's full_text is a JSON-encoded ParsedBead; extract the spec text.
+	var parsedBead struct {
+		FullText string `json:"full_text"`
+	}
+	if err := json.Unmarshal([]byte(beadFullTextJSON), &parsedBead); err != nil {
+		return fmt.Errorf("parse bead full_text: %w", err)
+	}
+
+	traceFile, err := os.OpenFile(tracePath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open trace %s: %w", tracePath, err)
+	}
+	defer traceFile.Close()
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	terminationCh := make(chan string, 1)
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM)
+	budgetTimer := time.NewTimer(time.Duration(budget) * time.Second)
+	defer budgetTimer.Stop()
+
+	go func() {
+		select {
+		case <-sigCh:
+			terminationCh <- "monitor_terminated"
+			cancel()
+		case <-budgetTimer.C:
+			terminationCh <- "timeout"
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	slog.Info("execute-bead started", "execution_id", execID, "model", model, "budget_s", budget)
+
+	oc := ollama.New(ollamaURL)
+	tools := toolDefinitions()
+	messages := []ollama.Message{
+		{Role: "system", Content: executeBeadSystemPrompt},
+		{Role: "user", Content: parsedBead.FullText},
+	}
+
+	for turn := 1; ; turn++ {
+		writeLine(traceFile, fmt.Sprintf("[TURN %d]", turn))
+
+		msg, err := oc.ChatWithTools(ctx, model, messages, tools, nil)
+		if err != nil {
+			select {
+			case cause := <-terminationCh:
+				writeLine(traceFile, fmt.Sprintf("[terminated: %s]", cause))
+				return writeTerminationCause(d, execID, cause)
+			default:
+			}
+			return fmt.Errorf("model call: %w", err)
+		}
+
+		if msg.Content != "" {
+			writeLine(traceFile, msg.Content)
+		}
+		messages = append(messages, msg)
+
+		if len(msg.ToolCalls) == 0 {
+			writeLine(traceFile, "[done — no further tool calls]")
+			return writeTerminationCause(d, execID, "success")
+		}
+
+		for _, tc := range msg.ToolCalls {
+			writeLine(traceFile, fmt.Sprintf("[tool: %s %v]", tc.Function.Name, tc.Function.Arguments))
+			result := executeTool(ctx, tc, folderPath)
+			writeLine(traceFile, fmt.Sprintf("[result]\n%s", result))
+			messages = append(messages, ollama.Message{
+				Role:    "tool",
+				Content: result,
+			})
+		}
+
+		select {
+		case cause := <-terminationCh:
+			writeLine(traceFile, fmt.Sprintf("[terminated: %s]", cause))
+			return writeTerminationCause(d, execID, cause)
+		default:
+		}
+	}
+}
+
+// runExecuteBeadStub is the original stub implementation, preserved for smoke tests.
+func runExecuteBeadStub(d *db.DB, execID int64, mode string) error {
+	ctx := context.Background()
+
 	var tracePath string
 	var budget int
 	if err := d.QueryRowContext(ctx, `
@@ -70,27 +205,22 @@ func runExecuteBead(d *db.DB, execID int64, mode string) error {
 	}
 	defer traceFile.Close()
 
-	// One-time SIGTERM handler: write 'monitor_terminated', exit.
-	// "One-time" means the handler does not loop — it fires once and the function
-	// returns, which exits the subprocess.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM)
 
 	budgetTimer := time.NewTimer(time.Duration(budget) * time.Second)
 	defer budgetTimer.Stop()
 
-	// Write a work line every 5 seconds.
 	workTicker := time.NewTicker(5 * time.Second)
 	defer workTicker.Stop()
 
 	step := 0
 
-	slog.Info("execute-bead started", "execution_id", execID, "mode", mode, "budget_s", budget)
+	slog.Info("execute-bead started (stub)", "execution_id", execID, "mode", mode, "budget_s", budget)
 
 	for {
 		select {
 		case <-sigCh:
-			// Monitor-triggered termination (or orchestrator shutdown).
 			writeLine(traceFile, fmt.Sprintf("[step %d] received SIGTERM — flushing and exiting", step))
 			return writeTerminationCause(d, execID, "monitor_terminated")
 
@@ -103,22 +233,19 @@ func runExecuteBead(d *db.DB, execID int64, mode string) error {
 			line := stubLine(mode, step)
 			writeLine(traceFile, line)
 
-			// success mode: exit cleanly after 5 steps.
 			if mode == "success" && step >= 5 {
 				writeLine(traceFile, "all steps complete")
 				return writeTerminationCause(d, execID, "success")
 			}
-			// loop and hang modes run until SIGTERM or budget.
 		}
 	}
 }
 
-// stubLine returns a trace line appropriate for the given mode and step.
+// stubLine returns a trace line for the given stub mode and step.
 func stubLine(mode string, step int) string {
 	ts := time.Now().UTC().Format("15:04:05")
 	switch mode {
 	case "loop":
-		// Identical content every step — designed to trigger the loop detector.
 		return fmt.Sprintf("[%s] TestReadBit FAIL: exit status 1, nil pointer dereference at line 88", ts)
 	default: // "success" and "hang"
 		steps := []string{
@@ -139,8 +266,6 @@ func writeLine(f *os.File, line string) {
 	_, _ = fmt.Fprintln(f, line)
 }
 
-// writeTerminationCause updates the executions row. Called by the subprocess
-// itself; the orchestrator writes 'monitor_force_killed' only when it hard-kills.
 func writeTerminationCause(d *db.DB, execID int64, cause string) error {
 	_, err := d.ExecContext(context.Background(),
 		`UPDATE executions SET termination_cause = ? WHERE id = ?`, cause, execID)

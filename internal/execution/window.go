@@ -31,6 +31,11 @@ const (
 // Set in smoke tests only; empty means use os.Executable().
 var testExecutable string
 
+// testExecuteBeadMode injects --mode into the execute-bead subprocess for
+// smoke tests that need stub behaviour (hang, loop, success).
+// Empty means run the real implementation.
+var testExecuteBeadMode string
+
 // RunExecutionWindow handles an EXECUTE_BEAD handoff job end-to-end:
 //  1. Creates the executions row.
 //  2. Starts ratchet execute-bead and ratchet monitor as subprocesses.
@@ -117,10 +122,16 @@ func RunExecutionWindow(ctx context.Context, d *db.DB, ollamaURL string, job *db
 	}
 
 	// Start execute-bead.
-	executeCmd := exec.CommandContext(ctx, self, "execute-bead",
+	execArgs := []string{
+		"execute-bead",
 		fmt.Sprintf("--execution-id=%d", execID),
 		fmt.Sprintf("--db=%s", d.Path),
-	)
+		fmt.Sprintf("--ollama=%s", ollamaURL),
+	}
+	if testExecuteBeadMode != "" {
+		execArgs = append(execArgs, "--mode="+testExecuteBeadMode)
+	}
+	executeCmd := exec.CommandContext(ctx, self, execArgs...)
 	executeCmd.Stdout = os.Stdout
 	executeCmd.Stderr = os.Stderr
 	if err := executeCmd.Start(); err != nil {

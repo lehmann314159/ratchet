@@ -211,9 +211,11 @@ func TestSmokeExecutionWindowMonitorFire(t *testing.T) {
 	ctx := context.Background()
 	_, beadID, _, jobID := seedSmokeProject(t, d)
 
-	// Point subprocess launches at the compiled binary.
+	// Point subprocess launches at the compiled binary and use stub hang mode
+	// so execute-bead runs long enough for the monitor fire to be detected.
 	testExecutable = binPath
-	t.Cleanup(func() { testExecutable = "" })
+	testExecuteBeadMode = "hang"
+	t.Cleanup(func() { testExecutable = ""; testExecuteBeadMode = "" })
 
 	job := &db.HandoffJob{
 		ID:        jobID,
