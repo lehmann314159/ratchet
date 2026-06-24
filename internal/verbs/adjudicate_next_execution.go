@@ -359,6 +359,10 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 
 	switch out.Decision {
 	case "execute_as_is":
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE beads SET status = 'pending' WHERE id = ?`, beadID); err != nil {
+			return fmt.Errorf("reset bead to pending: %w", err)
+		}
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
 			VALUES (?, ?, ?, 'pending', ?, ?)`,
@@ -391,7 +395,7 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 		revID, _ := res.LastInsertId()
 
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE beads SET current_revision_id = ? WHERE id = ?`, revID, beadID); err != nil {
+			`UPDATE beads SET status = 'pending', current_revision_id = ? WHERE id = ?`, revID, beadID); err != nil {
 			return err
 		}
 

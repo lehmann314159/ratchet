@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS verb_model_assignments (
 CREATE TABLE IF NOT EXISTS beads (
   id                  INTEGER PRIMARY KEY,
   project_id          INTEGER NOT NULL REFERENCES projects(id),
-  status              TEXT    NOT NULL CHECK (status IN ('pending', 'executing', 'succeeded', 'failed', 'full_stopped')),
+  status              TEXT    NOT NULL CHECK (status IN ('pending', 'executing', 'succeeded', 'full_stopped')),
   current_revision_id INTEGER REFERENCES bead_revisions(id)
 );
 

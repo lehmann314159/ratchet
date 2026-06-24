@@ -102,6 +102,11 @@ func RunExecutionWindow(ctx context.Context, d *db.DB, ollamaURL string, job *db
 	}
 	execID, _ := res.LastInsertId()
 
+	if _, err := d.ExecContext(ctx,
+		`UPDATE beads SET status = 'executing' WHERE id = ?`, beadID); err != nil {
+		return fmt.Errorf("mark bead executing: %w", err)
+	}
+
 	// Both subprocesses are ratchet subcommands of the current binary.
 	self := testExecutable
 	if self == "" {
