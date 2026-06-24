@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"ratchet/internal/db"
@@ -137,23 +136,3 @@ func commitAttempt(ctx context.Context, tx *sql.Tx, jobID int64, attemptNum int,
 	return nil
 }
 
-// escalate marks a job as escalated and logs a structured alert to stderr.
-// The alert is the orchestrator's human notification mechanism for now;
-// a UI hook can consume these log lines later.
-func escalate(ctx context.Context, d *db.DB, job *db.HandoffJob, reason string) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := d.ExecContext(ctx,
-		`UPDATE handoff_jobs SET status = 'escalated', updated_at = ? WHERE id = ?`,
-		now, job.ID)
-	if err != nil {
-		return err
-	}
-	slog.Error("ESCALATION — requires human review",
-		"project_id", job.ProjectID,
-		"job_id", job.ID,
-		"verb", job.Verb,
-		"bead_id", job.BeadID,
-		"reason", reason,
-	)
-	return nil
-}
