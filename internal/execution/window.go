@@ -26,6 +26,11 @@ const (
 	dbWriteSettle = 150 * time.Millisecond
 )
 
+// testExecutable overrides os.Executable() so tests can point subprocess
+// launches at a compiled binary rather than the go test runner itself.
+// Set in smoke tests only; empty means use os.Executable().
+var testExecutable string
+
 // RunExecutionWindow handles an EXECUTE_BEAD handoff job end-to-end:
 //  1. Creates the executions row.
 //  2. Starts ratchet execute-bead and ratchet monitor as subprocesses.
@@ -98,9 +103,12 @@ func RunExecutionWindow(ctx context.Context, d *db.DB, ollamaURL string, job *db
 	execID, _ := res.LastInsertId()
 
 	// Both subprocesses are ratchet subcommands of the current binary.
-	self, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("os.Executable: %w", err)
+	self := testExecutable
+	if self == "" {
+		self, err = os.Executable()
+		if err != nil {
+			return fmt.Errorf("os.Executable: %w", err)
+		}
 	}
 
 	// Start execute-bead.
