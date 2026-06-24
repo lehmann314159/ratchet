@@ -1,0 +1,282 @@
+package verbs
+
+import "testing"
+
+// Each table-driven test covers: one valid case, each required-field
+// constraint, and verb-specific logic (causal phrases, consistency check).
+
+func TestDecomposeSpecValidate(t *testing.T) {
+	h := &DecomposeSpec{}
+	tests := []struct {
+		name  string
+		input string
+		valid bool
+	}{
+		{
+			"valid with one bead",
+			`{"beads":[{"title":"B01","full_text":"build the widget","execution_budget":300,"monitor_override":"honor"}]}`,
+			true,
+		},
+		{
+			"valid with ambiguities field",
+			`{"beads":[{"title":"B01","full_text":"spec","execution_budget":60,"monitor_override":"ignore"}],"ambiguities":["scope unclear"]}`,
+			true,
+		},
+		{"empty object", `{}`, false},
+		{"empty beads array", `{"beads":[]}`, false},
+		{"bead missing title", `{"beads":[{"full_text":"x","execution_budget":60,"monitor_override":"honor"}]}`, false},
+		{"bead missing full_text", `{"beads":[{"title":"B01","execution_budget":60,"monitor_override":"honor"}]}`, false},
+		{"execution_budget zero", `{"beads":[{"title":"B01","full_text":"x","execution_budget":0,"monitor_override":"honor"}]}`, false},
+		{"execution_budget negative", `{"beads":[{"title":"B01","full_text":"x","execution_budget":-1,"monitor_override":"honor"}]}`, false},
+		{"monitor_override invalid", `{"beads":[{"title":"B01","full_text":"x","execution_budget":60,"monitor_override":"maybe"}]}`, false},
+		{"not JSON", `not json`, false},
+	}
+	runValidate(t, h.Validate, tests)
+}
+
+func TestAuditDecompositionValidate(t *testing.T) {
+	h := &AuditDecomposition{}
+	tests := []struct {
+		name  string
+		input string
+		valid bool
+	}{
+		{
+			"no issues — empty findings array",
+			`{"findings":[],"overall_verdict":"no_issues"}`,
+			true,
+		},
+		{
+			"issues found with findings",
+			`{"findings":[{"bead_title":"B01","issue":"stride formula wrong","design_doc_reference":"§3"}],"overall_verdict":"issues_found"}`,
+			true,
+		},
+		{
+			"issues_found but findings empty",
+			`{"findings":[],"overall_verdict":"issues_found"}`,
+			false,
+		},
+		{
+			"invalid overall_verdict",
+			`{"findings":[],"overall_verdict":"unclear"}`,
+			false,
+		},
+		{
+			"finding missing bead_title",
+			`{"findings":[{"issue":"drift","design_doc_reference":"§1"}],"overall_verdict":"issues_found"}`,
+			false,
+		},
+		{
+			"finding missing issue",
+			`{"findings":[{"bead_title":"B01","design_doc_reference":"§1"}],"overall_verdict":"issues_found"}`,
+			false,
+		},
+		{"not JSON", `not json`, false},
+	}
+	runValidate(t, h.Validate, tests)
+}
+
+func TestReconcileDecompositionValidate(t *testing.T) {
+	h := &ReconcileDecomposition{}
+	validBeads := `[{"title":"B01","full_text":"spec","execution_budget":60,"monitor_override":"honor"}]`
+	tests := []struct {
+		name  string
+		input string
+		valid bool
+	}{
+		{
+			"agree_and_fix with updated_bead",
+			`{"responses":[{"bead_title":"B01","action":"agree_and_fix","reason":"correct","updated_bead":{"title":"B01","full_text":"fixed","execution_budget":60,"monitor_override":"honor"}}],"updated_beads":` + validBeads + `}`,
+			true,
+		},
+		{
+			"disagree with reason",
+			`{"responses":[{"bead_title":"B01","action":"disagree","reason":"finding is wrong — spec is correct"}],"updated_beads":` + validBeads + `}`,
+			true,
+		},
+		{
+			"agree_and_fix missing updated_bead",
+			`{"responses":[{"bead_title":"B01","action":"agree_and_fix","reason":"ok"}],"updated_beads":` + validBeads + `}`,
+			false,
+		},
+		{
+			"disagree with empty reason",
+			`{"responses":[{"bead_title":"B01","action":"disagree","reason":""}],"updated_beads":` + validBeads + `}`,
+			false,
+		},
+		{
+			"invalid action",
+			`{"responses":[{"bead_title":"B01","action":"abstain","reason":"x"}],"updated_beads":` + validBeads + `}`,
+			false,
+		},
+		{
+			"empty responses array",
+			`{"responses":[],"updated_beads":` + validBeads + `}`,
+			false,
+		},
+		{
+			"empty updated_beads array",
+			`{"responses":[{"bead_title":"B01","action":"disagree","reason":"x"}],"updated_beads":[]}`,
+			false,
+		},
+		{
+			"updated_beads zero execution_budget",
+			`{"responses":[{"bead_title":"B01","action":"disagree","reason":"x"}],"updated_beads":[{"title":"B01","full_text":"x","execution_budget":0,"monitor_override":"honor"}]}`,
+			false,
+		},
+		{
+			"updated_beads invalid monitor_override",
+			`{"responses":[{"bead_title":"B01","action":"disagree","reason":"x"}],"updated_beads":[{"title":"B01","full_text":"x","execution_budget":60,"monitor_override":"maybe"}]}`,
+			false,
+		},
+		{"not JSON", `not json`, false},
+	}
+	runValidate(t, h.Validate, tests)
+}
+
+func TestAnalyzeExecutionValidate(t *testing.T) {
+	h := &AnalyzeExecution{}
+	tests := []struct {
+		name  string
+		input string
+		valid bool
+	}{
+		{
+			"valid with both fields",
+			`{"mechanical_findings":"TestFoo FAIL exit 1 line 42","analyzer_interpretation":"suggests nil pointer"}`,
+			true,
+		},
+		{
+			"valid without interpretation",
+			`{"mechanical_findings":"TestFoo PASS"}`,
+			true,
+		},
+		{"empty mechanical_findings", `{"mechanical_findings":""}`, false},
+		{"whitespace mechanical_findings", `{"mechanical_findings":"   "}`, false},
+		{"missing mechanical_findings", `{"analyzer_interpretation":"x"}`, false},
+		// All eight forbidden causal phrases.
+		{"forbidden: due to", `{"mechanical_findings":"exit 1 due to nil pointer"}`, false},
+		{"forbidden: because", `{"mechanical_findings":"failed because stack overflow"}`, false},
+		{"forbidden: caused by", `{"mechanical_findings":"exit 2 caused by OOM"}`, false},
+		{"forbidden: causes", `{"mechanical_findings":"X causes Y to fail"}`, false},
+		{"forbidden: results in", `{"mechanical_findings":"X results in panic"}`, false},
+		{"forbidden: the reason", `{"mechanical_findings":"the reason test failed"}`, false},
+		{"forbidden: the error is", `{"mechanical_findings":"the error is nil"}`, false},
+		{"forbidden: fails because", `{"mechanical_findings":"TestX fails because buffer overrun"}`, false},
+		{"not JSON", `not json`, false},
+	}
+	runValidate(t, h.Validate, tests)
+}
+
+func TestCompressAnalysisValidate(t *testing.T) {
+	h := &CompressAnalysis{}
+	tests := []struct {
+		name  string
+		input string
+		valid bool
+	}{
+		{"valid", `{"compressed_text":"attempt 1: nil ptr in TestFoo; narrowing across attempts"}`, true},
+		{"empty compressed_text", `{"compressed_text":""}`, false},
+		{"whitespace only", `{"compressed_text":"   "}`, false},
+		{"missing field", `{}`, false},
+		{"not JSON", `not json`, false},
+	}
+	runValidate(t, h.Validate, tests)
+}
+
+func TestAdjudicateNextExecutionValidate(t *testing.T) {
+	h := &AdjudicateNextExecution{}
+	tests := []struct {
+		name  string
+		input string
+		valid bool
+	}{
+		{
+			"valid execute_as_is",
+			`{"trend":"same","bead_spec_fit":"bead_problem","reasoning":"the bead spec omits the stride constraint","decision":"execute_as_is"}`,
+			true,
+		},
+		{
+			"valid full_stop",
+			`{"trend":"same","bead_spec_fit":"bead_problem","reasoning":"repeated unresolvable ambiguity in the spec","decision":"full_stop"}`,
+			true,
+		},
+		{
+			"valid execute_revised with revised_bead",
+			`{"trend":"narrower","bead_spec_fit":"bead_problem","reasoning":"spec missing type constraint","decision":"execute_revised","revised_bead":{"title":"B01","full_text":"revised","execution_budget":300,"monitor_override":"honor"}}`,
+			true,
+		},
+		{"invalid trend", `{"trend":"worse","bead_spec_fit":"bead_problem","reasoning":"x","decision":"execute_as_is"}`, false},
+		{"invalid bead_spec_fit", `{"trend":"same","bead_spec_fit":"unknown","reasoning":"x","decision":"execute_as_is"}`, false},
+		{"empty reasoning", `{"trend":"same","bead_spec_fit":"bead_problem","reasoning":"","decision":"execute_as_is"}`, false},
+		{"invalid decision", `{"trend":"same","bead_spec_fit":"bead_problem","reasoning":"x","decision":"retry"}`, false},
+		{
+			"execute_revised missing revised_bead",
+			`{"trend":"same","bead_spec_fit":"bead_problem","reasoning":"x","decision":"execute_revised"}`,
+			false,
+		},
+		{
+			"execute_revised zero execution_budget",
+			`{"trend":"same","bead_spec_fit":"bead_problem","reasoning":"x","decision":"execute_revised","revised_bead":{"title":"B01","full_text":"x","execution_budget":0,"monitor_override":"honor"}}`,
+			false,
+		},
+		{
+			"execute_revised invalid monitor_override",
+			`{"trend":"same","bead_spec_fit":"bead_problem","reasoning":"x","decision":"execute_revised","revised_bead":{"title":"B01","full_text":"x","execution_budget":60,"monitor_override":"maybe"}}`,
+			false,
+		},
+		// Consistency check — the Exp-5 failure mode: declared bead_problem but reasoning
+		// describes execution capability. Any of these phrases in reasoning must fail.
+		{
+			"consistency: bead_problem but reasoning says runner-capability case",
+			`{"trend":"same","bead_spec_fit":"bead_problem","reasoning":"this is a textbook runner-capability case","decision":"execute_as_is"}`,
+			false,
+		},
+		{
+			"consistency: bead_problem but reasoning says spec is clear",
+			`{"trend":"same","bead_spec_fit":"bead_problem","reasoning":"the spec is clear and unambiguous but execution failed","decision":"execute_as_is"}`,
+			false,
+		},
+		{
+			"consistency: bead_problem but reasoning says despite the spec",
+			`{"trend":"same","bead_spec_fit":"bead_problem","reasoning":"despite the spec being unambiguous the model failed","decision":"execute_as_is"}`,
+			false,
+		},
+		{
+			"consistency: execution_capability_problem but reasoning says spec is ambiguous",
+			`{"trend":"same","bead_spec_fit":"execution_capability_problem","reasoning":"the spec is ambiguous about the return type","decision":"execute_as_is"}`,
+			false,
+		},
+		{
+			"consistency: execution_capability_problem but reasoning blames bead specification",
+			`{"trend":"same","bead_spec_fit":"execution_capability_problem","reasoning":"bead specification is missing required fields","decision":"execute_as_is"}`,
+			false,
+		},
+		{"not JSON", `not json`, false},
+	}
+	runValidate(t, h.Validate, tests)
+}
+
+// runValidate is a shared table-driven driver for Validate tests.
+func runValidate(t *testing.T, validate func(string) (string, any), tests []struct {
+	name  string
+	input string
+	valid bool
+}) {
+	t.Helper()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result, parsed := validate(tc.input)
+			gotValid := result == "valid"
+			if gotValid != tc.valid {
+				t.Errorf("Validate(%q) = %q; wantValid=%v", tc.input, result, tc.valid)
+			}
+			if tc.valid && parsed == nil {
+				t.Error("Validate returned \"valid\" but parsed is nil")
+			}
+			if !tc.valid && parsed != nil {
+				t.Error("Validate returned non-valid result but parsed is non-nil")
+			}
+		})
+	}
+}

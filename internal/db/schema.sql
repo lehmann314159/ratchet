@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS bead_revisions (
   full_text        TEXT    NOT NULL,
   execution_budget INTEGER NOT NULL,
   monitor_override TEXT    NOT NULL CHECK (monitor_override IN ('honor', 'ignore')),
-  created_by_verb  TEXT    NOT NULL CHECK (created_by_verb IN ('DECOMPOSE_SPEC', 'ADJUDICATE_NEXT_EXECUTION')),
+  created_by_verb  TEXT    NOT NULL CHECK (created_by_verb IN ('DECOMPOSE_SPEC', 'RECONCILE_DECOMPOSITION', 'ADJUDICATE_NEXT_EXECUTION')),
   created_at       TIMESTAMP NOT NULL
 );
 

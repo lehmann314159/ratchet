@@ -70,7 +70,7 @@ type BeadRevision struct {
 	FullText        string
 	ExecutionBudget int
 	MonitorOverride string // 'honor' | 'ignore'
-	CreatedByVerb   string // 'DECOMPOSE_SPEC' | 'ADJUDICATE_NEXT_EXECUTION'
+	CreatedByVerb   string // 'DECOMPOSE_SPEC' | 'RECONCILE_DECOMPOSITION' | 'ADJUDICATE_NEXT_EXECUTION'
 	CreatedAt       time.Time
 }
 
