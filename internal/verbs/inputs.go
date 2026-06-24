@@ -104,6 +104,39 @@ func loadCurrentBeads(ctx context.Context, d *db.DB, projectID int64) ([]beadSta
 	return out, rows.Err()
 }
 
+// debateRound is one completed audit/reconcile exchange, loaded from
+// audit_reconcile_rounds for inclusion in RECONCILE's round-2 context.
+type debateRound struct {
+	RoundNumber    int
+	CritiqueText   string // AUDIT's raw output for this round
+	Reconciliation string // RECONCILE's JSON output for this round
+	Outcome        string // 'converged' | 'disagreed_continuing' | 'escalated'
+}
+
+// loadDebateHistory returns all completed audit/reconcile rounds for projectID,
+// oldest first. Empty slice is normal on the first round.
+func loadDebateHistory(ctx context.Context, d *db.DB, projectID int64) ([]debateRound, error) {
+	rows, err := d.QueryContext(ctx, `
+		SELECT round_number, critique_text, reconciliation, outcome
+		FROM audit_reconcile_rounds
+		WHERE project_id = ?
+		ORDER BY round_number`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("load debate history: %w", err)
+	}
+	defer rows.Close()
+
+	var out []debateRound
+	for rows.Next() {
+		var r debateRound
+		if err := rows.Scan(&r.RoundNumber, &r.CritiqueText, &r.Reconciliation, &r.Outcome); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // latestAuditCritique returns the raw output and completed-round count for
 // the most recent valid AUDIT_DECOMPOSITION attempt in this project.
 //

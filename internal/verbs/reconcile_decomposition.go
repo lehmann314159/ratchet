@@ -20,6 +20,11 @@ Vague or blanket defenses ("this is by design", "not applicable") are not accept
 Your updated_beads field must contain the complete decomposition after all fixes are applied,
 even if no beads changed (so the next audit has the full current state).
 
+When previous debate rounds appear in the message, read them before responding — your
+answer must account for what was already argued. A second DISAGREE on a finding disputed
+in round 1 causes the full decomposition to escalate to human review; only disagree if
+you can state precisely why the finding is wrong.
+
 Respond with JSON only, no prose before or after:
 {
   "responses": [
@@ -58,6 +63,10 @@ func (h *ReconcileDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.C
 	if err != nil {
 		return "", err
 	}
+	history, err := loadDebateHistory(ctx, d, job.ProjectID)
+	if err != nil {
+		return "", err
+	}
 	model, err := loadVerbModel(ctx, d, job.ProjectID, db.VerbReconcileDecomposition)
 	if err != nil {
 		return "", err
@@ -67,6 +76,16 @@ func (h *ReconcileDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.C
 	h.lastCritique = critique
 	h.lastRoundsSoFar = roundsSoFar
 
+	return oc.Chat(ctx, model, []ollama.Message{
+		{Role: "system", Content: reconcileDecompositionSystemPrompt},
+		{Role: "user", Content: buildReconcileUserMsg(doc, beads, history, critique)},
+	}, nil)
+}
+
+// buildReconcileUserMsg constructs the user message for RECONCILE_DECOMPOSITION.
+// When previous debate rounds are present (round 2+), they are included so
+// the model can see what was already argued before responding to the new critique.
+func buildReconcileUserMsg(doc string, beads []beadState, history []debateRound, critique string) string {
 	var sb strings.Builder
 	sb.WriteString("## Design Document\n\n")
 	sb.WriteString(doc)
@@ -74,13 +93,38 @@ func (h *ReconcileDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.C
 	for _, b := range beads {
 		fmt.Fprintf(&sb, "### %s\n\n%s\n\n", b.Title, b.FullText)
 	}
-	sb.WriteString("## Critique to Reconcile\n\n")
-	sb.WriteString(critique)
 
-	return oc.Chat(ctx, model, []ollama.Message{
-		{Role: "system", Content: reconcileDecompositionSystemPrompt},
-		{Role: "user", Content: sb.String()},
-	}, nil)
+	if len(history) > 0 {
+		sb.WriteString("## Previous Debate History\n\n")
+		for _, r := range history {
+			fmt.Fprintf(&sb, "### Round %d (outcome: %s)\n\n", r.RoundNumber, r.Outcome)
+			sb.WriteString("**Audit Critique:**\n\n")
+			sb.WriteString(r.CritiqueText)
+			sb.WriteString("\n\n**Reconcile Response:**\n\n")
+			sb.WriteString(formatReconcileResponses(r.Reconciliation))
+			sb.WriteString("\n\n")
+		}
+	}
+
+	sb.WriteString("## Current Critique\n\n")
+	sb.WriteString(critique)
+	return sb.String()
+}
+
+// formatReconcileResponses renders a stored ReconcileDecompositionOutput JSON
+// as a human-readable bullet list for inclusion in the debate history.
+// Falls back to the raw string if parsing fails.
+func formatReconcileResponses(reconciliationJSON string) string {
+	var out ReconcileDecompositionOutput
+	if err := json.Unmarshal([]byte(reconciliationJSON), &out); err != nil {
+		return reconciliationJSON
+	}
+	var sb strings.Builder
+	for _, r := range out.Responses {
+		action := strings.ToUpper(strings.ReplaceAll(r.Action, "_", " "))
+		fmt.Fprintf(&sb, "- %s: %s — %s\n", r.BeadTitle, action, r.Reason)
+	}
+	return sb.String()
 }
 
 func (h *ReconcileDecomposition) Validate(raw string) (string, any) {
@@ -119,9 +163,10 @@ func (h *ReconcileDecomposition) Validate(raw string) (string, any) {
 // Commit writes the audit_reconcile_rounds row, applies any agree_and_fix
 // updates to bead_revisions, and enqueues the next job.
 //
-// Convergence detection (Step 4): the proper check is whether the next AUDIT
-// round raises genuinely new findings. For now, all-agree-and-fix declares
-// convergence; any disagree continues the loop (or escalates at the cap).
+// Convergence comparator (mechanical, non-verb per the architecture): all
+// agree_and_fix → converged; any disagree → continue the loop, or escalate
+// if the round cap is reached. RECONCILE is explicitly not given authority
+// to declare convergence itself — the comparator is this code, not a model.
 func (h *ReconcileDecomposition) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJob, parsed any) error {
 	out := parsed.(ReconcileDecompositionOutput)
 	now := time.Now().UTC().Format(time.RFC3339)
