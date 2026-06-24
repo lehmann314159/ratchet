@@ -13,6 +13,7 @@ import (
 	"ratchet/internal/execution"
 	"ratchet/internal/ollama"
 	"ratchet/internal/orchestrator"
+	"ratchet/internal/project"
 )
 
 func main() {
@@ -24,6 +25,9 @@ func main() {
 	// define its own flag set without conflicting with the orchestrator flags.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "new-project":
+			project.RunNewProjectMain(os.Args[2:])
+			return
 		case "monitor":
 			execution.RunMonitorMain(os.Args[2:])
 			return
