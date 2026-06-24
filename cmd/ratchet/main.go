@@ -10,18 +10,33 @@ import (
 	"syscall"
 
 	"ratchet/internal/db"
+	"ratchet/internal/execution"
 	"ratchet/internal/ollama"
 	"ratchet/internal/orchestrator"
 )
 
 func main() {
-	dbPath := flag.String("db", "ratchet.db", "path to the SQLite database")
-	ollamaURL := flag.String("ollama", "http://192.168.50.241:11434", "Ollama base URL")
-	flag.Parse()
-
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
+
+	// Subcommands are dispatched before flag.Parse so each subcommand can
+	// define its own flag set without conflicting with the orchestrator flags.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "monitor":
+			execution.RunMonitorMain(os.Args[2:])
+			return
+		case "execute-bead":
+			execution.RunExecuteBeadMain(os.Args[2:])
+			return
+		}
+	}
+
+	// Default: run the orchestrator.
+	dbPath := flag.String("db", "ratchet.db", "path to the SQLite database")
+	ollamaURL := flag.String("ollama", "http://192.168.50.241:11434", "Ollama base URL")
+	flag.Parse()
 
 	database, err := db.Open(*dbPath)
 	if err != nil {

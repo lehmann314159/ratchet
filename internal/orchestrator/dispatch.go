@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"ratchet/internal/db"
+	"ratchet/internal/execution"
 	"ratchet/internal/ollama"
 	"ratchet/internal/verbs"
 )
@@ -21,9 +23,28 @@ import (
 // Infrastructure errors (DB, network) are returned to the caller for
 // logging and backoff; they do not count as strikes.
 func dispatch(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[string]verbs.Handler, job *db.HandoffJob) error {
+	// EXECUTE_BEAD runs two subprocesses concurrently and manages its own
+	// lifecycle; it does not go through the one-shot Run/Validate/Commit path.
+	if job.Verb == db.VerbExecuteBead {
+		if err := markJobRunning(ctx, d, job.ID); err != nil {
+			return fmt.Errorf("mark running: %w", err)
+		}
+		if err := execution.RunExecutionWindow(ctx, d, oc.BaseURL, job); err != nil {
+			slog.Error("execution window failed",
+				"job_id", job.ID, "bead_id", job.BeadID, "error", err)
+			_, _ = d.ExecContext(ctx,
+				`UPDATE handoff_jobs SET status = 'failed_retry', updated_at = ? WHERE id = ?`,
+				time.Now().UTC().Format(time.RFC3339), job.ID)
+			return err
+		}
+		_, err := d.ExecContext(ctx,
+			`UPDATE handoff_jobs SET status = 'complete', updated_at = ? WHERE id = ?`,
+			time.Now().UTC().Format(time.RFC3339), job.ID)
+		return err
+	}
+
 	handler, ok := handlers[job.Verb]
 	if !ok {
-		// Unknown verb — e.g. EXECUTE_BEAD before Step 3. Leave job pending.
 		slog.Warn("no handler for verb — skipping", "verb", job.Verb, "job_id", job.ID)
 		return nil
 	}

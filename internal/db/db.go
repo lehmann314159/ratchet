@@ -15,6 +15,7 @@ var schemaSQL string
 // DB wraps sql.DB with Ratchet-specific helpers.
 type DB struct {
 	*sql.DB
+	Path string // filesystem path passed to Open; needed by subprocesses
 }
 
 // Open opens (or creates) the SQLite database at path and applies the schema.
@@ -29,7 +30,7 @@ func Open(path string) (*DB, error) {
 	// Single writer avoids "database is locked" errors; the orchestrator is
 	// single-process and doesn't need a connection pool.
 	raw.SetMaxOpenConns(1)
-	db := &DB{raw}
+	db := &DB{DB: raw, Path: path}
 	if err := db.applySchema(); err != nil {
 		_ = raw.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
