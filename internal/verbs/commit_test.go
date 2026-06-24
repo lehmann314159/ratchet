@@ -558,6 +558,81 @@ func TestAdjudicateNextExecutionCommitFullStop(t *testing.T) {
 	}
 }
 
+func TestAdjudicateNextExecutionCommitDeclareSuccess(t *testing.T) {
+	// Single bead declared success → bead 'succeeded', project 'complete'.
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "fixture: ADJUDICATE commit/declare_success single bead")
+	beadID, revID := seedBead(t, d, -1, "B01")
+	zero := 0
+	seedExecution(t, d, -1, beadID, revID, "success", &zero)
+
+	job := seedJob(t, d, -1, db.VerbAdjudicateNextExecution, sql.NullInt64{Int64: beadID, Valid: true})
+	out := AdjudicateNextExecutionOutput{
+		Trend:       "not_applicable",
+		BeadSpecFit: "not_applicable",
+		Reasoning:   "All exit criteria confirmed met: TestDeterminism, TestBoundary, TestStateAdvancement all passed.",
+		Decision:    "declare_success",
+	}
+	inTx(t, d, func(tx *sql.Tx) error {
+		return (&AdjudicateNextExecution{}).Commit(ctx, tx, job, out)
+	})
+
+	var beadStatus string
+	if err := d.QueryRowContext(ctx, `SELECT status FROM beads WHERE id = ?`, beadID).Scan(&beadStatus); err != nil {
+		t.Fatalf("bead row missing: %v", err)
+	}
+	if beadStatus != "succeeded" {
+		t.Errorf("bead status = %q, want succeeded", beadStatus)
+	}
+	// Only bead in project → project also complete.
+	var projStatus string
+	if err := d.QueryRowContext(ctx, `SELECT status FROM projects WHERE id = -1`).Scan(&projStatus); err != nil {
+		t.Fatalf("project row missing: %v", err)
+	}
+	if projStatus != "complete" {
+		t.Errorf("project status = %q, want complete", projStatus)
+	}
+	// adjudications row written.
+	if n := countRows(t, d, `SELECT COUNT(*) FROM adjudications WHERE bead_id = ?`, beadID); n != 1 {
+		t.Errorf("adjudications = %d, want 1", n)
+	}
+	// No next job enqueued for the bead (it is done).
+	if n := countRows(t, d, `SELECT COUNT(*) FROM handoff_jobs WHERE bead_id = ? AND verb != ?`, beadID, db.VerbAdjudicateNextExecution); n != 0 {
+		t.Errorf("unexpected next job after declare_success: %d", n)
+	}
+}
+
+func TestAdjudicateNextExecutionCommitDeclareSuccessPartial(t *testing.T) {
+	// Two beads: B01 declared success, B02 still pending. Project stays active.
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "fixture: ADJUDICATE commit/declare_success partial — project stays active")
+	beadID1, revID1 := seedBead(t, d, -1, "B01")
+	seedBead(t, d, -1, "B02")
+	zero := 0
+	seedExecution(t, d, -1, beadID1, revID1, "success", &zero)
+
+	job := seedJob(t, d, -1, db.VerbAdjudicateNextExecution, sql.NullInt64{Int64: beadID1, Valid: true})
+	out := AdjudicateNextExecutionOutput{
+		Trend:       "not_applicable",
+		BeadSpecFit: "not_applicable",
+		Reasoning:   "All exit criteria confirmed met for B01.",
+		Decision:    "declare_success",
+	}
+	inTx(t, d, func(tx *sql.Tx) error {
+		return (&AdjudicateNextExecution{}).Commit(ctx, tx, job, out)
+	})
+
+	var projStatus string
+	if err := d.QueryRowContext(ctx, `SELECT status FROM projects WHERE id = -1`).Scan(&projStatus); err != nil {
+		t.Fatalf("project row missing: %v", err)
+	}
+	if projStatus != "active" {
+		t.Errorf("project status = %q, want active (B02 still pending)", projStatus)
+	}
+}
+
 func TestAdjudicateNextExecutionCommitFullStopPartial(t *testing.T) {
 	// Two beads: one full_stopped, one still pending. Project must stay active.
 	d := openTestDB(t)

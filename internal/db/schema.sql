@@ -100,12 +100,12 @@ CREATE TABLE IF NOT EXISTS adjudications (
   project_id                INTEGER NOT NULL REFERENCES projects(id),
   bead_id                   INTEGER NOT NULL REFERENCES beads(id),
   execution_id              INTEGER NOT NULL REFERENCES executions(id),
-  trend                     TEXT    NOT NULL CHECK (trend IN ('same', 'narrower', 'unrelated')),
-  bead_spec_fit             TEXT    NOT NULL CHECK (bead_spec_fit IN ('bead_problem', 'execution_capability_problem')),
+  trend                     TEXT    NOT NULL CHECK (trend IN ('same', 'narrower', 'unrelated', 'not_applicable')),
+  bead_spec_fit             TEXT    NOT NULL CHECK (bead_spec_fit IN ('bead_problem', 'execution_capability_problem', 'not_applicable')),
   reasoning_text            TEXT    NOT NULL,
   attempt_budget_cost       REAL    NOT NULL,
   monitor_escalation_status INTEGER NOT NULL,  -- BOOLEAN: 0/1
-  decision                  TEXT    NOT NULL CHECK (decision IN ('execute_as_is', 'execute_revised', 'full_stop')),
+  decision                  TEXT    NOT NULL CHECK (decision IN ('execute_as_is', 'execute_revised', 'full_stop', 'declare_success')),
   created_at                TIMESTAMP NOT NULL
 );
 

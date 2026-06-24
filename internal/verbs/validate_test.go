@@ -225,6 +225,32 @@ func TestAdjudicateNextExecutionValidate(t *testing.T) {
 			`{"trend":"same","bead_spec_fit":"bead_problem","reasoning":"x","decision":"execute_revised","revised_bead":{"title":"B01","full_text":"x","execution_budget":60,"monitor_override":"maybe"}}`,
 			false,
 		},
+		// declare_success: trend and bead_spec_fit must both be "not_applicable".
+		{
+			"valid declare_success",
+			`{"trend":"not_applicable","bead_spec_fit":"not_applicable","reasoning":"All exit criteria confirmed met: TestDeterminism, TestBoundary, TestStateAdvancement all passed.","decision":"declare_success"}`,
+			true,
+		},
+		{
+			"declare_success: trend not not_applicable",
+			`{"trend":"same","bead_spec_fit":"not_applicable","reasoning":"exit criteria met","decision":"declare_success"}`,
+			false,
+		},
+		{
+			"declare_success: bead_spec_fit not not_applicable",
+			`{"trend":"not_applicable","bead_spec_fit":"bead_problem","reasoning":"exit criteria met","decision":"declare_success"}`,
+			false,
+		},
+		{
+			"not_applicable trend without declare_success",
+			`{"trend":"not_applicable","bead_spec_fit":"execution_capability_problem","reasoning":"x","decision":"execute_as_is"}`,
+			false,
+		},
+		{
+			"not_applicable bead_spec_fit without declare_success",
+			`{"trend":"same","bead_spec_fit":"not_applicable","reasoning":"x","decision":"execute_as_is"}`,
+			false,
+		},
 		// Consistency check — the Exp-5 failure mode: declared bead_problem but reasoning
 		// describes execution capability. Any of these phrases in reasoning must fail.
 		{

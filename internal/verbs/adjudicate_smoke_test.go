@@ -346,8 +346,8 @@ func TestAdjudicateLiveModelDP3(t *testing.T) {
 	switch out.Decision {
 	case "execute_as_is", "execute_revised":
 		nextVerb = db.VerbExecuteBead
-	case "full_stop":
-		nextVerb = "" // no new job; bead is full_stopped
+	case "full_stop", "declare_success":
+		nextVerb = "" // no new job; bead is terminal
 	}
 	if nextVerb != "" {
 		if n := countRows(t, d,

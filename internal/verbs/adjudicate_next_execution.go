@@ -12,33 +12,39 @@ import (
 	"ratchet/internal/ollama"
 )
 
-const adjudicateNextExecutionSystemPrompt = `You make a three-way decision after a completed execution attempt.
+const adjudicateNextExecutionSystemPrompt = `You make a decision after a completed execution attempt.
 
-Two output fields are REQUIRED and will be checked for internal consistency against your reasoning:
+Two output fields are REQUIRED. For retry and stop decisions, they are checked for internal
+consistency against your reasoning. For declare_success, both must be "not_applicable":
 
-  trend: "same"     — the failure mode this attempt is the same as or a recurrence of the previous one
-         "narrower" — the same root area but the failure scope has meaningfully narrowed
-         "unrelated"— a genuinely different failure mode from the previous attempt
+  trend: "same"           — the failure mode this attempt is the same as or a recurrence of the previous one
+         "narrower"       — the same root area but the failure scope has meaningfully narrowed
+         "unrelated"      — a genuinely different failure mode from the previous attempt
+         "not_applicable" — use only when decision is "declare_success"
 
-  bead_spec_fit: "bead_problem"                  — the Bead specification is wrong, ambiguous, or missing detail
-                 "execution_capability_problem"   — the spec is correct but execution failed to implement it
+  bead_spec_fit: "bead_problem"                — the Bead specification is wrong, ambiguous, or missing detail
+                 "execution_capability_problem" — the spec is correct but execution failed to implement it
+                 "not_applicable"              — use only when decision is "declare_success"
 
-If your declared trend or bead_spec_fit contradicts your own reasoning, the output is treated as invalid.
+If your declared trend or bead_spec_fit contradicts your own reasoning (on retry/stop decisions),
+the output is treated as invalid.
 
 decision:
-  "execute_as_is" — retry the Bead without changes
+  "execute_as_is"   — retry the Bead without changes
   "execute_revised" — retry with a revised Bead (include revised_bead in your output)
-  "full_stop"     — stop; the project must restart from DECOMPOSE_SPEC
+  "full_stop"       — stop; the project must restart from DECOMPOSE_SPEC
+  "declare_success" — the Bead's exit criteria are confirmed met by the mechanical findings;
+                      no further execution needed. Set trend and bead_spec_fit to "not_applicable".
 
 If decision is "execute_revised", include a revised_bead with all required fields
 (execution_budget and monitor_override must be explicitly stated, not inherited silently).
 
 Respond with JSON only, no prose before or after:
 {
-  "trend": "same" | "narrower" | "unrelated",
-  "bead_spec_fit": "bead_problem" | "execution_capability_problem",
-  "reasoning": "<your reasoning — must be consistent with trend and bead_spec_fit>",
-  "decision": "execute_as_is" | "execute_revised" | "full_stop",
+  "trend": "same" | "narrower" | "unrelated" | "not_applicable",
+  "bead_spec_fit": "bead_problem" | "execution_capability_problem" | "not_applicable",
+  "reasoning": "<your reasoning — for retry/stop decisions must be consistent with trend and bead_spec_fit>",
+  "decision": "execute_as_is" | "execute_revised" | "full_stop" | "declare_success",
   "revised_bead": {
     "title": "...",
     "full_text": "...",
@@ -255,23 +261,23 @@ func (h *AdjudicateNextExecution) Validate(raw string) (string, any) {
 		return fmt.Sprintf("malformed: JSON parse error: %v", err), nil
 	}
 
-	validTrends := map[string]bool{"same": true, "narrower": true, "unrelated": true}
+	validTrends := map[string]bool{"same": true, "narrower": true, "unrelated": true, "not_applicable": true}
 	if !validTrends[out.Trend] {
-		return fmt.Sprintf("malformed: trend must be \"same\", \"narrower\", or \"unrelated\", got %q", out.Trend), nil
+		return fmt.Sprintf("malformed: trend must be \"same\", \"narrower\", \"unrelated\", or \"not_applicable\", got %q", out.Trend), nil
 	}
 
-	validFits := map[string]bool{"bead_problem": true, "execution_capability_problem": true}
+	validFits := map[string]bool{"bead_problem": true, "execution_capability_problem": true, "not_applicable": true}
 	if !validFits[out.BeadSpecFit] {
-		return fmt.Sprintf("malformed: bead_spec_fit must be \"bead_problem\" or \"execution_capability_problem\", got %q", out.BeadSpecFit), nil
+		return fmt.Sprintf("malformed: bead_spec_fit must be \"bead_problem\", \"execution_capability_problem\", or \"not_applicable\", got %q", out.BeadSpecFit), nil
 	}
 
 	if strings.TrimSpace(out.Reasoning) == "" {
 		return "malformed: reasoning is empty", nil
 	}
 
-	validDecisions := map[string]bool{"execute_as_is": true, "execute_revised": true, "full_stop": true}
+	validDecisions := map[string]bool{"execute_as_is": true, "execute_revised": true, "full_stop": true, "declare_success": true}
 	if !validDecisions[out.Decision] {
-		return fmt.Sprintf("malformed: decision must be \"execute_as_is\", \"execute_revised\", or \"full_stop\", got %q", out.Decision), nil
+		return fmt.Sprintf("malformed: decision must be \"execute_as_is\", \"execute_revised\", \"full_stop\", or \"declare_success\", got %q", out.Decision), nil
 	}
 
 	if out.Decision == "execute_revised" {
@@ -286,10 +292,27 @@ func (h *AdjudicateNextExecution) Validate(raw string) (string, any) {
 		}
 	}
 
-	// Consistency check: declared bead_spec_fit vs. stated reasoning.
-	// Zero-strike tolerance means this is a validation failure, not a judgment call.
-	if ok, reason := checkConsistency(out.BeadSpecFit, out.Reasoning); !ok {
-		return "malformed: consistency check failed: " + reason, nil
+	if out.Decision == "declare_success" {
+		// declare_success requires both classification fields to be "not_applicable" —
+		// there is no failure to attribute when the bead succeeded.
+		if out.Trend != "not_applicable" {
+			return fmt.Sprintf("malformed: decision is declare_success but trend is %q — must be \"not_applicable\"", out.Trend), nil
+		}
+		if out.BeadSpecFit != "not_applicable" {
+			return fmt.Sprintf("malformed: decision is declare_success but bead_spec_fit is %q — must be \"not_applicable\"", out.BeadSpecFit), nil
+		}
+	} else {
+		// For retry/stop decisions, "not_applicable" is forbidden and the consistency
+		// check applies (zero-strike tolerance — a mismatch is a validation failure).
+		if out.Trend == "not_applicable" {
+			return "malformed: trend \"not_applicable\" is only valid when decision is \"declare_success\"", nil
+		}
+		if out.BeadSpecFit == "not_applicable" {
+			return "malformed: bead_spec_fit \"not_applicable\" is only valid when decision is \"declare_success\"", nil
+		}
+		if ok, reason := checkConsistency(out.BeadSpecFit, out.Reasoning); !ok {
+			return "malformed: consistency check failed: " + reason, nil
+		}
 	}
 
 	return "valid", out
@@ -383,22 +406,35 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 			`UPDATE beads SET status = 'full_stopped' WHERE id = ?`, beadID); err != nil {
 			return err
 		}
-		// Check if all beads for this project are now full_stopped or succeeded.
-		var activeBeads int
-		if err := tx.QueryRowContext(ctx, `
-			SELECT COUNT(*) FROM beads
-			WHERE project_id = ? AND status NOT IN ('full_stopped', 'succeeded')`,
-			job.ProjectID,
-		).Scan(&activeBeads); err != nil {
-			return err
+		return h.checkProjectTerminal(ctx, tx, job.ProjectID, "full_stopped", now)
+
+	case "declare_success":
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE beads SET status = 'succeeded' WHERE id = ?`, beadID); err != nil {
+			return fmt.Errorf("mark bead succeeded: %w", err)
 		}
-		if activeBeads == 0 {
-			_, err := tx.ExecContext(ctx,
-				`UPDATE projects SET status = 'full_stopped', updated_at = ? WHERE id = ?`,
-				now, job.ProjectID)
-			return err
-		}
-		return nil
+		return h.checkProjectTerminal(ctx, tx, job.ProjectID, "complete", now)
+	}
+	return nil
+}
+
+// checkProjectTerminal checks whether all beads in the project have reached a
+// terminal state ('full_stopped' or 'succeeded'). If so, it marks the project
+// with terminalStatus. Called from both the full_stop and declare_success branches.
+func (h *AdjudicateNextExecution) checkProjectTerminal(ctx context.Context, tx *sql.Tx, projectID int64, terminalStatus, now string) error {
+	var activeBeads int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM beads
+		WHERE project_id = ? AND status NOT IN ('full_stopped', 'succeeded')`,
+		projectID,
+	).Scan(&activeBeads); err != nil {
+		return fmt.Errorf("count active beads: %w", err)
+	}
+	if activeBeads == 0 {
+		_, err := tx.ExecContext(ctx,
+			`UPDATE projects SET status = ?, updated_at = ? WHERE id = ?`,
+			terminalStatus, now, projectID)
+		return err
 	}
 	return nil
 }
