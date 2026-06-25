@@ -37,6 +37,16 @@ decision:
   "declare_success" — the Bead's exit criteria are confirmed met by the mechanical findings;
                       no further execution needed. Set trend and bead_spec_fit to "not_applicable".
 
+Guidance on choosing between execute_as_is and execute_revised when bead_spec_fit is
+"execution_capability_problem":
+  - If the agent failed in the same way and the spec already addresses that failure
+    mode clearly, execute_as_is is appropriate.
+  - If the agent has failed multiple times with incoherent or worsening behavior
+    (different wrong approaches each attempt, no directional progress), prefer
+    execute_revised with more explicit step-by-step implementation guidance — even
+    when the spec is technically correct, a more prescriptive spec can unblock an
+    agent that cannot infer the right approach from a high-level description.
+
 If decision is "execute_revised", include a revised_bead with all required fields
 (execution_budget and monitor_override must be explicitly stated, not inherited silently).
 

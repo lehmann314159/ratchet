@@ -12,10 +12,22 @@ import (
 	"ratchet/internal/ollama"
 )
 
-const decomposeSpecSystemPrompt = `You decompose a design document into a list of Beads — well-scoped, independently executable units of work, each with a clear done-condition.
+func decomposeSpecSystemPrompt(budgetDefault int) string {
+	return fmt.Sprintf(`You decompose a design document into a list of Beads — well-scoped, independently executable units of work, each with a clear done-condition.
+
+Each Bead must be independently executable: it must not assume that code written by
+other Beads already exists or is in a particular state. For small projects where all
+code lives in a single file, prefer fewer, larger Beads that each produce a complete,
+runnable state of the codebase rather than many fine-grained Beads that each modify
+the same file in sequence. A Bead that only makes sense after another Bead has run
+is not a valid decomposition.
 
 For every Bead you issue you must set:
-- execution_budget: integer seconds, the maximum wall-clock time for one execution attempt
+- execution_budget: integer seconds, the maximum wall-clock time for one execution attempt.
+  The project default is %d seconds — use this as your baseline. Each execution involves
+  multiple model calls plus test runs, so budgets below 60 seconds are never appropriate.
+  Adjust up for complex Beads (many interacting constraints, large test suites) or down
+  for trivial ones, but stay within an order of magnitude of the default.
 - monitor_override: "honor" (MONITOR_EXECUTION may terminate this Bead on loop detection) or "ignore" (loop detection signal is suppressed — use only for legitimately repetitive work)
 
 Surface ambiguities in the design doc explicitly in the ambiguities field. Do not silently resolve them.
@@ -31,7 +43,8 @@ Respond with JSON only, no prose before or after:
     }
   ],
   "ambiguities": ["<any unresolved ambiguities in the design doc>"]
-}`
+}`, budgetDefault)
+}
 
 type DecomposeSpec struct{}
 
@@ -46,8 +59,12 @@ func (h *DecomposeSpec) Run(ctx context.Context, d *db.DB, oc *ollama.Client, jo
 	if err != nil {
 		return "", err
 	}
+	project, err := loadProject(ctx, d, job.ProjectID)
+	if err != nil {
+		return "", err
+	}
 	return oc.Chat(ctx, model, []ollama.Message{
-		{Role: "system", Content: decomposeSpecSystemPrompt},
+		{Role: "system", Content: decomposeSpecSystemPrompt(project.ExecutionBudgetDefault)},
 		{Role: "user", Content: doc},
 	}, nil)
 }
