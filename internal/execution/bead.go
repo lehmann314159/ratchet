@@ -23,10 +23,10 @@ Tools:
 - run_command(command): run a shell command in the project root directory
 
 Process:
-1. Implement the specification, including all code and unit tests the Bead requires.
-2. Run the tests with run_command.
-3. If tests fail, fix the code and run again. Repeat until all tests pass.
-4. When all exit criteria are confirmed met, send a final message stating this. Do not call further tools.
+1. Implement exactly what the Bead specification asks for — nothing more, nothing less.
+   Do not write tests, documentation, or other artifacts unless the specification explicitly requires them.
+2. Verify your work by running each item in the Exit Criteria section. These are your done condition.
+3. When every exit criterion passes, send a final message confirming this. Do not call further tools.
 
 Use relative paths for all file operations. If you cannot make progress, explain why in your final message.`
 
@@ -96,9 +96,10 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 		return fmt.Errorf("load execution %d: %w", execID, err)
 	}
 
-	// The bead's full_text is a JSON-encoded ParsedBead; extract the spec text.
+	// The bead's full_text is a JSON-encoded ParsedBead; extract the spec and exit criteria.
 	var parsedBead struct {
-		FullText string `json:"full_text"`
+		FullText     string   `json:"full_text"`
+		ExitCriteria []string `json:"exit_criteria"`
 	}
 	if err := json.Unmarshal([]byte(beadFullTextJSON), &parsedBead); err != nil {
 		return fmt.Errorf("parse bead full_text: %w", err)
@@ -138,7 +139,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	tools := toolDefinitions()
 	messages := []ollama.Message{
 		{Role: "system", Content: executeBeadSystemPrompt},
-		{Role: "user", Content: parsedBead.FullText},
+		{Role: "user", Content: buildBeadUserMsg(parsedBead.FullText, parsedBead.ExitCriteria)},
 	}
 
 	for turn := 1; ; turn++ {
@@ -260,6 +261,20 @@ func stubLine(mode string, step int) string {
 		}
 		return fmt.Sprintf("[%s] step %d: working...", ts, step)
 	}
+}
+
+// buildBeadUserMsg constructs the user message for the EXECUTE_BEAD agent.
+// Exit criteria are presented as a numbered checklist so the agent has an
+// unambiguous done condition distinct from the prose spec.
+func buildBeadUserMsg(specText string, exitCriteria []string) string {
+	if len(exitCriteria) == 0 {
+		return specText
+	}
+	msg := specText + "\n\n## Exit Criteria\n\nYour done condition is exactly: each of the following checks passes. Verify them before sending your final message.\n\n"
+	for i, c := range exitCriteria {
+		msg += fmt.Sprintf("%d. %s\n", i+1, c)
+	}
+	return msg
 }
 
 func writeLine(f *os.File, line string) {

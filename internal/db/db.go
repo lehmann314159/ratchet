@@ -9,6 +9,20 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// columnMigration describes a column that must exist in a table.
+// Used by applyMigrations to backfill columns added after a DB was created.
+type columnMigration struct {
+	table  string
+	column string
+	def    string // SQL type + constraints, e.g. "INTEGER NOT NULL DEFAULT 5"
+}
+
+// columnMigrations is the ordered list of columns added after the initial schema.
+// Append here whenever a new column is added to an existing table in schema.sql.
+var columnMigrations = []columnMigration{
+	{"projects", "max_execution_attempts", "INTEGER NOT NULL DEFAULT 5"},
+}
+
 //go:embed schema.sql
 var schemaSQL string
 
@@ -35,6 +49,10 @@ func Open(path string) (*DB, error) {
 		_ = raw.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := db.applyMigrations(); err != nil {
+		_ = raw.Close()
+		return nil, fmt.Errorf("apply migrations: %w", err)
+	}
 	return db, nil
 }
 
@@ -43,6 +61,42 @@ func (db *DB) applySchema() error {
 	for _, stmt := range splitSQL(schemaSQL) {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("%q: %w", truncate(stmt, 60), err)
+		}
+	}
+	return nil
+}
+
+// applyMigrations adds any columns in columnMigrations that are absent from
+// the live table. Safe to run on both new and existing databases.
+func (db *DB) applyMigrations() error {
+	for _, m := range columnMigrations {
+		rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", m.table))
+		if err != nil {
+			return fmt.Errorf("table_info %s: %w", m.table, err)
+		}
+		found := false
+		for rows.Next() {
+			var cid, notnull, pk int
+			var name, typ string
+			var dflt sql.NullString
+			if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan table_info %s: %w", m.table, err)
+			}
+			if name == m.column {
+				found = true
+				break
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("table_info %s rows: %w", m.table, err)
+		}
+		if !found {
+			stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", m.table, m.column, m.def)
+			if _, err := db.Exec(stmt); err != nil {
+				return fmt.Errorf("migrate %s.%s: %w", m.table, m.column, err)
+			}
 		}
 	}
 	return nil

@@ -32,11 +32,11 @@ Respond with JSON only, no prose before or after:
       "bead_title": "<title of the affected Bead>",
       "action": "agree_and_fix" | "disagree",
       "reason": "<your reasoning>",
-      "updated_bead": { "title": "...", "full_text": "...", "execution_budget": <int>, "monitor_override": "honor"|"ignore" }
+      "updated_bead": { "title": "...", "full_text": "...", "execution_budget": <int>, "monitor_override": "honor"|"ignore", "output_files": ["<file>", ...], "exit_criteria": ["<runnable check>", ...] }
     }
   ],
   "updated_beads": [
-    { "title": "...", "full_text": "...", "execution_budget": <int>, "monitor_override": "honor"|"ignore" }
+    { "title": "...", "full_text": "...", "execution_budget": <int>, "monitor_override": "honor"|"ignore", "output_files": ["<file>", ...], "exit_criteria": ["<runnable check>", ...] }
   ]
 }`
 
@@ -155,6 +155,12 @@ func (h *ReconcileDecomposition) Validate(raw string) (string, any) {
 		}
 		if b.MonitorOverride != "honor" && b.MonitorOverride != "ignore" {
 			return fmt.Sprintf("malformed: updated_beads[%d] (%s) monitor_override must be \"honor\" or \"ignore\", got %q", i, b.Title, b.MonitorOverride), nil
+		}
+		if len(b.OutputFiles) == 0 {
+			return fmt.Sprintf("malformed: updated_beads[%d] (%s) output_files is missing or empty", i, b.Title), nil
+		}
+		if len(b.ExitCriteria) == 0 {
+			return fmt.Sprintf("malformed: updated_beads[%d] (%s) exit_criteria is missing or empty", i, b.Title), nil
 		}
 	}
 	return "valid", out

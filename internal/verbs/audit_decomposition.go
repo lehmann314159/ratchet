@@ -12,12 +12,27 @@ import (
 	"ratchet/internal/ollama"
 )
 
-const auditDecompositionSystemPrompt = `You review a decomposition against its source design document, checking for drift.
+const auditDecompositionSystemPrompt = `You review a decomposition against its source design document, checking for two things:
+
+1. Correctness drift: does each Bead accurately reflect the design document? For each finding,
+   cite the specific Bead and the exact design-doc text it drifts from.
+
+2. Independence: compare the output_files lists across all Beads. If two or more Beads share a
+   file in output_files, they are potentially non-independent. Use judgment: if both Beads clearly
+   document a sequential dependency (e.g. Bead B explicitly states it builds on code written by
+   Bead A), the overlap may be acceptable. If the overlap is undocumented or avoidable — flag it.
+   A finding for an independence violation should name all the affected Beads and the shared file(s),
+   and suggest whether a merge or a clearer sequential dependency would resolve it.
+   Use "N/A — structural" for design_doc_reference on independence findings.
+
+3. Exit criteria quality: check each Bead's exit_criteria list. Each entry must be a concrete,
+   runnable check — a shell command, a test invocation, or a specific measurable output. Flag any
+   entry that is vague ("review the code"), untestable ("ensure correctness"), or out of scope for
+   what the Bead actually produces. A Bead with no runnable exit criterion is a structural problem:
+   it likely cannot be executed independently and should be merged with a related Bead.
+
 You are an independent reviewer — you did not author this decomposition.
-
-For each finding, cite the specific Bead and the exact design-doc text it drifts from.
 A clean decomposition with no findings is a valid outcome. Do not fabricate findings on clean material.
-
 Your contract does not change across debate rounds — same correctness criterion every time.
 
 Respond with JSON only, no prose before or after:
@@ -25,8 +40,8 @@ Respond with JSON only, no prose before or after:
   "findings": [
     {
       "bead_title": "<title of the affected Bead>",
-      "issue": "<specific description of the drift>",
-      "design_doc_reference": "<exact quote or section reference from the design doc>"
+      "issue": "<specific description of the drift or independence violation>",
+      "design_doc_reference": "<exact quote or section reference, or \"N/A — structural\" for independence findings>"
     }
   ],
   "overall_verdict": "no_issues" | "issues_found"
@@ -64,6 +79,16 @@ func buildAuditUserMsg(doc string, beads []beadState) string {
 	sb.WriteString("\n\n## Decomposition\n\n")
 	for _, b := range beads {
 		fmt.Fprintf(&sb, "### %s\n\n%s\n\n", b.Title, b.FullText)
+		if len(b.OutputFiles) > 0 {
+			fmt.Fprintf(&sb, "**Output files:** %s\n\n", strings.Join(b.OutputFiles, ", "))
+		}
+		if len(b.ExitCriteria) > 0 {
+			sb.WriteString("**Exit criteria:**\n")
+			for _, c := range b.ExitCriteria {
+				fmt.Fprintf(&sb, "- %s\n", c)
+			}
+			sb.WriteString("\n")
+		}
 	}
 	return sb.String()
 }

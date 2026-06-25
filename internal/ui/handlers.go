@@ -137,6 +137,27 @@ func (s *server) handleClose(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/escalations", http.StatusSeeOther)
 }
 
+// --- Close Project ---
+
+func (s *server) handleCloseProject(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid project id", http.StatusBadRequest)
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err = s.db.ExecContext(r.Context(),
+		`UPDATE projects SET status = 'full_stopped', updated_at = ? WHERE id = ? AND status = 'active'`,
+		now, id)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("close project failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	_, _ = s.db.ExecContext(r.Context(),
+		`UPDATE beads SET status = 'full_stopped' WHERE project_id = ? AND status = 'executing'`, id)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
 // --- Trace viewer ---
 
 type traceData struct {

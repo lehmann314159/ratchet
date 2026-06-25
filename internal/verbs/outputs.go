@@ -4,10 +4,12 @@ package verbs
 // ADJUDICATE_NEXT_EXECUTION. Both verbs share this type because the required
 // fields (execution_budget, monitor_override) are identical in both contexts.
 type ParsedBead struct {
-	Title           string `json:"title"`
-	FullText        string `json:"full_text"`
-	ExecutionBudget int    `json:"execution_budget"`
-	MonitorOverride string `json:"monitor_override"` // "honor" | "ignore"
+	Title           string   `json:"title"`
+	FullText        string   `json:"full_text"`
+	ExecutionBudget int      `json:"execution_budget"`
+	MonitorOverride string   `json:"monitor_override"` // "honor" | "ignore"
+	OutputFiles     []string `json:"output_files"`     // files this bead writes; drives independence check
+	ExitCriteria    []string `json:"exit_criteria"`    // concrete, runnable checks that define done
 }
 
 // --- DECOMPOSE_SPEC ---

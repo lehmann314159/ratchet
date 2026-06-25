@@ -60,7 +60,9 @@ Respond with JSON only, no prose before or after:
     "title": "...",
     "full_text": "...",
     "execution_budget": <int>,
-    "monitor_override": "honor" | "ignore"
+    "monitor_override": "honor" | "ignore",
+    "output_files": ["<file>", ...],
+    "exit_criteria": ["<runnable check>", ...]
   }
 }`
 
@@ -306,6 +308,12 @@ func (h *AdjudicateNextExecution) Validate(raw string) (string, any) {
 		}
 		if out.RevisedBead.MonitorOverride != "honor" && out.RevisedBead.MonitorOverride != "ignore" {
 			return fmt.Sprintf("malformed: revised_bead monitor_override must be \"honor\" or \"ignore\", got %q", out.RevisedBead.MonitorOverride), nil
+		}
+		if len(out.RevisedBead.OutputFiles) == 0 {
+			return "malformed: revised_bead output_files is missing or empty", nil
+		}
+		if len(out.RevisedBead.ExitCriteria) == 0 {
+			return "malformed: revised_bead exit_criteria is missing or empty", nil
 		}
 	}
 

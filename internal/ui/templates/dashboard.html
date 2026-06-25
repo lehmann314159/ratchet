@@ -8,7 +8,13 @@
 {{define "status"}}
 <div hx-get="/hx/status" hx-trigger="every 5s" hx-swap="outerHTML">
 {{if .Project}}
-<h1>{{.Project.Label}} <span class="status {{.Project.Status}}">{{.Project.Status}}</span></h1>
+<h1>{{.Project.Label}} <span class="status {{.Project.Status}}">{{.Project.Status}}</span>
+{{if eq .Project.Status "active"}}
+<form method="post" action="/projects/{{.Project.ID}}/close" style="display:inline;margin-left:1rem">
+  <button type="submit" class="action-close">Close Project</button>
+</form>
+{{end}}
+</h1>
 <p class="meta">{{.Project.FolderPath}}/{{.Project.DesignDoc}}</p>
 
 <div class="section">

@@ -69,6 +69,8 @@ type beadState struct {
 	BeadID          int64
 	Title           string
 	FullText        string
+	OutputFiles     []string
+	ExitCriteria    []string
 	ExecutionBudget int
 	MonitorOverride string
 	RevisionNumber  int
@@ -94,11 +96,18 @@ func loadCurrentBeads(ctx context.Context, d *db.DB, projectID int64) ([]beadSta
 			return nil, err
 		}
 		var tmp struct {
-			Title string `json:"title"`
+			Title        string   `json:"title"`
+			OutputFiles  []string `json:"output_files"`
+			ExitCriteria []string `json:"exit_criteria"`
 		}
-		if json.Unmarshal([]byte(s.FullText), &tmp) == nil && tmp.Title != "" {
-			s.Title = tmp.Title
-		} else {
+		if json.Unmarshal([]byte(s.FullText), &tmp) == nil {
+			if tmp.Title != "" {
+				s.Title = tmp.Title
+			}
+			s.OutputFiles = tmp.OutputFiles
+			s.ExitCriteria = tmp.ExitCriteria
+		}
+		if s.Title == "" {
 			s.Title = fmt.Sprintf("bead-%d", s.BeadID)
 		}
 		out = append(out, s)

@@ -29,6 +29,16 @@ For every Bead you issue you must set:
   Adjust up for complex Beads (many interacting constraints, large test suites) or down
   for trivial ones, but stay within an order of magnitude of the default.
 - monitor_override: "honor" (MONITOR_EXECUTION may terminate this Bead on loop detection) or "ignore" (loop detection signal is suppressed — use only for legitimately repetitive work)
+- output_files: a non-empty list of file paths this Bead will create or modify (e.g. ["main.go", "go.mod"]).
+  This field is required and drives the independence check in AUDIT_DECOMPOSITION: if two Beads share
+  a file in output_files without a clearly documented sequential dependency, AUDIT will flag it as
+  a non-independence violation. Be precise — list only files this Bead actually writes.
+- exit_criteria: a non-empty list of concrete, runnable checks that define when this Bead is done.
+  Each entry must be a specific, executable verification step — a shell command with expected output,
+  a test that must pass, or a measurable observable result. Vague statements ("review the code",
+  "ensure correctness") are not acceptable. If you cannot write a runnable exit criterion for a Bead,
+  that is a signal the Bead is scoped too narrowly to be independently verifiable — merge it with
+  a related Bead that produces a testable artifact.
 
 Surface ambiguities in the design doc explicitly in the ambiguities field. Do not silently resolve them.
 
@@ -39,7 +49,9 @@ Respond with JSON only, no prose before or after:
       "title": "<short identifier, unique within this decomposition>",
       "full_text": "<complete, self-contained Bead specification>",
       "execution_budget": <integer seconds>,
-      "monitor_override": "honor" | "ignore"
+      "monitor_override": "honor" | "ignore",
+      "output_files": ["<file path>", ...],
+      "exit_criteria": ["<runnable check>", ...]
     }
   ],
   "ambiguities": ["<any unresolved ambiguities in the design doc>"]
@@ -89,6 +101,12 @@ func (h *DecomposeSpec) Validate(raw string) (string, any) {
 		}
 		if b.MonitorOverride != "honor" && b.MonitorOverride != "ignore" {
 			return fmt.Sprintf("malformed: bead[%d] (%s) monitor_override must be \"honor\" or \"ignore\", got %q", i, b.Title, b.MonitorOverride), nil
+		}
+		if len(b.OutputFiles) == 0 {
+			return fmt.Sprintf("malformed: bead[%d] (%s) output_files is missing or empty", i, b.Title), nil
+		}
+		if len(b.ExitCriteria) == 0 {
+			return fmt.Sprintf("malformed: bead[%d] (%s) exit_criteria is missing or empty", i, b.Title), nil
 		}
 	}
 	return "valid", out
