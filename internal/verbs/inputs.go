@@ -31,7 +31,8 @@ func loadProject(ctx context.Context, d *db.DB, projectID int64) (*db.Project, e
 		SELECT id, label, folder_path, design_doc_path, status,
 		       recovered_from_project_id,
 		       monitor_override_default, execution_budget_default,
-		       audit_reconcile_round_cap, created_at, updated_at
+		       audit_reconcile_round_cap, max_execution_attempts,
+		       created_at, updated_at
 		FROM projects WHERE id = ?`, projectID)
 	p := &db.Project{}
 	var createdAt, updatedAt string
@@ -39,7 +40,8 @@ func loadProject(ctx context.Context, d *db.DB, projectID int64) (*db.Project, e
 		&p.ID, &p.Label, &p.FolderPath, &p.DesignDocPath, &p.Status,
 		&p.RecoveredFromProjectID,
 		&p.MonitorOverrideDefault, &p.ExecutionBudgetDefault,
-		&p.AuditReconcileRoundCap, &createdAt, &updatedAt,
+		&p.AuditReconcileRoundCap, &p.MaxExecutionAttempts,
+		&createdAt, &updatedAt,
 	); err != nil {
 		return nil, fmt.Errorf("load project %d: %w", projectID, err)
 	}

@@ -558,6 +558,40 @@ func TestAdjudicateNextExecutionCommitFullStop(t *testing.T) {
 	}
 }
 
+func TestAdjudicateNextExecutionCommitExecutionCap(t *testing.T) {
+	// Cap=2, bead already has 2 executions — execute_as_is must escalate instead of retry.
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "fixture: ADJUDICATE execution cap")
+	_, _ = d.ExecContext(ctx, `UPDATE projects SET max_execution_attempts = 2 WHERE id = -1`)
+	beadID, revID := seedBead(t, d, -1, "B01")
+	zero := 0
+	seedExecution(t, d, -1, beadID, revID, "timeout", &zero)
+	seedExecution(t, d, -1, beadID, revID, "timeout", &zero)
+
+	job := seedJob(t, d, -1, db.VerbAdjudicateNextExecution, sql.NullInt64{Int64: beadID, Valid: true})
+	out := AdjudicateNextExecutionOutput{
+		Trend: "same", BeadSpecFit: "execution_capability_problem",
+		Reasoning: "timed out twice, runner could not complete the implementation",
+		Decision:  "execute_as_is",
+	}
+	inTx(t, d, func(tx *sql.Tx) error {
+		return (&AdjudicateNextExecution{}).Commit(ctx, tx, job, out)
+	})
+
+	// Job must be escalated, not enqueue another EXECUTE_BEAD.
+	var status string
+	if err := d.QueryRowContext(ctx, `SELECT status FROM handoff_jobs WHERE id = ?`, job.ID).Scan(&status); err != nil {
+		t.Fatalf("job row missing: %v", err)
+	}
+	if status != "escalated" {
+		t.Errorf("job status = %q, want escalated (cap reached)", status)
+	}
+	if n := countRows(t, d, `SELECT COUNT(*) FROM handoff_jobs WHERE verb = ? AND bead_id = ?`, db.VerbExecuteBead, beadID); n != 0 {
+		t.Errorf("unexpected EXECUTE_BEAD job enqueued after cap reached")
+	}
+}
+
 func TestAdjudicateNextExecutionCommitDeclareSuccess(t *testing.T) {
 	// Single bead declared success → bead 'succeeded', project 'complete'.
 	d := openTestDB(t)

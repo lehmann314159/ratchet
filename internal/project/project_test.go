@@ -42,6 +42,7 @@ func TestCreateHappyPath(t *testing.T) {
 		DesignDocPath:   designDoc,
 		MonitorOverride: "honor",
 		ExecutionBudget: 300,
+			MaxExecutionAttempts: 5,
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -132,6 +133,7 @@ func TestCreateFolderNotExist(t *testing.T) {
 		DesignDocPath:   "design_doc.md",
 		MonitorOverride: "honor",
 		ExecutionBudget: 300,
+			MaxExecutionAttempts: 5,
 	})
 	if err == nil {
 		t.Error("expected error when folder does not exist")
@@ -147,6 +149,7 @@ func TestCreateDesignDocMissing(t *testing.T) {
 		DesignDocPath:   "design_doc.md",
 		MonitorOverride: "honor",
 		ExecutionBudget: 300,
+			MaxExecutionAttempts: 5,
 	})
 	if err == nil {
 		t.Error("expected error when design doc is missing")
@@ -162,6 +165,7 @@ func TestCreateInvalidMonitorOverride(t *testing.T) {
 		DesignDocPath:   designDoc,
 		MonitorOverride: "maybe",
 		ExecutionBudget: 300,
+			MaxExecutionAttempts: 5,
 	})
 	if err == nil {
 		t.Error("expected error for invalid monitor-override value")
@@ -201,6 +205,7 @@ func TestCreateFolderPathStoredAbsolute(t *testing.T) {
 		DesignDocPath:   designDoc,
 		MonitorOverride: "honor",
 		ExecutionBudget: 60,
+			MaxExecutionAttempts: 5,
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -225,6 +230,7 @@ func TestCreateIgnoreMonitorOverride(t *testing.T) {
 		DesignDocPath:   designDoc,
 		MonitorOverride: "ignore",
 		ExecutionBudget: 120,
+			MaxExecutionAttempts: 5,
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)

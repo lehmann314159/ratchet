@@ -19,8 +19,9 @@ type Params struct {
 	Label           string
 	FolderPath      string // must exist; stored as absolute path
 	DesignDocPath   string // relative to FolderPath; file must exist
-	MonitorOverride string // 'honor' | 'ignore' — seed value for DECOMPOSE_SPEC
-	ExecutionBudget int    // seconds — seed value for DECOMPOSE_SPEC
+	MonitorOverride      string // 'honor' | 'ignore' — seed value for DECOMPOSE_SPEC
+	ExecutionBudget      int    // seconds — seed value for DECOMPOSE_SPEC
+	MaxExecutionAttempts int    // cap on execute→adjudicate retries per bead
 }
 
 // Create inserts a projects row, seeds the validated model fleet, and enqueues
@@ -36,6 +37,9 @@ func Create(ctx context.Context, d *db.DB, p Params) (int64, error) {
 	}
 	if p.ExecutionBudget <= 0 {
 		return 0, fmt.Errorf("budget must be a positive number of seconds, got %d", p.ExecutionBudget)
+	}
+	if p.MaxExecutionAttempts <= 0 {
+		return 0, fmt.Errorf("max-attempts must be a positive integer, got %d", p.MaxExecutionAttempts)
 	}
 
 	// Resolve to absolute path so traces and design-doc reads work regardless
@@ -64,11 +68,12 @@ func Create(ctx context.Context, d *db.DB, p Params) (int64, error) {
 		INSERT INTO projects
 		  (label, folder_path, design_doc_path, status,
 		   monitor_override_default, execution_budget_default,
-		   audit_reconcile_round_cap, created_at, updated_at)
-		VALUES (?, ?, ?, 'active', ?, ?, 2, ?, ?)`,
+		   audit_reconcile_round_cap, max_execution_attempts,
+		   created_at, updated_at)
+		VALUES (?, ?, ?, 'active', ?, ?, 2, ?, ?, ?)`,
 		p.Label, folderAbs, p.DesignDocPath,
 		p.MonitorOverride, p.ExecutionBudget,
-		now, now)
+		p.MaxExecutionAttempts, now, now)
 	if err != nil {
 		_ = tx.Rollback()
 		return 0, fmt.Errorf("insert project: %w", err)
@@ -104,6 +109,7 @@ func RunNewProjectMain(args []string) {
 	designDoc := flags.String("design-doc", "design_doc.md", "design doc filename, relative to --folder")
 	monitorOverride := flags.String("monitor-override", "honor", "seed value for monitor_override on each Bead: honor or ignore")
 	budget := flags.Int("budget", 300, "seed value for execution_budget on each Bead, in seconds")
+	maxAttempts := flags.Int("max-attempts", 5, "maximum execute→adjudicate retries per Bead before escalation")
 	_ = flags.Parse(args)
 
 	if *label == "" {
@@ -123,11 +129,12 @@ func RunNewProjectMain(args []string) {
 	defer d.Close()
 
 	projectID, err := Create(context.Background(), d, Params{
-		Label:           *label,
-		FolderPath:      *folder,
-		DesignDocPath:   *designDoc,
-		MonitorOverride: *monitorOverride,
-		ExecutionBudget: *budget,
+		Label:                *label,
+		FolderPath:           *folder,
+		DesignDocPath:        *designDoc,
+		MonitorOverride:      *monitorOverride,
+		ExecutionBudget:      *budget,
+		MaxExecutionAttempts: *maxAttempts,
 	})
 	if err != nil {
 		slog.Error("new-project: create failed", "error", err)

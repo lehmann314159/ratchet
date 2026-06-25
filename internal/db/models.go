@@ -42,6 +42,7 @@ type Project struct {
 	MonitorOverrideDefault   string // 'honor' | 'ignore'
 	ExecutionBudgetDefault   int
 	AuditReconcileRoundCap   int
+	MaxExecutionAttempts     int
 	CreatedAt                time.Time
 	UpdatedAt                time.Time
 }

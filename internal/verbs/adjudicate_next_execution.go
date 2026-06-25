@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -97,10 +98,16 @@ func checkConsistency(fit, reasoning string) (bool, string) {
 
 	case "execution_capability_problem":
 		// Inconsistent: reasoning blames the spec rather than execution.
+		// Note: "bead specification is" (bare) is intentionally absent — it fires
+		// on exonerating language ("the bead specification is clear") and produces
+		// false positives. Only forms that affirmatively blame the spec are listed.
 		contradict := []string{
 			"spec problem", "spec is unclear", "spec is ambiguous",
 			"specification wrong", "specification is unclear", "specification is ambiguous",
-			"bead specification is", "ambiguous requirement", "unclear requirement",
+			"bead specification is missing", "bead specification is wrong",
+			"bead specification is unclear", "bead specification is ambiguous",
+			"bead specification is incorrect",
+			"ambiguous requirement", "unclear requirement",
 			"missing from the spec", "specification does not",
 		}
 		for _, p := range contradict {
@@ -359,6 +366,9 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 
 	switch out.Decision {
 	case "execute_as_is":
+		if atCap, err := h.atExecutionCap(ctx, tx, job.ProjectID, beadID, now, job.ID); err != nil || atCap {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE beads SET status = 'pending' WHERE id = ?`, beadID); err != nil {
 			return fmt.Errorf("reset bead to pending: %w", err)
@@ -370,6 +380,9 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 		return err
 
 	case "execute_revised":
+		if atCap, err := h.atExecutionCap(ctx, tx, job.ProjectID, beadID, now, job.ID); err != nil || atCap {
+			return err
+		}
 		// Write a new bead_revision for the revised spec.
 		var currentRevNum int
 		if err := tx.QueryRowContext(ctx, `
@@ -420,6 +433,36 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 		return h.checkProjectTerminal(ctx, tx, job.ProjectID, "complete", now)
 	}
 	return nil
+}
+
+// atExecutionCap returns true if the bead has reached the project's
+// max_execution_attempts limit. When the cap is reached, the ADJUDICATE job is
+// escalated so Mike can review rather than looping indefinitely.
+func (h *AdjudicateNextExecution) atExecutionCap(ctx context.Context, tx *sql.Tx, projectID, beadID int64, now string, jobID int64) (bool, error) {
+	var cap, count int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT max_execution_attempts FROM projects WHERE id = ?`, projectID,
+	).Scan(&cap); err != nil {
+		return false, fmt.Errorf("load max_execution_attempts: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM executions WHERE bead_id = ?`, beadID,
+	).Scan(&count); err != nil {
+		return false, fmt.Errorf("count executions for bead %d: %w", beadID, err)
+	}
+	if count < cap {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE handoff_jobs SET status = 'escalated', updated_at = ? WHERE id = ?`,
+		now, jobID,
+	); err != nil {
+		return true, fmt.Errorf("escalate at cap: %w", err)
+	}
+	slog.Error("ESCALATION — max execution attempts reached",
+		"project_id", projectID, "bead_id", beadID,
+		"attempts", count, "cap", cap, "job_id", jobID)
+	return true, nil
 }
 
 // checkProjectTerminal checks whether all beads in the project have reached a

@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS projects (
   monitor_override_default    TEXT    NOT NULL CHECK (monitor_override_default IN ('honor', 'ignore')),
   execution_budget_default    INTEGER NOT NULL,
   audit_reconcile_round_cap   INTEGER NOT NULL DEFAULT 2,
+  max_execution_attempts      INTEGER NOT NULL DEFAULT 5,
   created_at                  TIMESTAMP NOT NULL,
   updated_at                  TIMESTAMP NOT NULL
 );
