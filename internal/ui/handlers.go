@@ -223,6 +223,23 @@ func (s *server) handleCloseProject(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+// --- Bead detail ---
+
+func (s *server) handleBeadDetail(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid bead id", http.StatusBadRequest)
+		return
+	}
+	d, err := queryBeadDetail(r.Context(), s.db, id)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("bead detail: %v", err), http.StatusInternalServerError)
+		return
+	}
+	d.baseData = s.base(r)
+	s.render(w, s.tmpl.beadDetail, d)
+}
+
 // --- Trace viewer ---
 
 type traceData struct {

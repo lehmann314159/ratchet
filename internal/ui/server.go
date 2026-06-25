@@ -26,6 +26,7 @@ type templateCache struct {
 	dashboard   *template.Template
 	escalations *template.Template
 	escalation  *template.Template
+	beadDetail  *template.Template
 	trace       *template.Template
 }
 
@@ -46,6 +47,10 @@ func newTemplateCache() (*templateCache, error) {
 	if err != nil {
 		return nil, err
 	}
+	beadDetail, err := parse("templates/bead_detail.html")
+	if err != nil {
+		return nil, err
+	}
 	trace, err := parse("templates/trace.html")
 	if err != nil {
 		return nil, err
@@ -54,6 +59,7 @@ func newTemplateCache() (*templateCache, error) {
 		dashboard:   dashboard,
 		escalations: escalations,
 		escalation:  escalation,
+		beadDetail:  beadDetail,
 		trace:       trace,
 	}, nil
 }
@@ -77,6 +83,7 @@ func (s *server) routes() {
 	s.mux.HandleFunc("POST /escalations/{id}/requeue-with-budget", s.handleRequeuWithBudget)
 	s.mux.HandleFunc("POST /escalations/{id}/close", s.handleClose)
 	s.mux.HandleFunc("POST /projects/{id}/close", s.handleCloseProject)
+	s.mux.HandleFunc("GET /beads/{id}", s.handleBeadDetail)
 	s.mux.HandleFunc("GET /trace", s.handleTrace)
 }
 

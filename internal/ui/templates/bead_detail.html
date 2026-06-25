@@ -1,0 +1,57 @@
+{{define "title"}}Bead {{.BeadID}} — {{.BeadTitle}}{{end}}
+{{define "content"}}
+<h1>Bead {{.BeadID}}: {{.BeadTitle}}</h1>
+
+<div class="section">
+  <h2>Execution History</h2>
+  {{if .Executions}}
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Termination</th>
+        <th>Budget</th>
+        <th>Elapsed</th>
+        <th>Monitor</th>
+        <th>Decision</th>
+        <th>Started</th>
+        <th>Trace</th>
+      </tr>
+    </thead>
+    <tbody>
+    {{range .Executions}}
+    <tr>
+      <td class="meta">{{.AttemptNum}}</td>
+      <td><span class="status {{.TerminationCause}}">{{.TerminationCause}}</span></td>
+      <td class="meta">{{.BudgetSeconds}}s</td>
+      <td class="meta {{if and (eq .TerminationCause "timeout") (ge .ElapsedSeconds .BudgetSeconds)}}over-budget{{end}}">{{.ElapsedSeconds}}s</td>
+      <td class="meta">{{if .MonitorFired}}fired{{else}}—{{end}}</td>
+      <td>{{if .Decision}}<span class="status {{.Decision}}" title="{{.DecisionReasoning}}">{{.Decision}}</span>{{else}}<span class="meta">—</span>{{end}}</td>
+      <td class="meta">{{.StartedAt}}</td>
+      <td>{{if .TracePath}}<a href="/trace?path={{.TracePath}}">trace</a>{{else}}—{{end}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">No executions yet.</p>
+  {{end}}
+</div>
+
+<div class="section">
+  <h2>Revision Log</h2>
+  {{if .Revisions}}
+  {{range .Revisions}}
+  <div style="margin-bottom:16px;padding:10px 14px;background:#f9f9f9;border:1px solid #e5e5e5;border-radius:4px">
+    <div style="margin-bottom:6px">
+      <strong>Revision {{.RevisionNumber}}</strong>
+      <span class="meta" style="margin-left:10px">{{.CreatedByVerb}} · {{.CreatedAt}} · budget {{.ExecutionBudget}}s</span>
+    </div>
+    <pre style="margin:0;max-height:200px;font-size:0.8em">{{.FullText}}</pre>
+  </div>
+  {{end}}
+  {{else}}
+  <p class="empty">No revisions.</p>
+  {{end}}
+</div>
+{{end}}

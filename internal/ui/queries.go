@@ -209,6 +209,111 @@ func queryEscalatedJobByID(ctx context.Context, d *db.DB, id int64) (*EscalatedR
 	return r, nil
 }
 
+type ExecutionRow struct {
+	ID               int64
+	AttemptNum       int
+	TerminationCause string
+	BudgetSeconds    int
+	ElapsedSeconds   int
+	MonitorFired     bool
+	StartedAt        string
+	Decision         string // adjudication decision, empty if none yet
+	DecisionReasoning string
+	TracePath        string
+}
+
+type RevisionRow struct {
+	RevisionNumber  int
+	ExecutionBudget int
+	CreatedByVerb   string
+	CreatedAt       string
+	FullText        string
+}
+
+type beadDetailData struct {
+	baseData
+	BeadID     int64
+	BeadTitle  string
+	Executions []ExecutionRow
+	Revisions  []RevisionRow
+}
+
+func queryBeadDetail(ctx context.Context, d *db.DB, beadID int64) (*beadDetailData, error) {
+	out := &beadDetailData{BeadID: beadID}
+
+	// Title from current revision.
+	var fullText string
+	_ = d.QueryRowContext(ctx, `
+		SELECT COALESCE(br.full_text, '{}') FROM beads b
+		LEFT JOIN bead_revisions br ON br.id = b.current_revision_id
+		WHERE b.id = ?`, beadID).Scan(&fullText)
+	var parsed struct{ Title string `json:"title"` }
+	if json.Unmarshal([]byte(fullText), &parsed) == nil && parsed.Title != "" {
+		out.BeadTitle = parsed.Title
+	} else {
+		out.BeadTitle = fmt.Sprintf("bead-%d", beadID)
+	}
+
+	// Execution history.
+	rows, err := d.QueryContext(ctx, `
+		SELECT e.id,
+		       ROW_NUMBER() OVER (ORDER BY e.started_at) AS attempt_num,
+		       COALESCE(e.termination_cause, 'running'),
+		       br.execution_budget,
+		       CAST((julianday(COALESCE(e.ended_at, 'now')) - julianday(e.started_at)) * 86400 AS INTEGER),
+		       COALESCE(e.monitor_fired, 0),
+		       e.started_at,
+		       COALESCE(adj.decision, ''),
+		       COALESCE(adj.reasoning_text, ''),
+		       e.trace_path
+		FROM executions e
+		JOIN bead_revisions br ON br.bead_id = e.bead_id
+		  AND br.revision_number = (
+		    SELECT MAX(br2.revision_number) FROM bead_revisions br2
+		    WHERE br2.bead_id = e.bead_id AND br2.created_at <= e.started_at
+		  )
+		LEFT JOIN adjudications adj ON adj.execution_id = e.id
+		WHERE e.bead_id = ?
+		ORDER BY e.started_at`, beadID)
+	if err != nil {
+		return nil, fmt.Errorf("execution history: %w", err)
+	}
+	defer rows.Close()
+	var attemptNum int
+	for rows.Next() {
+		var r ExecutionRow
+		var monitorFired int
+		if err := rows.Scan(&r.ID, &attemptNum, &r.TerminationCause,
+			&r.BudgetSeconds, &r.ElapsedSeconds, &monitorFired,
+			&r.StartedAt, &r.Decision, &r.DecisionReasoning, &r.TracePath); err != nil {
+			return nil, err
+		}
+		r.AttemptNum = attemptNum
+		r.MonitorFired = monitorFired == 1
+		out.Executions = append(out.Executions, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Revision log.
+	revRows, err := d.QueryContext(ctx, `
+		SELECT revision_number, execution_budget, created_by_verb, created_at, full_text
+		FROM bead_revisions WHERE bead_id = ? ORDER BY revision_number`, beadID)
+	if err != nil {
+		return nil, fmt.Errorf("revisions: %w", err)
+	}
+	defer revRows.Close()
+	for revRows.Next() {
+		var r RevisionRow
+		if err := revRows.Scan(&r.RevisionNumber, &r.ExecutionBudget, &r.CreatedByVerb, &r.CreatedAt, &r.FullText); err != nil {
+			return nil, err
+		}
+		out.Revisions = append(out.Revisions, r)
+	}
+	return out, revRows.Err()
+}
+
 func queryEscalatedCount(ctx context.Context, d *db.DB) int {
 	var n int
 	_ = d.QueryRowContext(ctx, `SELECT COUNT(*) FROM handoff_jobs WHERE status = 'escalated'`).Scan(&n)
