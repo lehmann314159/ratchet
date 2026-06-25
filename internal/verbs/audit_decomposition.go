@@ -115,12 +115,19 @@ func (h *AuditDecomposition) Validate(raw string) (string, any) {
 	return "valid", out
 }
 
-// Commit enqueues RECONCILE_DECOMPOSITION. The critique text is stored in
+// Commit either skips straight to execution (no_issues) or enqueues
+// RECONCILE_DECOMPOSITION (issues_found). The critique text is stored in
 // handoff_attempts (via the dispatch layer) and read by RECONCILE's Run;
 // audit_reconcile_rounds is written atomically by RECONCILE's Commit once
 // both the critique and reconciliation are available.
 func (h *AuditDecomposition) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJob, parsed any) error {
 	now := time.Now().UTC().Format(time.RFC3339)
+	out := parsed.(AuditDecompositionOutput)
+
+	if out.OverallVerdict == "no_issues" {
+		return enqueueAllBeadsForExecution(ctx, tx, job.ProjectID, now)
+	}
+
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
 		VALUES (?, ?, NULL, 'pending', ?, ?)`,
