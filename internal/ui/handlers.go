@@ -137,6 +137,69 @@ func (s *server) handleClose(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/escalations", http.StatusSeeOther)
 }
 
+// --- Requeue with budget override ---
+
+func (s *server) handleRequeuWithBudget(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid job id", http.StatusBadRequest)
+		return
+	}
+	budget, err := strconv.Atoi(r.FormValue("budget"))
+	if err != nil || budget < 60 {
+		http.Error(w, "budget must be an integer >= 60", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Look up the bead associated with this job.
+	var beadID int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT bead_id FROM handoff_jobs WHERE id = ?`, id,
+	).Scan(&beadID); err != nil || beadID == 0 {
+		http.Error(w, "job has no bead — budget override only applies to bead-scoped jobs", http.StatusBadRequest)
+		return
+	}
+
+	// Insert a new bead revision with the updated budget.
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO bead_revisions
+		  (project_id, bead_id, revision_number, full_text, execution_budget, monitor_override, created_by_verb, created_at)
+		SELECT project_id, bead_id, revision_number + 1,
+		       json_set(full_text, '$.execution_budget', ?),
+		       ?, monitor_override, 'ADJUDICATE_NEXT_EXECUTION', ?
+		FROM bead_revisions WHERE bead_id = ?
+		ORDER BY revision_number DESC LIMIT 1`,
+		budget, budget, now, beadID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("insert revision: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Point the bead at the new revision.
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE beads SET current_revision_id = (
+		   SELECT id FROM bead_revisions WHERE bead_id = ? ORDER BY revision_number DESC LIMIT 1
+		 ) WHERE id = ?`, beadID, beadID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("update bead revision: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Reset job: delete invalid attempts, set pending.
+	_, _ = s.db.ExecContext(ctx,
+		`DELETE FROM handoff_attempts WHERE job_id = ? AND validation_result != 'valid'`, id)
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE handoff_jobs SET status = 'pending', updated_at = ? WHERE id = ?`, now, id)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("requeue failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/escalations", http.StatusSeeOther)
+}
+
 // --- Close Project ---
 
 func (s *server) handleCloseProject(w http.ResponseWriter, r *http.Request) {

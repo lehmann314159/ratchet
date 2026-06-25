@@ -43,6 +43,7 @@ type EscalatedRow struct {
 	ValidationResult string
 	RawOutput        sql.NullString
 	UpdatedAt        string
+	Budget           int // current execution_budget from bead_revisions; 0 if not bead-scoped
 }
 
 func queryActiveProject(ctx context.Context, d *db.DB) (*ProjectRow, error) {
@@ -131,7 +132,8 @@ func queryEscalatedJobs(ctx context.Context, d *db.DB) ([]EscalatedRow, error) {
 		         ''),
 		       (SELECT ha.raw_output FROM handoff_attempts ha
 		        WHERE ha.job_id = hj.id ORDER BY ha.attempt_number DESC LIMIT 1),
-		       hj.updated_at
+		       hj.updated_at,
+		       COALESCE(br.execution_budget, 0)
 		FROM handoff_jobs hj
 		LEFT JOIN beads b ON b.id = hj.bead_id
 		LEFT JOIN bead_revisions br ON br.id = b.current_revision_id
@@ -146,7 +148,7 @@ func queryEscalatedJobs(ctx context.Context, d *db.DB) ([]EscalatedRow, error) {
 	for rows.Next() {
 		var r EscalatedRow
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Verb, &r.BeadID, &r.BeadTitle,
-			&r.Strikes, &r.ValidationResult, &r.RawOutput, &r.UpdatedAt); err != nil {
+			&r.Strikes, &r.ValidationResult, &r.RawOutput, &r.UpdatedAt, &r.Budget); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -167,13 +169,14 @@ func queryEscalatedJobByID(ctx context.Context, d *db.DB, id int64) (*EscalatedR
 		         ''),
 		       (SELECT ha.raw_output FROM handoff_attempts ha
 		        WHERE ha.job_id = hj.id ORDER BY ha.attempt_number DESC LIMIT 1),
-		       hj.updated_at
+		       hj.updated_at,
+		       COALESCE(br.execution_budget, 0)
 		FROM handoff_jobs hj
 		LEFT JOIN beads b ON b.id = hj.bead_id
 		LEFT JOIN bead_revisions br ON br.id = b.current_revision_id
 		WHERE hj.id = ?`, id,
 	).Scan(&r.ID, &r.ProjectID, &r.Verb, &r.BeadID, &r.BeadTitle,
-		&r.Strikes, &r.ValidationResult, &r.RawOutput, &r.UpdatedAt)
+		&r.Strikes, &r.ValidationResult, &r.RawOutput, &r.UpdatedAt, &r.Budget)
 	if err != nil {
 		return nil, fmt.Errorf("escalated job %d: %w", id, err)
 	}

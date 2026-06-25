@@ -6,9 +6,15 @@
   <tr><th>Verb</th><td>{{.Job.Verb}}</td></tr>
   <tr><th>Bead</th><td>{{if .Job.BeadID.Valid}}{{if .Job.BeadTitle}}{{.Job.BeadTitle}} (bead-{{.Job.BeadID.Int64}}){{else}}bead-{{.Job.BeadID.Int64}}{{end}}{{else}}— (project-scoped){{end}}</td></tr>
   <tr><th>Strikes</th><td>{{.Job.Strikes}}</td></tr>
-  <tr><th>Last failure</th><td>{{.Job.ValidationResult}}</td></tr>
+  {{if .Job.Budget}}<tr><th>Budget</th><td>{{.Job.Budget}}s</td></tr>{{end}}
   <tr><th>Updated</th><td class="meta">{{.Job.UpdatedAt}}</td></tr>
 </table>
+
+{{if .Job.ValidationResult}}
+<div class="failure-box">
+  <strong>Rejection reason:</strong> {{.Job.ValidationResult}}
+</div>
+{{end}}
 
 <h2>Last Raw Output</h2>
 {{if .Job.RawOutput.Valid}}
@@ -21,6 +27,13 @@
   <form method="POST" action="/escalations/{{.Job.ID}}/requeue">
     <button type="submit">Requeue (reset strikes, retry)</button>
   </form>
+  {{if .Job.BeadID.Valid}}
+  <form method="POST" action="/escalations/{{.Job.ID}}/requeue-with-budget" style="display:flex;gap:6px;align-items:center">
+    <input type="number" name="budget" value="{{if .Job.Budget}}{{.Job.Budget}}{{else}}300{{end}}" min="60" style="width:90px;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-family:inherit;font-size:0.9em">
+    <span class="meta">s</span>
+    <button type="submit">Requeue with new budget</button>
+  </form>
+  {{end}}
   <form method="POST" action="/escalations/{{.Job.ID}}/close">
     <button type="submit" class="danger">Close (mark complete, skip)</button>
   </form>
