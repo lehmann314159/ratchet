@@ -46,12 +46,15 @@ func activeProject(ctx context.Context, d *db.DB) (*db.Project, error) {
 	return p, nil
 }
 
-// nextPendingJob returns the oldest pending job for projectID, or nil if none.
+// nextPendingJob returns the oldest actionable job for projectID, or nil if
+// none. Both 'pending' (never attempted) and 'failed_retry' (failed validation
+// but within strike tolerance) are dispatched — 'failed_retry' jobs accumulate
+// strikes until they exceed verbTolerance and escalate.
 func nextPendingJob(ctx context.Context, d *db.DB, projectID int64) (*db.HandoffJob, error) {
 	row := d.QueryRowContext(ctx, `
 		SELECT id, project_id, verb, bead_id, status, created_at, updated_at
 		FROM handoff_jobs
-		WHERE project_id = ? AND status = 'pending'
+		WHERE project_id = ? AND status IN ('pending', 'failed_retry')
 		ORDER BY created_at ASC
 		LIMIT 1`, projectID)
 
