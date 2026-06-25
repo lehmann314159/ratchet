@@ -53,7 +53,7 @@
 </div>
 
 {{if gt .EscalatedCount 0}}
-<div class="alert">⚠ {{.EscalatedCount}} escalated job{{if gt .EscalatedCount 1}}s{{end}} require human review. <a href="/escalations">Review →</a></div>
+<div class="alert">⚠ {{.EscalatedCount}} escalated job{{if gt .EscalatedCount 1}}s require{{else}} requires{{end}} human review. <a href="/escalations">Review →</a></div>
 {{end}}
 
 {{else}}
