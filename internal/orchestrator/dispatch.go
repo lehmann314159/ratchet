@@ -54,6 +54,7 @@ func dispatch(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[str
 	}
 
 	// Run: infrastructure error → return without counting as a strike.
+	startedAt := time.Now().UTC()
 	rawOutput, runErr := handler.Run(ctx, d, oc, job)
 	if runErr != nil {
 		slog.Error("verb Run failed (infrastructure error, will retry)",
@@ -93,7 +94,7 @@ func dispatch(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[str
 
 	// Single atomic transaction: write attempt + result (if valid) + next jobs + job status.
 	txErr := withTx(ctx, d, func(tx *sql.Tx) error {
-		if err := commitAttempt(ctx, tx, job.ID, attemptNum, rawOutput, validationResult, nextStatus); err != nil {
+		if err := commitAttempt(ctx, tx, job.ID, attemptNum, rawOutput, validationResult, nextStatus, startedAt); err != nil {
 			return err
 		}
 		if isValid {

@@ -118,14 +118,14 @@ func nextAttemptNumber(ctx context.Context, d *db.DB, jobID int64) (int, error) 
 }
 
 // commitAttempt writes a handoff_attempts row and updates the job status,
-// all within tx.
-func commitAttempt(ctx context.Context, tx *sql.Tx, jobID int64, attemptNum int, rawOutput, validationResult, nextStatus string) error {
+// all within tx. startedAt is captured before the model call; ended_at is now.
+func commitAttempt(ctx context.Context, tx *sql.Tx, jobID int64, attemptNum int, rawOutput, validationResult, nextStatus string, startedAt time.Time) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO handoff_attempts (job_id, attempt_number, raw_output, validation_result, created_at)
-		VALUES (?, ?, ?, ?, ?)`,
-		jobID, attemptNum, rawOutput, validationResult, now,
+		INSERT INTO handoff_attempts (job_id, attempt_number, raw_output, validation_result, created_at, ended_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		jobID, attemptNum, rawOutput, validationResult, startedAt.UTC().Format(time.RFC3339), now,
 	); err != nil {
 		return fmt.Errorf("insert handoff_attempt: %w", err)
 	}

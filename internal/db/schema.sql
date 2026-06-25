@@ -130,7 +130,8 @@ CREATE TABLE IF NOT EXISTS handoff_attempts (
   attempt_number    INTEGER NOT NULL,
   raw_output        TEXT,
   validation_result TEXT    NOT NULL,
-  created_at        TIMESTAMP NOT NULL
+  created_at        TIMESTAMP NOT NULL,
+  ended_at          TIMESTAMP
 );
 
 -- Indexes for the orchestrator's primary query (oldest pending job per project).

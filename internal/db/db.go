@@ -21,6 +21,7 @@ type columnMigration struct {
 // Append here whenever a new column is added to an existing table in schema.sql.
 var columnMigrations = []columnMigration{
 	{"projects", "max_execution_attempts", "INTEGER NOT NULL DEFAULT 5"},
+	{"handoff_attempts", "ended_at", "TIMESTAMP"},
 }
 
 //go:embed schema.sql

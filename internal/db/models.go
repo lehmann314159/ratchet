@@ -154,4 +154,5 @@ type HandoffAttempt struct {
 	RawOutput        sql.NullString
 	ValidationResult string // 'valid' | 'malformed: <reason>'
 	CreatedAt        time.Time
+	EndedAt          sql.NullTime
 }
