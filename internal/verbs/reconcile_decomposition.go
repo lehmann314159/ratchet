@@ -20,6 +20,11 @@ Vague or blanket defenses ("this is by design", "not applicable") are not accept
 Your updated_beads field must contain the complete decomposition after all fixes are applied,
 even if no beads changed (so the next audit has the full current state).
 
+When fixing an exit criterion that uses an unsupported invocation pattern (e.g. stdin when the
+tool only accepts file paths), replace it with an equivalent check using a supported pattern —
+do not simply drop it. Every behavior the original criterion tested must remain testable in the
+updated criteria.
+
 When previous debate rounds appear in the message, read them before responding — your
 answer must account for what was already argued. A second DISAGREE on a finding disputed
 in round 1 causes the full decomposition to escalate to human review; only disagree if
