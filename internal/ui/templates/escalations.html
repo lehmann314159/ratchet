@@ -1,0 +1,26 @@
+{{define "title"}}Escalations{{end}}
+{{define "content"}}
+<h1>Escalated Jobs</h1>
+{{if .Jobs}}
+<table>
+  <thead>
+    <tr><th>ID</th><th>Verb</th><th>Bead</th><th>Strikes</th><th>Last Failure</th><th>Updated</th><th></th></tr>
+  </thead>
+  <tbody>
+  {{range .Jobs}}
+  <tr>
+    <td class="meta">{{.ID}}</td>
+    <td>{{.Verb}}</td>
+    <td>{{if .BeadID.Valid}}{{if .BeadTitle}}{{.BeadTitle}}{{else}}bead-{{.BeadID.Int64}}{{end}}{{else}}<span class="meta">—</span>{{end}}</td>
+    <td>{{.Strikes}}</td>
+    <td class="meta">{{.ValidationResult}}</td>
+    <td class="meta">{{.UpdatedAt}}</td>
+    <td><a href="/escalations/{{.ID}}">Review →</a></td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="empty">No escalated jobs.</p>
+{{end}}
+{{end}}

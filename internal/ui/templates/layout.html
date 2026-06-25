@@ -1,0 +1,58 @@
+{{define "layout"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{template "title" .}} — Ratchet</title>
+  <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: ui-monospace, monospace; font-size: 14px; color: #222; background: #fafafa; padding: 0 20px 40px; }
+    nav { border-bottom: 1px solid #ddd; padding: 14px 0 10px; margin-bottom: 28px; display: flex; align-items: center; gap: 20px; }
+    nav .brand { font-weight: bold; font-size: 1em; color: #111; text-decoration: none; }
+    nav a { color: #555; text-decoration: none; }
+    nav a:hover { color: #111; }
+    nav .badge { background: #f97316; color: white; border-radius: 10px; padding: 1px 7px; font-size: 0.8em; }
+    main { max-width: 960px; }
+    h1 { font-size: 1.2em; margin-bottom: 20px; }
+    h2 { font-size: 1em; margin: 24px 0 8px; padding-bottom: 4px; border-bottom: 1px solid #e5e5e5; color: #444; }
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; padding: 6px 10px; border-bottom: 2px solid #ddd; color: #555; font-weight: normal; font-size: 0.9em; }
+    td { padding: 6px 10px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
+    tr:last-child td { border-bottom: none; }
+    .status { display: inline-block; padding: 1px 7px; border-radius: 3px; font-size: 0.85em; }
+    .status.pending        { background: #f0f0f0; color: #666; }
+    .status.executing      { background: #dbeafe; color: #1d4ed8; }
+    .status.succeeded      { background: #dcfce7; color: #166534; }
+    .status.full_stopped   { background: #fee2e2; color: #991b1b; }
+    .status.escalated      { background: #ffedd5; color: #9a3412; }
+    .status.complete       { background: #dcfce7; color: #166534; }
+    .status.failed_retry   { background: #fef9c3; color: #854d0e; }
+    .status.running        { background: #dbeafe; color: #1d4ed8; }
+    .status.active         { background: #dcfce7; color: #166534; }
+    .alert { background: #ffedd5; border: 1px solid #fdba74; padding: 10px 14px; border-radius: 4px; margin-bottom: 20px; }
+    .empty { color: #888; padding: 12px 0; }
+    pre { background: #f5f5f5; border: 1px solid #e5e5e5; padding: 12px; border-radius: 4px; overflow: auto; max-height: 400px; white-space: pre-wrap; word-break: break-all; font-size: 0.85em; margin-top: 6px; }
+    .actions { display: flex; gap: 8px; margin-top: 20px; }
+    button { padding: 6px 14px; border: 1px solid #ccc; border-radius: 3px; background: #fff; font-family: inherit; font-size: 0.9em; cursor: pointer; }
+    button:hover { background: #f0f0f0; }
+    button.danger { border-color: #dc2626; color: #dc2626; }
+    button.danger:hover { background: #fee2e2; }
+    .meta { color: #888; font-size: 0.85em; }
+    .section { margin-bottom: 28px; }
+    a { color: #2563eb; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a class="brand" href="/">Ratchet</a>
+    <a href="/">Dashboard</a>
+    <a href="/escalations">Escalations{{if gt .EscalatedCount 0}} <span class="badge">{{.EscalatedCount}}</span>{{end}}</a>
+  </nav>
+  <main>
+    {{template "content" .}}
+  </main>
+</body>
+</html>
+{{end}}

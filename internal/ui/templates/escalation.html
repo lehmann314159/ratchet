@@ -1,0 +1,28 @@
+{{define "title"}}Escalation #{{.Job.ID}}{{end}}
+{{define "content"}}
+<h1>Escalated Job #{{.Job.ID}}</h1>
+
+<table style="width:auto; margin-bottom:20px;">
+  <tr><th>Verb</th><td>{{.Job.Verb}}</td></tr>
+  <tr><th>Bead</th><td>{{if .Job.BeadID.Valid}}{{if .Job.BeadTitle}}{{.Job.BeadTitle}} (bead-{{.Job.BeadID.Int64}}){{else}}bead-{{.Job.BeadID.Int64}}{{end}}{{else}}— (project-scoped){{end}}</td></tr>
+  <tr><th>Strikes</th><td>{{.Job.Strikes}}</td></tr>
+  <tr><th>Last failure</th><td>{{.Job.ValidationResult}}</td></tr>
+  <tr><th>Updated</th><td class="meta">{{.Job.UpdatedAt}}</td></tr>
+</table>
+
+<h2>Last Raw Output</h2>
+{{if .Job.RawOutput.Valid}}
+<pre>{{.Job.RawOutput.String}}</pre>
+{{else}}
+<p class="empty">No output recorded.</p>
+{{end}}
+
+<div class="actions">
+  <form method="POST" action="/escalations/{{.Job.ID}}/requeue">
+    <button type="submit">Requeue (reset strikes, retry)</button>
+  </form>
+  <form method="POST" action="/escalations/{{.Job.ID}}/close">
+    <button type="submit" class="danger">Close (mark complete, skip)</button>
+  </form>
+</div>
+{{end}}

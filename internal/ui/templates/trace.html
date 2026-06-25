@@ -1,0 +1,10 @@
+{{define "title"}}Trace{{end}}
+{{define "content"}}
+<h1>Execution Trace</h1>
+<p class="meta" style="margin-bottom:12px;">{{.Path}}</p>
+{{if .Content}}
+<pre>{{.Content}}</pre>
+{{else}}
+<p class="empty">Trace file is empty.</p>
+{{end}}
+{{end}}
