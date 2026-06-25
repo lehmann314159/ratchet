@@ -54,6 +54,16 @@ Budget guidance for execute_revised:
     Double the current execution_budget in the revised bead. Do not spend the revision on spec
     changes when the only observable failure is running out of time.
 
+Pre-implementation commitment for persistent capability failures:
+  - When bead_spec_fit is "execution_capability_problem" and the agent has repeated the same
+    mistake across multiple attempts (same wrong API, same wrong type, same misunderstanding),
+    add a "Step 0: Pre-implementation check" to the top of the revised full_text. Step 0 must
+    list specific technical claims the agent is required to state explicitly before writing any
+    code — e.g. "State which Go type you will use for pixel colors and why" or "Run go doc
+    image.NRGBA and confirm the type of img.At(x,y)". This forces the agent to surface its
+    understanding (or misunderstanding) in the trace before implementation, where it can be
+    caught early rather than after a full failed attempt.
+
 Respond with JSON only, no prose before or after:
 {
   "trend": "same" | "narrower" | "unrelated" | "not_applicable",

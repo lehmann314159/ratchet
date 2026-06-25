@@ -5,6 +5,7 @@ package execution
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -48,25 +49,18 @@ func RunExecutionWindow(ctx context.Context, d *db.DB, ollamaURL string, job *db
 	}
 	beadID := job.BeadID.Int64
 
-	// Load the current bead revision: execution_budget and monitor_override.
+	// Load the current bead revision and project folder in one pass.
 	var revID int64
 	var budget int
-	var monitorOverride string
+	var monitorOverride, fullText, folderPath string
 	if err := d.QueryRowContext(ctx, `
-		SELECT br.id, br.execution_budget, br.monitor_override
+		SELECT br.id, br.execution_budget, br.monitor_override, br.full_text, p.folder_path
 		FROM beads b
 		JOIN bead_revisions br ON br.id = b.current_revision_id
+		JOIN projects p ON p.id = b.project_id
 		WHERE b.id = ?`, beadID,
-	).Scan(&revID, &budget, &monitorOverride); err != nil {
+	).Scan(&revID, &budget, &monitorOverride, &fullText, &folderPath); err != nil {
 		return fmt.Errorf("load bead revision: %w", err)
-	}
-
-	// Load project folder for the traces directory.
-	var folderPath string
-	if err := d.QueryRowContext(ctx,
-		`SELECT folder_path FROM projects WHERE id = ?`, job.ProjectID,
-	).Scan(&folderPath); err != nil {
-		return fmt.Errorf("load project folder: %w", err)
 	}
 
 	// Attempt number = existing execution count for this bead + 1.
@@ -75,6 +69,23 @@ func RunExecutionWindow(ctx context.Context, d *db.DB, ollamaURL string, job *db
 		`SELECT COUNT(*)+1 FROM executions WHERE bead_id = ?`, beadID,
 	).Scan(&attemptN); err != nil {
 		return fmt.Errorf("count executions: %w", err)
+	}
+
+	// On retry attempts, delete any output_files left by the prior attempt so
+	// the agent starts from a known-clean state rather than anchoring on broken
+	// prior work.
+	if attemptN > 1 {
+		var spec struct {
+			OutputFiles []string `json:"output_files"`
+		}
+		if err := json.Unmarshal([]byte(fullText), &spec); err == nil {
+			for _, rel := range spec.OutputFiles {
+				target := filepath.Join(folderPath, rel)
+				if err := os.Remove(target); err == nil {
+					slog.Info("cleanup: removed prior output file", "path", target, "bead_id", beadID, "attempt", attemptN)
+				}
+			}
+		}
 	}
 
 	// Create the traces directory and an empty trace file.
