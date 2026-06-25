@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const DefaultTemperature = 0.3
@@ -18,6 +19,16 @@ type Client struct {
 }
 
 func New(baseURL string) *Client {
+	return &Client{
+		BaseURL:    baseURL,
+		httpClient: &http.Client{Timeout: 10 * time.Minute},
+	}
+}
+
+// NewUnbounded returns a Client with no HTTP timeout. Use for execute-bead
+// and monitor, which have their own budget/lifecycle controls and can legitimately
+// run a single model call for many minutes.
+func NewUnbounded(baseURL string) *Client {
 	return &Client{
 		BaseURL:    baseURL,
 		httpClient: &http.Client{},

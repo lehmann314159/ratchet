@@ -135,7 +135,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 
 	slog.Info("execute-bead started", "execution_id", execID, "model", model, "budget_s", budget)
 
-	oc := ollama.New(ollamaURL)
+	oc := ollama.NewUnbounded(ollamaURL)
 	tools := toolDefinitions()
 	messages := []ollama.Message{
 		{Role: "system", Content: executeBeadSystemPrompt},

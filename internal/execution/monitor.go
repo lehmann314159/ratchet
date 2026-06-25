@@ -47,7 +47,7 @@ func RunMonitorMain(args []string) {
 	}
 	defer d.Close()
 
-	oc := ollama.New(*ollamaURL)
+	oc := ollama.NewUnbounded(*ollamaURL)
 
 	if err := runMonitor(d, oc, *execID); err != nil {
 		slog.Error("monitor exiting with error", "execution_id", *execID, "error", err)
