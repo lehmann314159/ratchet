@@ -108,7 +108,7 @@ func RunNewProjectMain(args []string) {
 	folder := flags.String("folder", "", "project folder path — must exist and contain the design doc (required)")
 	designDoc := flags.String("design-doc", "design_doc.md", "design doc filename, relative to --folder")
 	monitorOverride := flags.String("monitor-override", "honor", "seed value for monitor_override on each Bead: honor or ignore")
-	budget := flags.Int("budget", 300, "seed value for execution_budget on each Bead, in seconds")
+	budget := flags.Int("budget", 900, "seed value for execution_budget on each Bead, in seconds")
 	maxAttempts := flags.Int("max-attempts", 5, "maximum execute→adjudicate retries per Bead before escalation")
 	_ = flags.Parse(args)
 

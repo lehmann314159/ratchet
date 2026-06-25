@@ -24,10 +24,10 @@ is not a valid decomposition.
 
 For every Bead you issue you must set:
 - execution_budget: integer seconds, the maximum wall-clock time for one execution attempt.
-  The project default is %d seconds — use this as your baseline. Each execution involves
-  multiple model calls plus test runs, so budgets below 60 seconds are never appropriate.
-  Adjust up for complex Beads (many interacting constraints, large test suites) or down
-  for trivial ones, but stay within an order of magnitude of the default.
+  Set to the project default (%d seconds) or higher — never lower. If a Bead is simple,
+  the agent will finish quickly and the unused budget costs nothing. Only increase above
+  the default for Beads with substantial complexity (large algorithms, many interacting
+  constraints, extensive test suites).
 - monitor_override: "honor" (MONITOR_EXECUTION may terminate this Bead on loop detection) or "ignore" (loop detection signal is suppressed — use only for legitimately repetitive work)
 - output_files: a non-empty list of file paths this Bead will create or modify (e.g. ["main.go", "go.mod"]).
   This field is required and drives the independence check in AUDIT_DECOMPOSITION: if two Beads share
