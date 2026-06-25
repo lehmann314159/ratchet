@@ -88,10 +88,14 @@ func queryBeads(ctx context.Context, d *db.DB, projectID int64) ([]BeadRow, erro
 		SELECT b.id, b.status, COALESCE(br.full_text, '{}'),
 		       COALESCE(br.execution_budget, 0),
 		       (SELECT COUNT(*) FROM executions e WHERE e.bead_id = b.id AND e.termination_cause IS NOT NULL),
-		       COALESCE(CAST((julianday('now') - julianday(e2.started_at)) * 86400 AS INTEGER), 0)
+		       COALESCE((
+		         SELECT CAST((julianday('now') - julianday(e2.started_at)) * 86400 AS INTEGER)
+		         FROM executions e2
+		         WHERE e2.bead_id = b.id AND e2.termination_cause IS NULL
+		         ORDER BY e2.started_at DESC LIMIT 1
+		       ), 0)
 		FROM beads b
 		LEFT JOIN bead_revisions br ON br.id = b.current_revision_id
-		LEFT JOIN executions e2 ON e2.bead_id = b.id AND e2.termination_cause IS NULL
 		WHERE b.project_id = ?
 		ORDER BY b.id`, projectID)
 	if err != nil {
