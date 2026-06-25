@@ -37,9 +37,10 @@ func (s *server) renderPartial(w http.ResponseWriter, tmpl *template.Template, n
 
 type dashboardData struct {
 	baseData
-	Project *ProjectRow
-	Beads   []BeadRow
-	Jobs    []JobRow
+	Project     *ProjectRow
+	Beads       []BeadRow
+	Jobs        []JobRow
+	AllProjects []ProjectRow
 }
 
 func (s *server) dashboardData(r *http.Request) dashboardData {
@@ -51,6 +52,7 @@ func (s *server) dashboardData(r *http.Request) dashboardData {
 		d.Beads, _ = queryBeads(ctx, s.db, project.ID)
 		d.Jobs, _ = queryRecentJobs(ctx, s.db, project.ID, 20)
 	}
+	d.AllProjects, _ = queryAllProjects(ctx, s.db)
 	return d
 }
 

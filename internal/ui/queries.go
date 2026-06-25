@@ -19,9 +19,12 @@ type ProjectRow struct {
 }
 
 type BeadRow struct {
-	ID     int64
-	Status string
-	Title  string
+	ID             int64
+	Status         string
+	Title          string
+	Attempts       int
+	Budget         int    // execution_budget from current revision
+	ElapsedSeconds int    // seconds since execution started; 0 if not executing
 }
 
 type JobRow struct {
@@ -61,11 +64,34 @@ func queryActiveProject(ctx context.Context, d *db.DB) (*ProjectRow, error) {
 	return p, nil
 }
 
+func queryAllProjects(ctx context.Context, d *db.DB) ([]ProjectRow, error) {
+	rows, err := d.QueryContext(ctx, `
+		SELECT id, label, status, folder_path, design_doc_path, created_at
+		FROM projects ORDER BY id DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("all projects: %w", err)
+	}
+	defer rows.Close()
+	var out []ProjectRow
+	for rows.Next() {
+		var p ProjectRow
+		if err := rows.Scan(&p.ID, &p.Label, &p.Status, &p.FolderPath, &p.DesignDoc, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 func queryBeads(ctx context.Context, d *db.DB, projectID int64) ([]BeadRow, error) {
 	rows, err := d.QueryContext(ctx, `
-		SELECT b.id, b.status, COALESCE(br.full_text, '{}')
+		SELECT b.id, b.status, COALESCE(br.full_text, '{}'),
+		       COALESCE(br.execution_budget, 0),
+		       (SELECT COUNT(*) FROM executions e WHERE e.bead_id = b.id AND e.termination_cause IS NOT NULL),
+		       COALESCE(CAST((julianday('now') - julianday(e2.started_at)) * 86400 AS INTEGER), 0)
 		FROM beads b
 		LEFT JOIN bead_revisions br ON br.id = b.current_revision_id
+		LEFT JOIN executions e2 ON e2.bead_id = b.id AND e2.termination_cause IS NULL
 		WHERE b.project_id = ?
 		ORDER BY b.id`, projectID)
 	if err != nil {
@@ -77,7 +103,7 @@ func queryBeads(ctx context.Context, d *db.DB, projectID int64) ([]BeadRow, erro
 	for rows.Next() {
 		var r BeadRow
 		var fullText string
-		if err := rows.Scan(&r.ID, &r.Status, &fullText); err != nil {
+		if err := rows.Scan(&r.ID, &r.Status, &fullText, &r.Budget, &r.Attempts, &r.ElapsedSeconds); err != nil {
 			return nil, err
 		}
 		var parsed struct {
