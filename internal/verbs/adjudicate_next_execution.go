@@ -47,8 +47,12 @@ Guidance on choosing between execute_as_is and execute_revised when bead_spec_fi
     when the spec is technically correct, a more prescriptive spec can unblock an
     agent that cannot infer the right approach from a high-level description.
 
-If decision is "execute_revised", include a revised_bead with all required fields
-(execution_budget and monitor_override must be explicitly stated, not inherited silently).
+Budget guidance for execute_revised:
+  - execution_budget and monitor_override must be explicitly stated, not inherited silently.
+  - If the primary failure across recent attempts is timeout (termination_cause: timeout) with
+    no new spec-related errors, the budget is the bottleneck — the spec is not the problem.
+    Double the current execution_budget in the revised bead. Do not spend the revision on spec
+    changes when the only observable failure is running out of time.
 
 Respond with JSON only, no prose before or after:
 {
