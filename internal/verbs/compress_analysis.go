@@ -61,9 +61,21 @@ func (h *CompressAnalysis) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		return "", fmt.Errorf("count executions for bead %d: %w", beadID, err)
 	}
 	if execCount < compressPassthroughThreshold {
-		text := fmt.Sprintf("Attempt %d (raw — compression starts at attempt %d):\n\n%s",
+		// Accumulate raw findings rather than replace, so the model at attempt 3
+		// receives the full history of attempts 1 and 2 as context.
+		existing, err := loadCompressedHistory(ctx, d, beadID)
+		if err != nil {
+			return "", err
+		}
+		entry := fmt.Sprintf("Attempt %d (raw — compression starts at attempt %d):\n\n%s",
 			execCount, compressPassthroughThreshold, analysis.MechanicalFindings)
-		out, _ := json.Marshal(CompressAnalysisOutput{CompressedText: text})
+		var combined string
+		if existing != "" {
+			combined = existing + "\n\n" + entry
+		} else {
+			combined = entry
+		}
+		out, _ := json.Marshal(CompressAnalysisOutput{CompressedText: combined})
 		return string(out), nil
 	}
 
