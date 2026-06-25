@@ -2,6 +2,7 @@ package verbs
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -201,6 +202,25 @@ func loadLatestAnalysis(ctx context.Context, d *db.DB, beadID int64) (*AnalyzeEx
 		return nil, fmt.Errorf("parse analysis output: %w", err)
 	}
 	return &out, nil
+}
+
+// loadLastValidationFailure returns the validation_result string from the most
+// recent invalid handoff_attempt for jobID, or empty string if no prior
+// failures exist. Used to inject rejection context into retry prompts.
+func loadLastValidationFailure(ctx context.Context, d *db.DB, jobID int64) (string, error) {
+	var result string
+	err := d.QueryRowContext(ctx, `
+		SELECT validation_result FROM handoff_attempts
+		WHERE job_id = ? AND validation_result != 'valid'
+		ORDER BY attempt_number DESC LIMIT 1`, jobID,
+	).Scan(&result)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("last validation failure for job %d: %w", jobID, err)
+	}
+	return result, nil
 }
 
 // loadCompressedHistory returns the compressed history for beadID, or empty

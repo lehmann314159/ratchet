@@ -17,7 +17,11 @@ const analyzeExecutionSystemPrompt = `You analyze a completed execution trace. Y
 
 MECHANICAL_FINDINGS: Objective facts only. No causal language. No interpretation.
 Forbidden phrases: "due to", "because", "caused by", "causes", "results in", "the reason", "the error is", "fails because".
+Any forbidden phrase in mechanical_findings causes the entire output to be rejected and the attempt to not count.
 State what happened: test names, exit codes, line numbers, error messages verbatim.
+
+  WRONG: "The test failed due to a missing import."
+  RIGHT: "TestFoo: FAIL. Exit code: 1. Compiler error: undefined: FooFunc at main.go:12."
 
 ANALYZER_INTERPRETATION: Your read on what the mechanical findings mean. This section is explicitly labeled
 as interpretation. Use hedged language: "suggests", "appears to", "may indicate", "consistent with".
@@ -77,14 +81,19 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		return "", err
 	}
 
-	userMsg := buildAnalyzeUserMsg(execID, terminationCause, monitorFired, monitorHonored, string(trace))
+	lastFailure, err := loadLastValidationFailure(ctx, d, job.ID)
+	if err != nil {
+		return "", fmt.Errorf("load last validation failure: %w", err)
+	}
+
+	userMsg := buildAnalyzeUserMsg(execID, terminationCause, monitorFired, monitorHonored, string(trace), lastFailure)
 	return oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: analyzeExecutionSystemPrompt},
 		{Role: "user", Content: userMsg},
 	}, nil)
 }
 
-func buildAnalyzeUserMsg(execID int64, cause string, monitorFired, monitorHonored *bool, trace string) string {
+func buildAnalyzeUserMsg(execID int64, cause string, monitorFired, monitorHonored *bool, trace, lastFailure string) string {
 	fired := "unknown"
 	if monitorFired != nil {
 		if *monitorFired {
@@ -109,7 +118,7 @@ func buildAnalyzeUserMsg(execID int64, cause string, monitorFired, monitorHonore
 		causeNote = "monitor_force_killed (EXECUTE_BEAD did not respond to graceful signal; trace may be truncated)"
 	}
 
-	return fmt.Sprintf(`## Composite Record
+	msg := fmt.Sprintf(`## Composite Record
 
 Execution ID: %d
 Termination cause: %s
@@ -119,6 +128,11 @@ Monitor honored: %s
 ## Execution Trace
 
 %s`, execID, causeNote, fired, honored, trace)
+
+	if lastFailure != "" {
+		msg += fmt.Sprintf("\n\n## Previous Attempt Rejected\n\nYour previous attempt was rejected for this reason: %s\n\nReview your mechanical_findings before responding to ensure no forbidden phrases appear.", lastFailure)
+	}
+	return msg
 }
 
 func (h *AnalyzeExecution) Validate(raw string) (string, any) {
