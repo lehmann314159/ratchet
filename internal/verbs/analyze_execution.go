@@ -24,6 +24,10 @@ State what happened: test names, exit codes, line numbers, error messages verbat
   WRONG: "The test failed due to a missing import."
   RIGHT: "TestFoo: FAIL. Exit code: 1. Compiler error: undefined: FooFunc at main.go:12."
 
+If the trace shows a test command ran and the output contains "[no test files]", "no test files",
+or "no tests to run", state this explicitly as a finding:
+  "Exit criterion test command completed with exit code 0 but no tests were executed: [no test files]."
+
 ANALYZER_INTERPRETATION: Your read on what the mechanical findings mean. This section is explicitly labeled
 as interpretation. Use hedged language: "suggests", "appears to", "may indicate", "consistent with".
 

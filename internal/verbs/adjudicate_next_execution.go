@@ -76,6 +76,13 @@ Specificity ratchet for RECURRING failures:
       bit := c.R & 1              // extract LSB; no type conversion needed
   - Apply this to every RECURRING failure class, not just the most recent one.
 
+Vacuous test pass detection:
+  - If mechanical_findings state that a test command completed with exit code 0 but
+    "[no test files]" or "no tests to run" was reported, the exit criterion has NOT been met —
+    no tests executed. Do not declare_success in this case.
+  - Classify as bead_problem. The revised Bead must add a test file to output_files (or change
+    the exit criterion to a non-test check that actually verifies the implementation).
+
 Workspace repair when stray files exist:
   - If the trace shows write_file calls to paths outside the output_files list, those files
     may contain conflicting declarations that will break compilation on the next attempt.
