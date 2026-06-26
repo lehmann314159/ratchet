@@ -23,6 +23,13 @@ const compressAnalysisSystemPrompt = `You maintain a compressed record of execut
 Given the existing compressed history and the latest analysis, produce an updated compressed record.
 
 Requirements:
+- Recurrence tagging: for each distinct failure class in the latest analysis, explicitly mark it as
+  NEW (first appearance) or RECURRING (appeared in N prior attempts — cite the count). A failure
+  class is recurring if the same error message, missing symbol, wrong type, or test failure name
+  appeared in any prior attempt in the compressed history. Do not treat symptom variations as
+  distinct failure classes when they share the same root error (e.g. the same undefined symbol
+  reported at different line numbers is one recurring failure, not two new ones). Recurrence counts
+  must be kept current — update them on every compression pass.
 - Preserve the convergent/divergent trend signal: the direction of change across attempts must remain
   correctly inferrable from your output.
 - Do not add judgment language about whether the Bead should be retried or stopped. That is
