@@ -31,12 +31,18 @@ const auditDecompositionSystemPrompt = `You review a decomposition against its s
    entry that is vague ("review the code"), untestable ("ensure correctness"), or out of scope for
    what the Bead actually produces. A Bead with no runnable exit criterion is a structural problem:
    it likely cannot be executed independently and should be merged with a related Bead.
+   Also flag: any exit criterion that runs a test command (e.g. ` + "`go test`" + `, ` + "`pytest`" + `) when the
+   Bead's output_files contains no test file. A test command with no owned test file exits 0
+   with "no test files" — it verifies nothing (vacuous pass). Name the specific Bead and criterion.
 
 4. Layout Bead (Bead 1): the first Bead must be a layout Bead — its purpose is to establish file
    structure and stub implementations only, with no logic. Flag if: (a) Bead 1 contains non-trivial
    implementation logic rather than stubs; (b) any non-layout Bead creates new source files instead
    of filling in stubs from Bead 1; (c) Bead 1's exit criteria do not include a build check (e.g.
-   ` + "`go build ./...`" + `). Use "N/A — structural" for design_doc_reference on layout findings.
+   ` + "`go build ./...`" + `); (d) Bead 1's output_files does not include a signature verification file
+   (e.g. ` + "`api_check_test.go`" + `) — without compile-time type assertions for every exported function
+   in the design doc's API, incorrect stubs can pass the build check silently and propagate wrong
+   signatures into all subsequent Beads. Use "N/A — structural" for design_doc_reference on layout findings.
 
 5. Bead complexity: each non-layout Bead must implement a single logical concern and is expected to
    require no more than 200 lines of new or modified code. Flag any non-layout Bead that: (a) bundles

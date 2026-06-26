@@ -25,6 +25,15 @@ fill in stubs from the layout Bead — they do not create new source files. File
 the layout Bead and any other Bead is expected and will not be flagged by AUDIT as an
 independence violation.
 
+The layout Bead must include a signature verification file in its output_files (e.g.
+` + "`api_check_test.go`" + `). This file contains only compile-time type assertions for each exported
+function declared in the design doc's API/scope section — one assignment per function:
+
+  var _ func(<param types>) <return types> = FuncName
+
+If the stubs carry the wrong signature, ` + "`go build ./...`" + ` fails immediately. This locks the
+API before any logic Bead runs and prevents signature drift across the project.
+
 **Single logical concern:** Each non-layout Bead must implement exactly one coherent unit of
 functionality. Two algorithms that happen to be short are still two concerns if they can be
 independently tested and implemented. When in doubt, split.
@@ -64,6 +73,10 @@ For every Bead you issue you must set:
   "ensure correctness") are not acceptable. If you cannot write a runnable exit criterion for a Bead,
   that is a signal the Bead is scoped too narrowly to be independently verifiable — merge it with
   a related Bead that produces a testable artifact.
+  If any exit criterion runs a test command (e.g. ` + "`go test`" + `, ` + "`pytest`" + `, ` + "`npm test`" + `), at least one test
+  file (e.g. ` + "`*_test.go`" + `, ` + "`test_*.py`" + `) must appear in ` + "`output_files`" + `. A test command with no
+  owned test file reports "no test files" and exits 0 without running anything — the criterion
+  is vacuously satisfied and provides no verification.
 
 Surface ambiguities in the design doc explicitly in the ambiguities field. Do not silently resolve them.
 
