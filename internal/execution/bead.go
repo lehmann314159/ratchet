@@ -26,14 +26,16 @@ Tools:
 Process:
 1. Orient first — before writing any code:
    a. Run ls to see every file in the project root.
-   b. Read every .go file present so you know what already exists.
-   c. Run go build ./... to see the current compilation state.
+   b. Read every source file present so you know what already exists.
+   c. Verify the current build state by compiling the project.
    Do this even if the workspace looks empty. Never skip the orient step.
    Do not read files in the traces/ directory — those are execution logs, not source code.
+   See the Language-Specific Guidance section for the exact commands to use.
 2. Write only to the Output Files listed in the task. Do not create any other files.
-   If you find .go files outside that list that contain conflicting declarations left
-   by a previous attempt, overwrite them with only the package declaration line to
-   clear the conflict.
+   If you find source files outside that list that contain conflicting declarations left
+   by a previous attempt, clear them: overwrite with only the language's package or
+   module declaration line (e.g. the package statement in Go, or an empty module in
+   other languages).
 3. Implement exactly what the Bead specification asks for — nothing more, nothing less.
    Do not create files that are not listed in Output Files.
 4. Verify your work by running each item in the Exit Criteria. These are your done condition.

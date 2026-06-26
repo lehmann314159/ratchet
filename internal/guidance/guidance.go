@@ -55,6 +55,13 @@ func exists(path string) bool {
 
 const goGuidance = `You are working on a Go project. Apply these language-specific rules:
 
+**Orient step (step 1 in your process):**
+  Source files to read: all *.go files in the project root (not in subdirectories unless
+  the spec places code there).
+  Build command: go build ./...
+  Stale file cleanup (step 2): overwrite a stray .go file with only its package line,
+  e.g.: package stego
+
 **Pixel and color access (image package):**
 ` + "`img.At(x, y).RGBA()`" + ` returns a 4-value tuple ` + "`(r, g, b, a uint32)`" + ` — NOT a struct.
 Always destructure it:
