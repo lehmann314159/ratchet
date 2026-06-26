@@ -12,7 +12,7 @@ import (
 	"ratchet/internal/ollama"
 )
 
-func decomposeSpecSystemPrompt(budgetDefault int) string {
+func decomposeSpecSystemPrompt() string {
 	return fmt.Sprintf(`You decompose a design document into a list of Beads — well-scoped, independently executable units of work, each with a clear done-condition.
 
 **Layout Bead — always first:** The very first Bead must be a layout Bead. Its sole job
@@ -53,11 +53,6 @@ returns the original value"). When paired behaviors are present:
   expected and will not be flagged by AUDIT as an independence violation.
 
 For every Bead you issue you must set:
-- execution_budget: integer seconds, the maximum wall-clock time for one execution attempt.
-  Set to the project default (%d seconds) or higher — never lower. If a Bead is simple,
-  the agent will finish quickly and the unused budget costs nothing. Only increase above
-  the default for Beads with substantial complexity (large algorithms, many interacting
-  constraints, extensive test suites).
 - monitor_override: "honor" (MONITOR_EXECUTION may terminate this Bead on loop detection) or "ignore" (loop detection signal is suppressed — use only for legitimately repetitive work)
 - output_files: a non-empty list of file paths this Bead will create or modify (e.g. ["main.go", "go.mod"]).
   This field drives the independence check in AUDIT_DECOMPOSITION: if two non-layout Beads share
@@ -78,17 +73,18 @@ Respond with JSON only, no prose before or after:
     {
       "title": "<short identifier, unique within this decomposition>",
       "full_text": "<complete, self-contained Bead specification>",
-      "execution_budget": <integer seconds>,
       "monitor_override": "honor" | "ignore",
       "output_files": ["<file path>", ...],
       "exit_criteria": ["<runnable check>", ...]
     }
   ],
   "ambiguities": ["<any unresolved ambiguities in the design doc>"]
-}`, budgetDefault)
+}`)
 }
 
-type DecomposeSpec struct{}
+type DecomposeSpec struct {
+	budgetDefault int
+}
 
 func (h *DecomposeSpec) Verb() string { return db.VerbDecomposeSpec }
 
@@ -105,8 +101,9 @@ func (h *DecomposeSpec) Run(ctx context.Context, d *db.DB, oc *ollama.Client, jo
 	if err != nil {
 		return "", err
 	}
+	h.budgetDefault = project.ExecutionBudgetDefault
 	return oc.Chat(ctx, model, []ollama.Message{
-		{Role: "system", Content: decomposeSpecSystemPrompt(project.ExecutionBudgetDefault)},
+		{Role: "system", Content: decomposeSpecSystemPrompt()},
 		{Role: "user", Content: doc},
 	}, nil)
 }
@@ -125,9 +122,6 @@ func (h *DecomposeSpec) Validate(raw string) (string, any) {
 		}
 		if b.FullText == "" {
 			return fmt.Sprintf("malformed: bead[%d] (%s) missing full_text", i, b.Title), nil
-		}
-		if b.ExecutionBudget <= 0 {
-			return fmt.Sprintf("malformed: bead[%d] (%s) execution_budget must be a positive integer", i, b.Title), nil
 		}
 		if b.MonitorOverride != "honor" && b.MonitorOverride != "ignore" {
 			return fmt.Sprintf("malformed: bead[%d] (%s) monitor_override must be \"honor\" or \"ignore\", got %q", i, b.Title, b.MonitorOverride), nil
@@ -169,7 +163,7 @@ func (h *DecomposeSpec) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJ
 			   execution_budget, monitor_override, created_by_verb, created_at)
 			VALUES (?, ?, 1, ?, ?, ?, ?, ?)`,
 			job.ProjectID, beadID, string(fullText),
-			pb.ExecutionBudget, pb.MonitorOverride,
+			h.budgetDefault, pb.MonitorOverride,
 			db.VerbDecomposeSpec, now)
 		if err != nil {
 			return fmt.Errorf("insert revision for bead %q: %w", pb.Title, err)

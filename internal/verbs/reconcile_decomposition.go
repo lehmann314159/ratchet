@@ -37,11 +37,11 @@ Respond with JSON only, no prose before or after:
       "bead_title": "<title of the affected Bead>",
       "action": "agree_and_fix" | "disagree",
       "reason": "<your reasoning>",
-      "updated_bead": { "title": "...", "full_text": "...", "execution_budget": <int>, "monitor_override": "honor"|"ignore", "output_files": ["<file>", ...], "exit_criteria": ["<runnable check>", ...] }
+      "updated_bead": { "title": "...", "full_text": "...", "monitor_override": "honor"|"ignore", "output_files": ["<file>", ...], "exit_criteria": ["<runnable check>", ...] }
     }
   ],
   "updated_beads": [
-    { "title": "...", "full_text": "...", "execution_budget": <int>, "monitor_override": "honor"|"ignore", "output_files": ["<file>", ...], "exit_criteria": ["<runnable check>", ...] }
+    { "title": "...", "full_text": "...", "monitor_override": "honor"|"ignore", "output_files": ["<file>", ...], "exit_criteria": ["<runnable check>", ...] }
   ]
 }`
 
@@ -51,6 +51,7 @@ Respond with JSON only, no prose before or after:
 type ReconcileDecomposition struct {
 	lastCritique    string
 	lastRoundsSoFar int
+	budgetDefault   int
 }
 
 func (h *ReconcileDecomposition) Verb() string { return db.VerbReconcileDecomposition }
@@ -76,10 +77,15 @@ func (h *ReconcileDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.C
 	if err != nil {
 		return "", err
 	}
+	project, err := loadProject(ctx, d, job.ProjectID)
+	if err != nil {
+		return "", err
+	}
 
 	// Cache for Commit (single-goroutine orchestrator; no race).
 	h.lastCritique = critique
 	h.lastRoundsSoFar = roundsSoFar
+	h.budgetDefault = project.ExecutionBudgetDefault
 
 	return oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: reconcileDecompositionSystemPrompt},
@@ -155,9 +161,6 @@ func (h *ReconcileDecomposition) Validate(raw string) (string, any) {
 		return "malformed: updated_beads array is empty", nil
 	}
 	for i, b := range out.UpdatedBeads {
-		if b.ExecutionBudget <= 0 {
-			return fmt.Sprintf("malformed: updated_beads[%d] (%s) execution_budget must be a positive integer", i, b.Title), nil
-		}
 		if b.MonitorOverride != "honor" && b.MonitorOverride != "ignore" {
 			return fmt.Sprintf("malformed: updated_beads[%d] (%s) monitor_override must be \"honor\" or \"ignore\", got %q", i, b.Title, b.MonitorOverride), nil
 		}
@@ -266,7 +269,7 @@ func (h *ReconcileDecomposition) applyFixes(ctx context.Context, tx *sql.Tx, pro
 			   execution_budget, monitor_override, created_by_verb, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			projectID, beadID, currentRevNum+1, string(fullText),
-			r.UpdatedBead.ExecutionBudget, r.UpdatedBead.MonitorOverride,
+			h.budgetDefault, r.UpdatedBead.MonitorOverride,
 			db.VerbReconcileDecomposition, now)
 		if err != nil {
 			return fmt.Errorf("insert revision for bead %q: %w", r.BeadTitle, err)
