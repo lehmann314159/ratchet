@@ -32,6 +32,10 @@ Requirements:
   must be kept current — update them on every compression pass.
 - Preserve the convergent/divergent trend signal: the direction of change across attempts must remain
   correctly inferrable from your output.
+- Resolution detection: if a failure class tagged NEW or RECURRING in the existing compressed
+  history does not appear anywhere in the latest analysis, mark it [RESOLVED — absent from latest
+  attempt] in your updated record. Do not delete it — the history is valuable — but do not count
+  it as still-active, and exclude it from recurrence tallies going forward.
 - Do not add judgment language about whether the Bead should be retried or stopped. That is
   ADJUDICATE_NEXT_EXECUTION's job.
 - Keep the compressed record bounded. Older detail can be summarized; the most recent attempt
