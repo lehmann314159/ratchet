@@ -18,8 +18,7 @@ const reconcileDecompositionSystemPrompt = `You receive a specific critique of a
 - disagree: the finding is wrong; provide a specific, stated reason in the reason field
 
 Vague or blanket defenses ("this is by design", "not applicable") are not acceptable for a disagree.
-Your updated_beads field must contain the complete decomposition after all fixes are applied,
-even if no beads changed (so the next audit has the full current state).
+updated_bead must be the complete corrected Bead spec — all fields, not just the changed ones.
 
 When fixing an exit criterion that uses an unsupported invocation pattern (e.g. stdin when the
 tool only accepts file paths), replace it with an equivalent check using a supported pattern —
@@ -40,9 +39,6 @@ Respond with JSON only, no prose before or after:
       "reason": "<your reasoning>",
       "updated_bead": { "title": "...", "full_text": "...", "monitor_override": "honor"|"ignore", "output_files": ["<file>", ...], "exit_criteria": ["<runnable check>", ...] }
     }
-  ],
-  "updated_beads": [
-    { "title": "...", "full_text": "...", "monitor_override": "honor"|"ignore", "output_files": ["<file>", ...], "exit_criteria": ["<runnable check>", ...] }
   ]
 }`
 
@@ -156,20 +152,6 @@ func (h *ReconcileDecomposition) Validate(raw string) (string, any) {
 		}
 		if r.Action == "disagree" && strings.TrimSpace(r.Reason) == "" {
 			return fmt.Sprintf("malformed: responses[%d] action is disagree but reason is empty", i), nil
-		}
-	}
-	if len(out.UpdatedBeads) == 0 {
-		return "malformed: updated_beads array is empty", nil
-	}
-	for i, b := range out.UpdatedBeads {
-		if b.MonitorOverride != "honor" && b.MonitorOverride != "ignore" {
-			return fmt.Sprintf("malformed: updated_beads[%d] (%s) monitor_override must be \"honor\" or \"ignore\", got %q", i, b.Title, b.MonitorOverride), nil
-		}
-		if len(b.OutputFiles) == 0 {
-			return fmt.Sprintf("malformed: updated_beads[%d] (%s) output_files is missing or empty", i, b.Title), nil
-		}
-		if len(b.ExitCriteria) == 0 {
-			return fmt.Sprintf("malformed: updated_beads[%d] (%s) exit_criteria is missing or empty", i, b.Title), nil
 		}
 	}
 	return "valid", out

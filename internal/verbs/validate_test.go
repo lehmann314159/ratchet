@@ -78,7 +78,6 @@ func TestAuditDecompositionValidate(t *testing.T) {
 
 func TestReconcileDecompositionValidate(t *testing.T) {
 	h := &ReconcileDecomposition{}
-	validBeads := `[{"title":"B01","full_text":"spec","execution_budget":60,"monitor_override":"honor","output_files":["b01.go"],"exit_criteria":["go build ./..."]}]`
 	tests := []struct {
 		name  string
 		input string
@@ -86,47 +85,32 @@ func TestReconcileDecompositionValidate(t *testing.T) {
 	}{
 		{
 			"agree_and_fix with updated_bead",
-			`{"responses":[{"bead_title":"B01","action":"agree_and_fix","reason":"correct","updated_bead":{"title":"B01","full_text":"fixed","execution_budget":60,"monitor_override":"honor","output_files":["b01.go"],"exit_criteria":["go build ./..."]}}],"updated_beads":` + validBeads + `}`,
+			`{"responses":[{"bead_title":"B01","action":"agree_and_fix","reason":"correct","updated_bead":{"title":"B01","full_text":"fixed","execution_budget":60,"monitor_override":"honor","output_files":["b01.go"],"exit_criteria":["go build ./..."]}}]}`,
 			true,
 		},
 		{
 			"disagree with reason",
-			`{"responses":[{"bead_title":"B01","action":"disagree","reason":"finding is wrong — spec is correct"}],"updated_beads":` + validBeads + `}`,
+			`{"responses":[{"bead_title":"B01","action":"disagree","reason":"finding is wrong — spec is correct"}]}`,
 			true,
 		},
 		{
 			"agree_and_fix missing updated_bead",
-			`{"responses":[{"bead_title":"B01","action":"agree_and_fix","reason":"ok"}],"updated_beads":` + validBeads + `}`,
+			`{"responses":[{"bead_title":"B01","action":"agree_and_fix","reason":"ok"}]}`,
 			false,
 		},
 		{
 			"disagree with empty reason",
-			`{"responses":[{"bead_title":"B01","action":"disagree","reason":""}],"updated_beads":` + validBeads + `}`,
+			`{"responses":[{"bead_title":"B01","action":"disagree","reason":""}]}`,
 			false,
 		},
 		{
 			"invalid action",
-			`{"responses":[{"bead_title":"B01","action":"abstain","reason":"x"}],"updated_beads":` + validBeads + `}`,
+			`{"responses":[{"bead_title":"B01","action":"abstain","reason":"x"}]}`,
 			false,
 		},
 		{
 			"empty responses array",
-			`{"responses":[],"updated_beads":` + validBeads + `}`,
-			false,
-		},
-		{
-			"empty updated_beads array",
-			`{"responses":[{"bead_title":"B01","action":"disagree","reason":"x"}],"updated_beads":[]}`,
-			false,
-		},
-		{
-			"updated_beads zero execution_budget",
-			`{"responses":[{"bead_title":"B01","action":"disagree","reason":"x"}],"updated_beads":[{"title":"B01","full_text":"x","execution_budget":0,"monitor_override":"honor"}]}`,
-			false,
-		},
-		{
-			"updated_beads invalid monitor_override",
-			`{"responses":[{"bead_title":"B01","action":"disagree","reason":"x"}],"updated_beads":[{"title":"B01","full_text":"x","execution_budget":60,"monitor_override":"maybe"}]}`,
+			`{"responses":[]}`,
 			false,
 		},
 		{"not JSON", `not json`, false},

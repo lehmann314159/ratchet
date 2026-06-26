@@ -42,8 +42,7 @@ type ReconcileResponse struct {
 }
 
 type ReconcileDecompositionOutput struct {
-	Responses    []ReconcileResponse `json:"responses"`
-	UpdatedBeads []ParsedBead        `json:"updated_beads"` // full decomposition after all fixes applied
+	Responses []ReconcileResponse `json:"responses"`
 }
 
 // --- ANALYZE_EXECUTION ---

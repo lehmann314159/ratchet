@@ -224,9 +224,6 @@ func TestReconcileDecompositionCommitConverged(t *testing.T) {
 				UpdatedBead: &ParsedBead{Title: "B01", FullText: "revised with stride=4", ExecutionBudget: 300, MonitorOverride: "honor"},
 			},
 		},
-		UpdatedBeads: []ParsedBead{
-			{Title: "B01", FullText: "revised with stride=4", ExecutionBudget: 300, MonitorOverride: "honor"},
-		},
 	}
 	inTx(t, d, func(tx *sql.Tx) error { return h.Commit(ctx, tx, job, out) })
 
@@ -261,9 +258,6 @@ func TestReconcileDecompositionCommitDisagreedContinuing(t *testing.T) {
 		Responses: []ReconcileResponse{
 			{BeadTitle: "B01", Action: "disagree", Reason: "the audit finding is wrong — named approach per §2.3"},
 		},
-		UpdatedBeads: []ParsedBead{
-			{Title: "B01", FullText: "original spec unchanged", ExecutionBudget: 300, MonitorOverride: "honor"},
-		},
 	}
 	inTx(t, d, func(tx *sql.Tx) error { return h.Commit(ctx, tx, job, out) })
 
@@ -294,9 +288,6 @@ func TestReconcileDecompositionCommitEscalated(t *testing.T) {
 	out := ReconcileDecompositionOutput{
 		Responses: []ReconcileResponse{
 			{BeadTitle: "B01", Action: "disagree", Reason: "still disagree after round 2"},
-		},
-		UpdatedBeads: []ParsedBead{
-			{Title: "B01", FullText: "spec", ExecutionBudget: 300, MonitorOverride: "honor"},
 		},
 	}
 	inTx(t, d, func(tx *sql.Tx) error { return h.Commit(ctx, tx, job, out) })

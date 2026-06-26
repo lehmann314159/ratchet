@@ -204,9 +204,6 @@ func TestDebateLoopTwoRoundsConverged(t *testing.T) {
 		Responses: []ReconcileResponse{
 			{BeadTitle: "B01", Action: "disagree", Reason: "the formula is correct per §3.1 of the design doc"},
 		},
-		UpdatedBeads: []ParsedBead{
-			{Title: "B01", FullText: "original spec unchanged", ExecutionBudget: 300, MonitorOverride: "honor"},
-		},
 	}
 	inTx(t, d, func(tx *sql.Tx) error { return h1.Commit(ctx, tx, reconcile1Job, round1Output) })
 
@@ -250,9 +247,6 @@ func TestDebateLoopTwoRoundsConverged(t *testing.T) {
 				UpdatedBead: &ParsedBead{Title: "B01", FullText: "fixed spec: stride=4", ExecutionBudget: 300, MonitorOverride: "honor"},
 			},
 		},
-		UpdatedBeads: []ParsedBead{
-			{Title: "B01", FullText: "fixed spec: stride=4", ExecutionBudget: 300, MonitorOverride: "honor"},
-		},
 	}
 	inTx(t, d, func(tx *sql.Tx) error { return h2.Commit(ctx, tx, reconcile2Job, round2Output) })
 
@@ -289,8 +283,7 @@ func TestDebateLoopTwoRoundsEscalated(t *testing.T) {
 	h1 := &ReconcileDecomposition{lastCritique: auditFindingsJSON, lastRoundsSoFar: 0}
 	inTx(t, d, func(tx *sql.Tx) error {
 		return h1.Commit(ctx, tx, reconcile1Job, ReconcileDecompositionOutput{
-			Responses:    []ReconcileResponse{{BeadTitle: "B01", Action: "disagree", Reason: "finding is wrong: §3.1 specifies this"}},
-			UpdatedBeads: []ParsedBead{{Title: "B01", FullText: "spec", ExecutionBudget: 300, MonitorOverride: "honor"}},
+			Responses: []ReconcileResponse{{BeadTitle: "B01", Action: "disagree", Reason: "finding is wrong: §3.1 specifies this"}},
 		})
 	})
 
@@ -307,8 +300,7 @@ func TestDebateLoopTwoRoundsEscalated(t *testing.T) {
 	h2 := &ReconcileDecomposition{lastCritique: auditFindingsJSON, lastRoundsSoFar: 1}
 	inTx(t, d, func(tx *sql.Tx) error {
 		return h2.Commit(ctx, tx, reconcile2Job, ReconcileDecompositionOutput{
-			Responses:    []ReconcileResponse{{BeadTitle: "B01", Action: "disagree", Reason: "still disagree: §3.1 is unambiguous"}},
-			UpdatedBeads: []ParsedBead{{Title: "B01", FullText: "spec", ExecutionBudget: 300, MonitorOverride: "honor"}},
+			Responses: []ReconcileResponse{{BeadTitle: "B01", Action: "disagree", Reason: "still disagree: §3.1 is unambiguous"}},
 		})
 	})
 
@@ -321,7 +313,6 @@ func TestDebateLoopTwoRoundsEscalated(t *testing.T) {
 	if r2outcome != "escalated" {
 		t.Errorf("round 2 outcome = %q, want escalated", r2outcome)
 	}
-	// Reconcile job must be marked escalated.
 	var jobStatus string
 	if err := d.QueryRowContext(ctx,
 		`SELECT status FROM handoff_jobs WHERE id = ?`, reconcile2Job.ID,
@@ -331,11 +322,9 @@ func TestDebateLoopTwoRoundsEscalated(t *testing.T) {
 	if jobStatus != "escalated" {
 		t.Errorf("reconcile job status = %q, want escalated", jobStatus)
 	}
-	// No EXECUTE_BEAD jobs should exist.
 	if n := countRows(t, d, `SELECT COUNT(*) FROM handoff_jobs WHERE project_id = -1 AND verb = 'EXECUTE_BEAD'`); n != 0 {
 		t.Errorf("EXECUTE_BEAD jobs = %d after escalation, want 0", n)
 	}
-	// Debate history has both rounds.
 	history, _ := loadDebateHistory(ctx, d, -1)
 	if len(history) != 2 {
 		t.Errorf("debate history has %d rounds, want 2", len(history))
@@ -358,13 +347,11 @@ func TestDebateLoopSingleRoundConverged(t *testing.T) {
 		return h.Commit(ctx, tx, reconcileJob, ReconcileDecompositionOutput{
 			Responses: []ReconcileResponse{
 				{
-					BeadTitle: "B01", Action: "agree_and_fix",
+					BeadTitle:   "B01",
+					Action:      "agree_and_fix",
 					Reason:      "corrected stride to 4 bytes/pixel",
 					UpdatedBead: &ParsedBead{Title: "B01", FullText: "fixed", ExecutionBudget: 300, MonitorOverride: "honor"},
 				},
-			},
-			UpdatedBeads: []ParsedBead{
-				{Title: "B01", FullText: "fixed", ExecutionBudget: 300, MonitorOverride: "honor"},
 			},
 		})
 	})
@@ -378,11 +365,9 @@ func TestDebateLoopSingleRoundConverged(t *testing.T) {
 	if outcome != "converged" {
 		t.Errorf("outcome = %q, want converged", outcome)
 	}
-	// EXECUTE_BEAD enqueued immediately (no second AUDIT needed).
 	if n := countRows(t, d, `SELECT COUNT(*) FROM handoff_jobs WHERE project_id = -1 AND verb = 'EXECUTE_BEAD' AND bead_id = ?`, beadID); n != 1 {
 		t.Errorf("EXECUTE_BEAD jobs = %d, want 1", n)
 	}
-	// No re-enqueued AUDIT job.
 	if n := countRows(t, d, `SELECT COUNT(*) FROM handoff_jobs WHERE project_id = -1 AND verb = 'AUDIT_DECOMPOSITION' AND status = 'pending'`); n != 0 {
 		t.Errorf("pending AUDIT jobs after convergence = %d, want 0", n)
 	}
