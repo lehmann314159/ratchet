@@ -23,10 +23,19 @@ Tools:
 - run_command(command): run a shell command in the project root directory
 
 Process:
-1. Implement exactly what the Bead specification asks for — nothing more, nothing less.
+1. Orient first — before writing any code:
+   a. Run ls to see every file in the project root.
+   b. Read every .go file present so you know what already exists.
+   c. Run go build ./... to see the current compilation state.
+   Do this even if the workspace looks empty. Never skip the orient step.
+2. Write only to the Output Files listed in the task. Do not create any other files.
+   If you find .go files outside that list that contain conflicting declarations left
+   by a previous attempt, overwrite them with only the package declaration line to
+   clear the conflict.
+3. Implement exactly what the Bead specification asks for — nothing more, nothing less.
    Do not write tests, documentation, or other artifacts unless the specification explicitly requires them.
-2. Verify your work by running each item in the Exit Criteria section. These are your done condition.
-3. When every exit criterion passes, send a final message confirming this. Do not call further tools.
+4. Verify your work by running each item in the Exit Criteria. These are your done condition.
+5. When every exit criterion passes, send a final message confirming this. Do not call further tools.
 
 Use relative paths for all file operations. If you cannot make progress, explain why in your final message.`
 
@@ -96,9 +105,10 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 		return fmt.Errorf("load execution %d: %w", execID, err)
 	}
 
-	// The bead's full_text is a JSON-encoded ParsedBead; extract the spec and exit criteria.
+	// The bead's full_text is a JSON-encoded ParsedBead; extract the spec, output files, and exit criteria.
 	var parsedBead struct {
 		FullText     string   `json:"full_text"`
+		OutputFiles  []string `json:"output_files"`
 		ExitCriteria []string `json:"exit_criteria"`
 	}
 	if err := json.Unmarshal([]byte(beadFullTextJSON), &parsedBead); err != nil {
@@ -139,7 +149,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	tools := toolDefinitions()
 	messages := []ollama.Message{
 		{Role: "system", Content: executeBeadSystemPrompt},
-		{Role: "user", Content: buildBeadUserMsg(parsedBead.FullText, parsedBead.ExitCriteria)},
+		{Role: "user", Content: buildBeadUserMsg(parsedBead.FullText, parsedBead.OutputFiles, parsedBead.ExitCriteria)},
 	}
 
 	for turn := 1; ; turn++ {
@@ -264,16 +274,29 @@ func stubLine(mode string, step int) string {
 }
 
 // buildBeadUserMsg constructs the user message for the EXECUTE_BEAD agent.
-// Exit criteria are presented as a numbered checklist so the agent has an
-// unambiguous done condition distinct from the prose spec.
-func buildBeadUserMsg(specText string, exitCriteria []string) string {
-	if len(exitCriteria) == 0 {
-		return specText
+// Output files are presented as a hard write constraint before the spec so the
+// agent sees them before reading implementation details. Exit criteria are a
+// numbered checklist so the agent has an unambiguous done condition.
+func buildBeadUserMsg(specText string, outputFiles []string, exitCriteria []string) string {
+	var msg string
+
+	if len(outputFiles) > 0 {
+		msg += "## Output Files\n\nYou may ONLY write to these files. Do not create any other files.\n\n"
+		for _, f := range outputFiles {
+			msg += fmt.Sprintf("- %s\n", f)
+		}
+		msg += "\n"
 	}
-	msg := specText + "\n\n## Exit Criteria\n\nYour done condition is exactly: each of the following checks passes. Verify them before sending your final message.\n\n"
-	for i, c := range exitCriteria {
-		msg += fmt.Sprintf("%d. %s\n", i+1, c)
+
+	msg += specText
+
+	if len(exitCriteria) > 0 {
+		msg += "\n\n## Exit Criteria\n\nYour done condition is exactly: each of the following checks passes. Verify them before sending your final message.\n\n"
+		for i, c := range exitCriteria {
+			msg += fmt.Sprintf("%d. %s\n", i+1, c)
+		}
 	}
+
 	return msg
 }
 
