@@ -64,6 +64,26 @@ Pre-implementation commitment for persistent capability failures:
     understanding (or misunderstanding) in the trace before implementation, where it can be
     caught early rather than after a full failed attempt.
 
+Specificity ratchet for RECURRING failures:
+  - The compressed history tags failure classes as NEW or RECURRING (N prior attempts).
+  - For any failure class marked RECURRING with 2 or more prior attempts, prose descriptions
+    in the revised spec are insufficient — the agent has already read prose descriptions and
+    failed. Escalate to verbatim code: include the exact function call, correct type, or a
+    minimal working skeleton directly in the revised full_text.
+  - Example: if "undefined: nrgba.RGBAAt" is RECURRING (2 prior attempts), do not write
+    "use the correct NRGBA access method" — instead write the exact pattern:
+      c := nrgba.NRGBAAt(x, y)   // returns color.NRGBA; fields R, G, B, A are uint8
+      bit := c.R & 1              // extract LSB; no type conversion needed
+  - Apply this to every RECURRING failure class, not just the most recent one.
+
+Workspace repair when stray files exist:
+  - If the trace shows write_file calls to paths outside the output_files list, those files
+    may contain conflicting declarations that will break compilation on the next attempt.
+  - In the revised full_text, add an explicit cleanup instruction naming each stray file:
+    "Before implementing anything, overwrite <file> with only the package declaration line."
+  - Do not rely on the agent discovering stray files on its own — name them explicitly in
+    the spec so the cleanup is unambiguous.
+
 Respond with JSON only, no prose before or after:
 {
   "trend": "same" | "narrower" | "unrelated" | "not_applicable",
