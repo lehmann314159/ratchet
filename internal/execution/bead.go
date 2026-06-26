@@ -28,6 +28,7 @@ Process:
    b. Read every .go file present so you know what already exists.
    c. Run go build ./... to see the current compilation state.
    Do this even if the workspace looks empty. Never skip the orient step.
+   Do not read files in the traces/ directory — those are execution logs, not source code.
 2. Write only to the Output Files listed in the task. Do not create any other files.
    If you find .go files outside that list that contain conflicting declarations left
    by a previous attempt, overwrite them with only the package declaration line to
