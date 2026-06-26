@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -92,8 +91,12 @@ type chatResponse struct {
 	Error   string  `json:"error,omitempty"`
 }
 
-// Chat sends a streaming chat request and returns the assistant's complete reply.
-// Tokens are logged at DEBUG level as they arrive for observability.
+// Chat sends a non-streaming chat request and returns the assistant's complete reply.
+// Handoff verbs (DECOMPOSE, AUDIT, RECONCILE, etc.) use this path. Streaming is
+// intentionally off here: per-token HTTP flushing adds overhead that compounds
+// across the thousands of tokens a large model generates, and these calls already
+// have a 30-minute client timeout. Observability for handoff verbs comes from the
+// structured outputs stored in handoff_attempts, not from a token stream.
 func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *Options) (string, error) {
 	temp := DefaultTemperature
 	if opts != nil && opts.Temperature > 0 {
@@ -103,7 +106,7 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 	req := chatRequest{
 		Model:    model,
 		Messages: msgs,
-		Stream:   true,
+		Stream:   false,
 		Options:  map[string]any{"temperature": temp},
 	}
 
@@ -124,33 +127,23 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 	}
 	defer resp.Body.Close()
 
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read: %w", err)
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("ollama %d: %s", resp.StatusCode, truncate(string(raw), 200))
 	}
 
-	var sb strings.Builder
-	dec := json.NewDecoder(resp.Body)
-	for {
-		var chunk chatResponse
-		if err := dec.Decode(&chunk); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return "", fmt.Errorf("decode stream: %w", err)
-		}
-		if chunk.Error != "" {
-			return "", fmt.Errorf("ollama: %s", chunk.Error)
-		}
-		if chunk.Message.Content != "" {
-			sb.WriteString(chunk.Message.Content)
-			slog.Debug("stream", "model", model, "token", chunk.Message.Content)
-		}
-		if chunk.Done {
-			break
-		}
+	var cr chatResponse
+	if err := json.Unmarshal(raw, &cr); err != nil {
+		return "", fmt.Errorf("parse response: %w", err)
 	}
-	return sb.String(), nil
+	if cr.Error != "" {
+		return "", fmt.Errorf("ollama: %s", cr.Error)
+	}
+	return cr.Message.Content, nil
 }
 
 // ChatWithTools sends a streaming chat request with tool definitions and
