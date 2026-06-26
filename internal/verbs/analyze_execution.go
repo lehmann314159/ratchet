@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -57,17 +58,22 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	}
 	beadID := job.BeadID.Int64
 
-	// Load the most recent completed execution for this bead.
+	// Load the most recent completed execution for this bead, plus the bead
+	// revision's full_text (for output_files) and the project folder path.
 	var execID int64
-	var tracePath, terminationCause string
+	var tracePath, terminationCause, beadFullTextJSON, folderPath string
 	var monitorFired, monitorHonored *bool
 	if err := d.QueryRowContext(ctx, `
-		SELECT id, trace_path, termination_cause, monitor_fired, monitor_honored
-		FROM executions
-		WHERE bead_id = ? AND termination_cause IS NOT NULL
-		ORDER BY ended_at DESC
+		SELECT e.id, e.trace_path, e.termination_cause, e.monitor_fired, e.monitor_honored,
+		       br.full_text, p.folder_path
+		FROM executions e
+		JOIN bead_revisions br ON br.id = e.bead_revision_id
+		JOIN projects p ON p.id = e.project_id
+		WHERE e.bead_id = ? AND e.termination_cause IS NOT NULL
+		ORDER BY e.ended_at DESC
 		LIMIT 1`, beadID,
-	).Scan(&execID, &tracePath, &terminationCause, &monitorFired, &monitorHonored); err != nil {
+	).Scan(&execID, &tracePath, &terminationCause, &monitorFired, &monitorHonored,
+		&beadFullTextJSON, &folderPath); err != nil {
 		return "", fmt.Errorf("load execution for bead %d: %w", beadID, err)
 	}
 
@@ -75,6 +81,8 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	if err != nil {
 		return "", fmt.Errorf("read trace %s: %w", tracePath, err)
 	}
+
+	outputFileStatus := checkOutputFiles(beadFullTextJSON, folderPath)
 
 	model, err := loadVerbModel(ctx, d, job.ProjectID, db.VerbAnalyzeExecution)
 	if err != nil {
@@ -86,14 +94,36 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		return "", fmt.Errorf("load last validation failure: %w", err)
 	}
 
-	userMsg := buildAnalyzeUserMsg(execID, terminationCause, monitorFired, monitorHonored, string(trace), lastFailure)
+	userMsg := buildAnalyzeUserMsg(execID, terminationCause, monitorFired, monitorHonored, outputFileStatus, string(trace), lastFailure)
 	return oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: analyzeExecutionSystemPrompt},
 		{Role: "user", Content: userMsg},
 	}, nil)
 }
 
-func buildAnalyzeUserMsg(execID int64, cause string, monitorFired, monitorHonored *bool, trace, lastFailure string) string {
+// checkOutputFiles stats each file listed in the bead's output_files and
+// returns a human-readable status string for inclusion in the ANALYZE prompt.
+// A missing file is an objective fact — no causal language needed here.
+func checkOutputFiles(beadFullTextJSON, folderPath string) string {
+	var spec struct {
+		OutputFiles []string `json:"output_files"`
+	}
+	if err := json.Unmarshal([]byte(beadFullTextJSON), &spec); err != nil || len(spec.OutputFiles) == 0 {
+		return "(output_files not available)"
+	}
+	var sb strings.Builder
+	for _, rel := range spec.OutputFiles {
+		info, err := os.Stat(filepath.Join(folderPath, rel))
+		if err != nil {
+			fmt.Fprintf(&sb, "%s: missing\n", rel)
+		} else {
+			fmt.Fprintf(&sb, "%s: present (%d bytes)\n", rel, info.Size())
+		}
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func buildAnalyzeUserMsg(execID int64, cause string, monitorFired, monitorHonored *bool, outputFileStatus, trace, lastFailure string) string {
 	fired := "unknown"
 	if monitorFired != nil {
 		if *monitorFired {
@@ -125,9 +155,13 @@ Termination cause: %s
 Monitor fired: %s
 Monitor honored: %s
 
+## Output Files (filesystem state at analysis time)
+
+%s
+
 ## Execution Trace
 
-%s`, execID, causeNote, fired, honored, trace)
+%s`, execID, causeNote, fired, honored, outputFileStatus, trace)
 
 	if lastFailure != "" {
 		msg += fmt.Sprintf("\n\n## Previous Attempt Rejected\n\nYour previous attempt was rejected for this reason: %s\n\nReview your mechanical_findings before responding to ensure no forbidden phrases appear.", lastFailure)
