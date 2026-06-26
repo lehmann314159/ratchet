@@ -99,10 +99,14 @@ func (h *AuditDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.Clien
 		return "", err
 	}
 	userMsg := buildAuditUserMsg(doc, beads)
-	return oc.Chat(ctx, model, []ollama.Message{
+	raw, err := oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: guidance.Inject(auditDecompositionSystemPrompt, project.FolderPath)},
 		{Role: "user", Content: userMsg},
 	}, nil)
+	if err != nil {
+		return "", err
+	}
+	return injectMechanicalFindings(raw, project.FolderPath, beads), nil
 }
 
 func buildAuditUserMsg(doc string, beads []beadState) string {

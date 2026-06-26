@@ -14,12 +14,12 @@ func TestDecomposeSpecValidate(t *testing.T) {
 	}{
 		{
 			"valid with one bead",
-			`{"beads":[{"title":"B01","full_text":"build the widget","execution_budget":300,"monitor_override":"honor"}]}`,
+			`{"beads":[{"title":"B01","full_text":"build the widget","execution_budget":300,"monitor_override":"honor","output_files":["widget.go"],"exit_criteria":["go build ./..."]}]}`,
 			true,
 		},
 		{
 			"valid with ambiguities field",
-			`{"beads":[{"title":"B01","full_text":"spec","execution_budget":60,"monitor_override":"ignore"}],"ambiguities":["scope unclear"]}`,
+			`{"beads":[{"title":"B01","full_text":"spec","execution_budget":60,"monitor_override":"ignore","output_files":["spec.go"],"exit_criteria":["go build ./..."]}],"ambiguities":["scope unclear"]}`,
 			true,
 		},
 		{"empty object", `{}`, false},
@@ -78,7 +78,7 @@ func TestAuditDecompositionValidate(t *testing.T) {
 
 func TestReconcileDecompositionValidate(t *testing.T) {
 	h := &ReconcileDecomposition{}
-	validBeads := `[{"title":"B01","full_text":"spec","execution_budget":60,"monitor_override":"honor"}]`
+	validBeads := `[{"title":"B01","full_text":"spec","execution_budget":60,"monitor_override":"honor","output_files":["b01.go"],"exit_criteria":["go build ./..."]}]`
 	tests := []struct {
 		name  string
 		input string
@@ -86,7 +86,7 @@ func TestReconcileDecompositionValidate(t *testing.T) {
 	}{
 		{
 			"agree_and_fix with updated_bead",
-			`{"responses":[{"bead_title":"B01","action":"agree_and_fix","reason":"correct","updated_bead":{"title":"B01","full_text":"fixed","execution_budget":60,"monitor_override":"honor"}}],"updated_beads":` + validBeads + `}`,
+			`{"responses":[{"bead_title":"B01","action":"agree_and_fix","reason":"correct","updated_bead":{"title":"B01","full_text":"fixed","execution_budget":60,"monitor_override":"honor","output_files":["b01.go"],"exit_criteria":["go build ./..."]}}],"updated_beads":` + validBeads + `}`,
 			true,
 		},
 		{
@@ -203,7 +203,7 @@ func TestAdjudicateNextExecutionValidate(t *testing.T) {
 		},
 		{
 			"valid execute_revised with revised_bead",
-			`{"trend":"narrower","bead_spec_fit":"bead_problem","reasoning":"spec missing type constraint","decision":"execute_revised","revised_bead":{"title":"B01","full_text":"revised","execution_budget":300,"monitor_override":"honor"}}`,
+			`{"trend":"narrower","bead_spec_fit":"bead_problem","reasoning":"spec missing type constraint","decision":"execute_revised","revised_bead":{"title":"B01","full_text":"revised","execution_budget":300,"monitor_override":"honor","output_files":["b01.go"],"exit_criteria":["go build ./..."]}}`,
 			true,
 		},
 		{"invalid trend", `{"trend":"worse","bead_spec_fit":"bead_problem","reasoning":"x","decision":"execute_as_is"}`, false},

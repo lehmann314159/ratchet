@@ -25,7 +25,7 @@ func Inject(systemPrompt, folderPath string) string {
 }
 
 func load(folderPath string) string {
-	lang := detect(folderPath)
+	lang := Detect(folderPath)
 	if lang == "" {
 		return ""
 	}
@@ -46,7 +46,9 @@ func guidanceFilePath(lang string) string {
 	return filepath.Join(filepath.Dir(exe), "guidance", lang+".md")
 }
 
-func detect(folderPath string) string {
+// Detect returns the programming language detected from folderPath by inspecting
+// language marker files, or "" if no language can be identified.
+func Detect(folderPath string) string {
 	if exists(filepath.Join(folderPath, "go.mod")) {
 		return "go"
 	}

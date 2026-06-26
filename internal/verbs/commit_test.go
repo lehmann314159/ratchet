@@ -194,7 +194,7 @@ func TestAuditDecompositionCommit(t *testing.T) {
 	seedProject(t, d, -1, "fixture: AUDIT_DECOMPOSITION commit")
 
 	job := seedJob(t, d, -1, db.VerbAuditDecomposition, sql.NullInt64{})
-	out := AuditDecompositionOutput{OverallVerdict: "no_issues"}
+	out := AuditDecompositionOutput{OverallVerdict: "issues_found", Findings: []AuditFinding{{BeadTitle: "B01", Issue: "stub"}}}
 	inTx(t, d, func(tx *sql.Tx) error {
 		return (&AuditDecomposition{}).Commit(ctx, tx, job, out)
 	})

@@ -113,7 +113,9 @@ const glmDP3Contradiction = `{
     "title": "B02 — Bit Manipulation Utilities",
     "full_text": "same spec with added implementation note: maintain a write counter; return error when counter exceeds image capacity (width*height*3 bits).",
     "execution_budget": 300,
-    "monitor_override": "honor"
+    "monitor_override": "honor",
+    "output_files": ["bits.go"],
+    "exit_criteria": ["go build ./..."]
   }
 }`
 
