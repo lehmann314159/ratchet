@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"ratchet/internal/db"
+	"ratchet/internal/guidance"
 	"ratchet/internal/ollama"
 )
 
@@ -116,7 +117,7 @@ func (h *DecomposeSpec) Run(ctx context.Context, d *db.DB, oc *ollama.Client, jo
 	}
 	h.budgetDefault = project.ExecutionBudgetDefault
 	return oc.Chat(ctx, model, []ollama.Message{
-		{Role: "system", Content: decomposeSpecSystemPrompt()},
+		{Role: "system", Content: guidance.Inject(decomposeSpecSystemPrompt(), project.FolderPath)},
 		{Role: "user", Content: doc},
 	}, nil)
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"ratchet/internal/db"
+	"ratchet/internal/guidance"
 	"ratchet/internal/ollama"
 )
 
@@ -226,6 +227,10 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 		return "", err
 	}
 
+	project, err := loadProject(ctx, d, job.ProjectID)
+	if err != nil {
+		return "", err
+	}
 	model, err := loadVerbModel(ctx, d, job.ProjectID, db.VerbAdjudicateNextExecution)
 	if err != nil {
 		return "", err
@@ -233,7 +238,7 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 
 	userMsg := buildAdjudicateUserMsg(currentBead, revLog, analysis.MechanicalFindings, compressedHistory, diffSignal)
 	return oc.Chat(ctx, model, []ollama.Message{
-		{Role: "system", Content: adjudicateNextExecutionSystemPrompt},
+		{Role: "system", Content: guidance.Inject(adjudicateNextExecutionSystemPrompt, project.FolderPath)},
 		{Role: "user", Content: userMsg},
 	}, nil)
 }

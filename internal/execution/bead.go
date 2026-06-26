@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"ratchet/internal/db"
+	"ratchet/internal/guidance"
 	"ratchet/internal/ollama"
 )
 
@@ -156,7 +157,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	oc := ollama.NewUnbounded(ollamaURL)
 	tools := toolDefinitions()
 	messages := []ollama.Message{
-		{Role: "system", Content: executeBeadSystemPrompt},
+		{Role: "system", Content: guidance.Inject(executeBeadSystemPrompt, folderPath)},
 		{Role: "user", Content: buildBeadUserMsg(parsedBead.FullText, parsedBead.OutputFiles, parsedBead.ExitCriteria)},
 	}
 
