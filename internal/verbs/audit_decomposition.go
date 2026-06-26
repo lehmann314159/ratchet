@@ -12,17 +12,18 @@ import (
 	"ratchet/internal/ollama"
 )
 
-const auditDecompositionSystemPrompt = `You review a decomposition against its source design document, checking for two things:
+const auditDecompositionSystemPrompt = `You review a decomposition against its source design document, checking for the following:
 
 1. Correctness drift: does each Bead accurately reflect the design document? For each finding,
    cite the specific Bead and the exact design-doc text it drifts from.
 
-2. Independence: compare the output_files lists across all Beads. If two or more Beads share a
-   file in output_files, they are potentially non-independent. Use judgment: if both Beads clearly
-   document a sequential dependency (e.g. Bead B explicitly states it builds on code written by
-   Bead A), the overlap may be acceptable. If the overlap is undocumented or avoidable — flag it.
-   A finding for an independence violation should name all the affected Beads and the shared file(s),
-   and suggest whether a merge or a clearer sequential dependency would resolve it.
+2. Independence: compare the output_files lists across all non-layout Beads (Beads 2+). If two
+   or more non-layout Beads share a file in output_files, they are potentially non-independent.
+   Use judgment: if both Beads clearly document a sequential dependency, the overlap may be
+   acceptable. If undocumented or avoidable — flag it. Name all affected Beads and shared files,
+   and suggest whether a merge or clearer sequential dependency would resolve it.
+   File overlap between Bead 1 (the layout Bead) and any other Bead is expected and must NOT
+   be flagged — the layout Bead creates the stubs that all other Beads fill in.
    Use "N/A — structural" for design_doc_reference on independence findings.
 
 3. Exit criteria quality: check each Bead's exit_criteria list. Each entry must be a concrete,
@@ -30,6 +31,18 @@ const auditDecompositionSystemPrompt = `You review a decomposition against its s
    entry that is vague ("review the code"), untestable ("ensure correctness"), or out of scope for
    what the Bead actually produces. A Bead with no runnable exit criterion is a structural problem:
    it likely cannot be executed independently and should be merged with a related Bead.
+
+4. Layout Bead (Bead 1): the first Bead must be a layout Bead — its purpose is to establish file
+   structure and stub implementations only, with no logic. Flag if: (a) Bead 1 contains non-trivial
+   implementation logic rather than stubs; (b) any non-layout Bead creates new source files instead
+   of filling in stubs from Bead 1; (c) Bead 1's exit criteria do not include a build check (e.g.
+   ` + "`go build ./...`" + `). Use "N/A — structural" for design_doc_reference on layout findings.
+
+5. Bead complexity: each non-layout Bead must implement a single logical concern and is expected to
+   require no more than 200 lines of new or modified code. Flag any non-layout Bead that: (a) bundles
+   two or more distinct algorithms or concerns that could be independently tested; (b) clearly requires
+   more than 200 lines to implement correctly. Use "N/A — structural" for design_doc_reference on
+   complexity findings.
 
 You are an independent reviewer — you did not author this decomposition.
 A clean decomposition with no findings is a valid outcome. Do not fabricate findings on clean material.
@@ -77,8 +90,12 @@ func buildAuditUserMsg(doc string, beads []beadState) string {
 	sb.WriteString("## Design Document\n\n")
 	sb.WriteString(doc)
 	sb.WriteString("\n\n## Decomposition\n\n")
-	for _, b := range beads {
-		fmt.Fprintf(&sb, "### %s\n\n%s\n\n", b.Title, b.FullText)
+	for i, b := range beads {
+		position := fmt.Sprintf("Bead %d", i+1)
+		if i == 0 {
+			position += " [Layout Bead]"
+		}
+		fmt.Fprintf(&sb, "### %s — %s\n\n%s\n\n", position, b.Title, b.FullText)
 		if len(b.OutputFiles) > 0 {
 			fmt.Fprintf(&sb, "**Output files:** %s\n\n", strings.Join(b.OutputFiles, ", "))
 		}

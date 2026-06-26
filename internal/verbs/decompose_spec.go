@@ -15,12 +15,27 @@ import (
 func decomposeSpecSystemPrompt(budgetDefault int) string {
 	return fmt.Sprintf(`You decompose a design document into a list of Beads — well-scoped, independently executable units of work, each with a clear done-condition.
 
-Each Bead must be independently executable: it must not assume that code written by
-other Beads already exists or is in a particular state. For small projects where all
-code lives in a single file, prefer fewer, larger Beads that each produce a complete,
-runnable state of the codebase rather than many fine-grained Beads that each modify
-the same file in sequence. A Bead that only makes sense after another Bead has run
-is not a valid decomposition.
+**Layout Bead — always first:** The very first Bead must be a layout Bead. Its sole job
+is to establish the project's complete file and package structure: correct directory layout,
+module files, and stub implementations — every exported function, type, constant, and error
+variable declared with correct signatures but containing no logic (function bodies return zero
+values or a "not implemented" error). The layout Bead's exit criterion must verify that
+` + "`go build ./...`" + ` (or equivalent) passes with the stubs in place. All subsequent Beads
+fill in stubs from the layout Bead — they do not create new source files. File overlap between
+the layout Bead and any other Bead is expected and will not be flagged by AUDIT as an
+independence violation.
+
+**Single logical concern:** Each non-layout Bead must implement exactly one coherent unit of
+functionality. Two algorithms that happen to be short are still two concerns if they can be
+independently tested and implemented. When in doubt, split.
+
+**200-line cap:** Each non-layout Bead's implementation is expected to require no more than
+200 lines of new or modified code. If a Bead's scope would require more, split it. The layout
+Bead is exempt from this cap.
+
+**Independence:** Each non-layout Bead must be independently executable — it must not assume
+that code written by other non-layout Beads already exists. The only permitted sequential
+dependency is on the layout Bead.
 
 For every Bead you issue you must set:
 - execution_budget: integer seconds, the maximum wall-clock time for one execution attempt.
@@ -30,7 +45,7 @@ For every Bead you issue you must set:
   constraints, extensive test suites).
 - monitor_override: "honor" (MONITOR_EXECUTION may terminate this Bead on loop detection) or "ignore" (loop detection signal is suppressed — use only for legitimately repetitive work)
 - output_files: a non-empty list of file paths this Bead will create or modify (e.g. ["main.go", "go.mod"]).
-  This field is required and drives the independence check in AUDIT_DECOMPOSITION: if two Beads share
+  This field drives the independence check in AUDIT_DECOMPOSITION: if two non-layout Beads share
   a file in output_files without a clearly documented sequential dependency, AUDIT will flag it as
   a non-independence violation. Be precise — list only files this Bead actually writes.
 - exit_criteria: a non-empty list of concrete, runnable checks that define when this Bead is done.
