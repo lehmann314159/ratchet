@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -91,7 +92,8 @@ type chatResponse struct {
 	Error   string  `json:"error,omitempty"`
 }
 
-// Chat sends a non-streaming chat request and returns the assistant's reply.
+// Chat sends a streaming chat request and returns the assistant's complete reply.
+// Tokens are logged at DEBUG level as they arrive for observability.
 func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *Options) (string, error) {
 	temp := DefaultTemperature
 	if opts != nil && opts.Temperature > 0 {
@@ -101,7 +103,7 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 	req := chatRequest{
 		Model:    model,
 		Messages: msgs,
-		Stream:   false,
+		Stream:   true,
 		Options:  map[string]any{"temperature": temp},
 	}
 
@@ -122,31 +124,42 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 	}
 	defer resp.Body.Close()
 
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read: %w", err)
-	}
-
 	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("ollama %d: %s", resp.StatusCode, truncate(string(raw), 200))
 	}
 
-	var cr chatResponse
-	if err := json.Unmarshal(raw, &cr); err != nil {
-		return "", fmt.Errorf("parse response: %w", err)
+	var sb strings.Builder
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var chunk chatResponse
+		if err := dec.Decode(&chunk); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return "", fmt.Errorf("decode stream: %w", err)
+		}
+		if chunk.Error != "" {
+			return "", fmt.Errorf("ollama: %s", chunk.Error)
+		}
+		if chunk.Message.Content != "" {
+			sb.WriteString(chunk.Message.Content)
+			slog.Debug("stream", "model", model, "token", chunk.Message.Content)
+		}
+		if chunk.Done {
+			break
+		}
 	}
-	if cr.Error != "" {
-		return "", fmt.Errorf("ollama: %s", cr.Error)
-	}
-
-	return cr.Message.Content, nil
+	return sb.String(), nil
 }
 
-// ChatWithTools sends a non-streaming chat request with tool definitions and
+// ChatWithTools sends a streaming chat request with tool definitions and
 // returns the full assistant Message, which may contain ToolCalls instead of
-// (or in addition to) Content. The caller is responsible for the multi-turn
-// loop: executing tool calls and feeding results back as tool messages.
-func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message, tools []Tool, opts *Options) (Message, error) {
+// (or in addition to) Content. Content tokens are written to tokenWriter as
+// they arrive if non-nil, giving real-time observability. The caller is
+// responsible for the multi-turn loop: executing tool calls and feeding
+// results back as tool messages.
+func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message, tools []Tool, opts *Options, tokenWriter io.Writer) (Message, error) {
 	temp := DefaultTemperature
 	if opts != nil && opts.Temperature > 0 {
 		temp = opts.Temperature
@@ -162,7 +175,7 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		Model:    model,
 		Messages: msgs,
 		Tools:    tools,
-		Stream:   false,
+		Stream:   true,
 		Options:  map[string]any{"temperature": temp},
 	}
 
@@ -183,24 +196,47 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 	}
 	defer resp.Body.Close()
 
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return Message{}, fmt.Errorf("read: %w", err)
-	}
-
 	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
 		return Message{}, fmt.Errorf("ollama %d: %s", resp.StatusCode, truncate(string(raw), 200))
 	}
 
-	var cr chatResponse
-	if err := json.Unmarshal(raw, &cr); err != nil {
-		return Message{}, fmt.Errorf("parse response: %w", err)
+	var contentSB strings.Builder
+	var toolCalls []ToolCall
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var chunk chatResponse
+		if err := dec.Decode(&chunk); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return Message{}, fmt.Errorf("decode stream: %w", err)
+		}
+		if chunk.Error != "" {
+			return Message{}, fmt.Errorf("ollama: %s", chunk.Error)
+		}
+		if chunk.Message.Content != "" {
+			contentSB.WriteString(chunk.Message.Content)
+			if tokenWriter != nil {
+				io.WriteString(tokenWriter, chunk.Message.Content)
+			}
+		}
+		if len(chunk.Message.ToolCalls) > 0 {
+			toolCalls = append(toolCalls, chunk.Message.ToolCalls...)
+		}
+		if chunk.Done {
+			break
+		}
 	}
-	if cr.Error != "" {
-		return Message{}, fmt.Errorf("ollama: %s", cr.Error)
+	// Terminate streamed content with a newline so subsequent trace lines start clean.
+	if tokenWriter != nil && contentSB.Len() > 0 {
+		fmt.Fprintln(tokenWriter)
 	}
-
-	return cr.Message, nil
+	return Message{
+		Role:      "assistant",
+		Content:   contentSB.String(),
+		ToolCalls: toolCalls,
+	}, nil
 }
 
 // ExtractJSON strips Qwen3-style <think>…</think> blocks and markdown code

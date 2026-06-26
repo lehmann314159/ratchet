@@ -166,7 +166,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	for turn := 1; ; turn++ {
 		writeLine(traceFile, fmt.Sprintf("[TURN %d]", turn))
 
-		msg, err := oc.ChatWithTools(ctx, model, messages, tools, nil)
+		msg, err := oc.ChatWithTools(ctx, model, messages, tools, nil, traceFile)
 		if err != nil {
 			select {
 			case cause := <-terminationCh:
@@ -177,9 +177,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 			return fmt.Errorf("model call: %w", err)
 		}
 
-		if msg.Content != "" {
-			writeLine(traceFile, msg.Content)
-		}
+		// Content was already streamed to traceFile token-by-token during the call.
 		messages = append(messages, msg)
 
 		if len(msg.ToolCalls) == 0 {
