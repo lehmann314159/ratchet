@@ -35,7 +35,7 @@ Process:
    by a previous attempt, overwrite them with only the package declaration line to
    clear the conflict.
 3. Implement exactly what the Bead specification asks for — nothing more, nothing less.
-   Do not write tests, documentation, or other artifacts unless the specification explicitly requires them.
+   Do not create files that are not listed in Output Files.
 4. Verify your work by running each item in the Exit Criteria. These are your done condition.
    Run ONLY the commands listed in the Exit Criteria — do not run go test ./... or any other
    broader check. Failures in test files you do not own belong to other Beads; they are not

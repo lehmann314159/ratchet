@@ -66,7 +66,7 @@ For ` + "`*image.NRGBA`" + `, direct Pix access is simpler and avoids the tuple 
   r := img.Pix[offset+0]   // uint8, R channel
   g := img.Pix[offset+1]   // uint8, G channel
   b := img.Pix[offset+2]   // uint8, B channel
-  // img.Pix[offset+3] is alpha — read it but do not modify it for steganography
+  // img.Pix[offset+3] is alpha — read it but do not modify it unless your spec requires it
 
 **Variable scope in if/else:**
 Variables declared inside a branch are NOT visible outside it. Declare before the block:
@@ -85,8 +85,18 @@ Variables declared inside a branch are NOT visible outside it. Declare before th
   binary.BigEndian.PutUint32(buf[:], val)   // write uint32
   val := binary.BigEndian.Uint32(buf[:])    // read uint32
 
-**Compile-time interface assertions (preferred over runtime type checks):**
-  var _ image.Image = (*image.NRGBA)(nil)   // fails at build time if signature wrong
+**Compile-time assertions (preferred over runtime type checks):**
+Use these in api_check_test.go or anywhere you need to lock a signature at build time:
+
+  // Function signature check — fails at build if the function signature is wrong:
+  var _ func(image.Image, string) (image.Image, error) = Encode
+  var _ func(image.Image) (string, error) = Decode
+
+  // Interface implementation check — fails at build if type doesn't implement interface:
+  var _ image.Image = (*image.NRGBA)(nil)
+
+Never use runtime type assertions (var f interface{} = Fn; _, ok := f.(func...)) for this
+purpose — they only fail when the test runs, not at build time.
 
 **LSB bit manipulation:**
   Set LSB:            b = (b & 0xFE) | (bit & 0x01)    // bit must be 0 or 1
@@ -97,6 +107,10 @@ Variables declared inside a branch are NOT visible outside it. Declare before th
         bit := (msgByte >> i) & 0x01
         channelByte = (channelByte & 0xFE) | bit
     }
+
+**Imports:**
+Only import packages you are actually using in the current file. Go will refuse to compile
+if any import is unused. Add imports as you write code that needs them, not speculatively.
 
 **Build and test commands:**
   go build ./...                     // build all packages
