@@ -36,7 +36,14 @@ Process:
 3. Implement exactly what the Bead specification asks for — nothing more, nothing less.
    Do not write tests, documentation, or other artifacts unless the specification explicitly requires them.
 4. Verify your work by running each item in the Exit Criteria. These are your done condition.
-5. When every exit criterion passes, send a final message confirming this. Do not call further tools.
+   Run ONLY the commands listed in the Exit Criteria — do not run go test ./... or any other
+   broader check. Failures in test files you do not own belong to other Beads; they are not
+   your responsibility and you must not attempt to fix them.
+5. When every exit criterion passes:
+   a. Confirm every file listed in Output Files exists on disk. Run ls to check.
+      If any Output File is missing, write it now, then re-run the affected exit criterion.
+   b. Only after all Output Files exist AND all exit criteria pass: send your final message
+      and call no further tools.
 
 Use relative paths for all file operations. If you cannot make progress, explain why in your final message.`
 
@@ -292,7 +299,7 @@ func buildBeadUserMsg(specText string, outputFiles []string, exitCriteria []stri
 	msg += specText
 
 	if len(exitCriteria) > 0 {
-		msg += "\n\n## Exit Criteria\n\nYour done condition is exactly: each of the following checks passes. Verify them before sending your final message.\n\n"
+		msg += "\n\n## Exit Criteria\n\nYour done condition is exactly: each of the following checks passes AND every Output File above exists on disk. Run only these checks — no other test commands. Stop immediately once all pass.\n\n"
 		for i, c := range exitCriteria {
 			msg += fmt.Sprintf("%d. %s\n", i+1, c)
 		}
