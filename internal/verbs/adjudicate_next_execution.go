@@ -176,7 +176,9 @@ func checkConsistency(fit, reasoning string) (bool, string) {
 	return true, ""
 }
 
-type AdjudicateNextExecution struct{}
+type AdjudicateNextExecution struct {
+	budgetDefault int // cached from Run for use in Commit
+}
 
 func (h *AdjudicateNextExecution) Verb() string { return db.VerbAdjudicateNextExecution }
 
@@ -231,6 +233,8 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 	if err != nil {
 		return "", err
 	}
+	h.budgetDefault = project.ExecutionBudgetDefault
+
 	model, err := loadVerbModel(ctx, d, job.ProjectID, db.VerbAdjudicateNextExecution)
 	if err != nil {
 		return "", err
@@ -457,6 +461,13 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 			return fmt.Errorf("load current revision number: %w", err)
 		}
 
+		// Clamp execution_budget to at least the project default so ADJUDICATE
+		// cannot accidentally starve a retry with a too-small budget estimate.
+		budget := out.RevisedBead.ExecutionBudget
+		if budget < h.budgetDefault {
+			budget = h.budgetDefault
+		}
+
 		fullText, _ := json.Marshal(out.RevisedBead)
 		res, err := tx.ExecContext(ctx, `
 			INSERT INTO bead_revisions
@@ -464,7 +475,7 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 			   execution_budget, monitor_override, created_by_verb, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			job.ProjectID, beadID, currentRevNum+1, string(fullText),
-			out.RevisedBead.ExecutionBudget, out.RevisedBead.MonitorOverride,
+			budget, out.RevisedBead.MonitorOverride,
 			db.VerbAdjudicateNextExecution, now)
 		if err != nil {
 			return fmt.Errorf("insert revised bead_revision: %w", err)
