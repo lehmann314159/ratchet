@@ -37,6 +37,21 @@ Bead is exempt from this cap.
 that code written by other non-layout Beads already exists. The only permitted sequential
 dependency is on the layout Bead.
 
+**Paired behaviors and integration Beads:** Before finalizing your decomposition, scan the
+design document for paired behaviors — functions whose correctness is defined jointly rather
+than independently. The signal is any of: (a) one function's output is the direct input of
+another (encode/decode, serialize/deserialize, compress/decompress, encrypt/decrypt,
+push/pop); (b) the spec uses language like "round-trip", "recover", "reconstruct", or
+"inverse"; (c) a correctness statement spans two functions (e.g. "encoding then decoding
+returns the original value"). When paired behaviors are present:
+- Each individual Bead's exit criteria must only verify what that function can demonstrate
+  in isolation: error handling, output type, bounds or capacity checks. Do not include
+  round-trip or cross-function tests in individual Bead exit criteria.
+- Add a dedicated integration Bead immediately after the paired Beads. Its sole purpose is
+  verifying the joint correctness invariant (round-trip tests, inverse property checks). It
+  writes only test files. Its sequential dependency on the paired Beads' output files is
+  expected and will not be flagged by AUDIT as an independence violation.
+
 For every Bead you issue you must set:
 - execution_budget: integer seconds, the maximum wall-clock time for one execution attempt.
   Set to the project default (%d seconds) or higher — never lower. If a Bead is simple,

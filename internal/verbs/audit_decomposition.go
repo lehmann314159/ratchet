@@ -44,6 +44,15 @@ const auditDecompositionSystemPrompt = `You review a decomposition against its s
    more than 200 lines to implement correctly. Use "N/A — structural" for design_doc_reference on
    complexity findings.
 
+6. Paired behaviors: scan the design document for functions whose correctness is defined jointly —
+   where one function's output feeds another's input, or where a round-trip invariant (e.g.
+   decode(encode(x)) == x) spans two Beads. Flag if: (a) paired Beads exist but no integration
+   Bead is present to verify the joint invariant; (b) an individual paired Bead's exit criteria
+   include round-trip or cross-function tests instead of isolation-only checks (error handling,
+   output type, bounds checks). An integration Bead that lists paired Beads' output files in its
+   own output_files is an expected sequential dependency — do not flag it as an independence
+   violation. Use "N/A — structural" for design_doc_reference on paired-behavior findings.
+
 You are an independent reviewer — you did not author this decomposition.
 A clean decomposition with no findings is a valid outcome. Do not fabricate findings on clean material.
 Your contract does not change across debate rounds — same correctness criterion every time.
