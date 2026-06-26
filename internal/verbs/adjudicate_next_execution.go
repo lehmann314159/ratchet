@@ -487,6 +487,14 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 			`UPDATE beads SET status = 'full_stopped' WHERE id = ?`, beadID); err != nil {
 			return err
 		}
+		// Mark all subsequent pending beads stopped — they will never run now.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE beads SET status = 'full_stopped'
+			WHERE project_id = ? AND id > ? AND status = 'pending'`,
+			job.ProjectID, beadID,
+		); err != nil {
+			return fmt.Errorf("mark remaining beads full_stopped: %w", err)
+		}
 		return h.checkProjectTerminal(ctx, tx, job.ProjectID, "full_stopped", now)
 
 	case "declare_success":
@@ -494,7 +502,18 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 			`UPDATE beads SET status = 'succeeded' WHERE id = ?`, beadID); err != nil {
 			return fmt.Errorf("mark bead succeeded: %w", err)
 		}
-		return h.checkProjectTerminal(ctx, tx, job.ProjectID, "complete", now)
+		advanced, err := h.advanceToNextBead(ctx, tx, job.ProjectID, beadID, now)
+		if err != nil {
+			return err
+		}
+		if !advanced {
+			// Last bead — project is complete.
+			_, err = tx.ExecContext(ctx,
+				`UPDATE projects SET status = 'complete', updated_at = ? WHERE id = ?`,
+				now, job.ProjectID)
+			return err
+		}
+		return nil
 	}
 	return nil
 }
@@ -529,9 +548,32 @@ func (h *AdjudicateNextExecution) atExecutionCap(ctx context.Context, tx *sql.Tx
 	return true, nil
 }
 
+// advanceToNextBead enqueues an EXECUTE_BEAD job for the next pending bead
+// after currentBeadID. Returns true if a next bead was found and enqueued,
+// false if currentBeadID was the last bead (caller should then close the project).
+func (h *AdjudicateNextExecution) advanceToNextBead(ctx context.Context, tx *sql.Tx, projectID, currentBeadID int64, now string) (bool, error) {
+	var nextBeadID int64
+	err := tx.QueryRowContext(ctx, `
+		SELECT id FROM beads
+		WHERE project_id = ? AND id > ? AND status = 'pending'
+		ORDER BY id LIMIT 1`, projectID, currentBeadID,
+	).Scan(&nextBeadID)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("find next bead: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
+		VALUES (?, ?, ?, 'pending', ?, ?)`,
+		projectID, db.VerbExecuteBead, nextBeadID, now, now)
+	return true, err
+}
+
 // checkProjectTerminal checks whether all beads in the project have reached a
 // terminal state ('full_stopped' or 'succeeded'). If so, it marks the project
-// with terminalStatus. Called from both the full_stop and declare_success branches.
+// with terminalStatus. Called from the full_stop branch.
 func (h *AdjudicateNextExecution) checkProjectTerminal(ctx context.Context, tx *sql.Tx, projectID int64, terminalStatus, now string) error {
 	var activeBeads int
 	if err := tx.QueryRowContext(ctx, `

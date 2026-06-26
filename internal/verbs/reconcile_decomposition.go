@@ -228,7 +228,7 @@ func (h *ReconcileDecomposition) Commit(ctx context.Context, tx *sql.Tx, job *db
 
 	switch outcome {
 	case "converged":
-		return enqueueAllBeadsForExecution(ctx, tx, job.ProjectID, now)
+		return enqueueFirstBeadForExecution(ctx, tx, job.ProjectID, now)
 	case "disagreed_continuing":
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
@@ -285,35 +285,20 @@ func (h *ReconcileDecomposition) applyFixes(ctx context.Context, tx *sql.Tx, pro
 	return nil
 }
 
-// enqueueAllBeadsForExecution creates EXECUTE_BEAD jobs for every bead in
-// the project. The handler is implemented in Step 3.
-func enqueueAllBeadsForExecution(ctx context.Context, tx *sql.Tx, projectID int64, now string) error {
-	rows, err := tx.QueryContext(ctx,
-		`SELECT id FROM beads WHERE project_id = ? ORDER BY id`, projectID)
-	if err != nil {
-		return err
+// enqueueFirstBeadForExecution creates an EXECUTE_BEAD job for the first bead
+// in the project (lowest id). Subsequent beads are enqueued one at a time by
+// ADJUDICATE after each bead declares success, so every bead runs on a
+// fully-completed workspace rather than against whatever earlier beads left behind.
+func enqueueFirstBeadForExecution(ctx context.Context, tx *sql.Tx, projectID int64, now string) error {
+	var beadID int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT id FROM beads WHERE project_id = ? ORDER BY id LIMIT 1`, projectID,
+	).Scan(&beadID); err != nil {
+		return fmt.Errorf("find first bead: %w", err)
 	}
-	defer rows.Close()
-
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	for _, beadID := range ids {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
-			VALUES (?, ?, ?, 'pending', ?, ?)`,
-			projectID, db.VerbExecuteBead, beadID, now, now); err != nil {
-			return fmt.Errorf("enqueue %s for bead %d: %w", db.VerbExecuteBead, beadID, err)
-		}
-	}
-	return nil
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
+		VALUES (?, ?, ?, 'pending', ?, ?)`,
+		projectID, db.VerbExecuteBead, beadID, now, now)
+	return err
 }
