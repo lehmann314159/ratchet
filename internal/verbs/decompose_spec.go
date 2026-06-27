@@ -98,6 +98,7 @@ Respond with JSON only, no prose before or after:
 
 type DecomposeSpec struct {
 	budgetDefault int
+	folderPath    string
 }
 
 func (h *DecomposeSpec) Verb() string { return db.VerbDecomposeSpec }
@@ -116,6 +117,7 @@ func (h *DecomposeSpec) Run(ctx context.Context, d *db.DB, oc *ollama.Client, jo
 		return "", err
 	}
 	h.budgetDefault = project.ExecutionBudgetDefault
+	h.folderPath = project.FolderPath
 	return oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: guidance.Inject(decomposeSpecSystemPrompt(), project.FolderPath)},
 		{Role: "user", Content: doc},
@@ -154,7 +156,10 @@ func (h *DecomposeSpec) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJ
 	out := parsed.(DecomposeSpecOutput)
 	now := time.Now().UTC().Format(time.RFC3339)
 
+	lang := guidance.Detect(h.folderPath)
 	for _, pb := range out.Beads {
+		applyMechanicalBeadFixes(lang, &pb)
+
 		// Write the bead row first (current_revision_id NULL until revision exists).
 		res, err := tx.ExecContext(ctx, `
 			INSERT INTO beads (project_id, status, current_revision_id)

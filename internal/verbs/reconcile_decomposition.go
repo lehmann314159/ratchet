@@ -49,6 +49,7 @@ type ReconcileDecomposition struct {
 	lastCritique    string
 	lastRoundsSoFar int
 	budgetDefault   int
+	folderPath      string
 }
 
 func (h *ReconcileDecomposition) Verb() string { return db.VerbReconcileDecomposition }
@@ -83,6 +84,7 @@ func (h *ReconcileDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.C
 	h.lastCritique = critique
 	h.lastRoundsSoFar = roundsSoFar
 	h.budgetDefault = project.ExecutionBudgetDefault
+	h.folderPath = project.FolderPath
 
 	return oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: guidance.Inject(reconcileDecompositionSystemPrompt, project.FolderPath)},
@@ -244,6 +246,9 @@ func (h *ReconcileDecomposition) applyFixes(ctx context.Context, tx *sql.Tx, pro
 		).Scan(&beadID, &currentRevNum); err != nil {
 			return fmt.Errorf("find bead %q for fix: %w", r.BeadTitle, err)
 		}
+
+		lang := guidance.Detect(h.folderPath)
+		applyMechanicalBeadFixes(lang, r.UpdatedBead)
 
 		fullText, _ := json.Marshal(r.UpdatedBead)
 		res, err := tx.ExecContext(ctx, `

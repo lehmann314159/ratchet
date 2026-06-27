@@ -75,6 +75,35 @@ func goMechanicalBeadChecks(beads []beadState) []AuditFinding {
 	return findings
 }
 
+// applyMechanicalBeadFixes corrects structural violations in a ParsedBead before
+// it is written to the DB, so the problem never reaches AUDIT or RECONCILE.
+// Returns true if any fix was applied (caller may want to log this).
+func applyMechanicalBeadFixes(lang string, bead *ParsedBead) bool {
+	if lang != "go" {
+		return false
+	}
+	return goFixBeadSpec(bead)
+}
+
+// goFixBeadSpec fixes Go-specific structural violations in-place:
+//
+//   - If a bead has a "go test" exit criterion but no *_test.go in output_files,
+//     those criteria are changed to "go build ./...". A bead that does not own a
+//     test file cannot verify test results; the build check is the correct gate.
+func goFixBeadSpec(bead *ParsedBead) bool {
+	if hasTestGoFile(bead.OutputFiles) {
+		return false // owns test file — no fix needed
+	}
+	fixed := false
+	for i, c := range bead.ExitCriteria {
+		if strings.Contains(c, "go test") {
+			bead.ExitCriteria[i] = "go build ./..."
+			fixed = true
+		}
+	}
+	return fixed
+}
+
 func hasTestGoFile(files []string) bool {
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
