@@ -659,12 +659,13 @@ func TestAdjudicateNextExecutionCommitDeclareSuccessPartial(t *testing.T) {
 }
 
 func TestAdjudicateNextExecutionCommitFullStopPartial(t *testing.T) {
-	// Two beads: one full_stopped, one still pending. Project must stay active.
+	// full_stop cascades: B01 is stopped, B02 (subsequent pending) is also stopped,
+	// and the project is marked full_stopped because no beads can run.
 	d := openTestDB(t)
 	ctx := context.Background()
-	seedProject(t, d, -1, "fixture: ADJUDICATE commit/full_stop partial — project stays active")
+	seedProject(t, d, -1, "fixture: ADJUDICATE commit/full_stop cascade")
 	beadID1, revID1 := seedBead(t, d, -1, "B01")
-	seedBead(t, d, -1, "B02") // B02 stays pending
+	beadID2, _ := seedBead(t, d, -1, "B02")
 	zero := 0
 	seedExecution(t, d, -1, beadID1, revID1, "success", &zero)
 
@@ -682,7 +683,15 @@ func TestAdjudicateNextExecutionCommitFullStopPartial(t *testing.T) {
 	if err := d.QueryRowContext(ctx, `SELECT status FROM projects WHERE id = -1`).Scan(&projStatus); err != nil {
 		t.Fatalf("project row missing: %v", err)
 	}
-	if projStatus != "active" {
-		t.Errorf("project status = %q, want active (B02 still pending)", projStatus)
+	if projStatus != "full_stopped" {
+		t.Errorf("project status = %q, want full_stopped", projStatus)
+	}
+
+	var b2Status string
+	if err := d.QueryRowContext(ctx, `SELECT status FROM beads WHERE id = ?`, beadID2).Scan(&b2Status); err != nil {
+		t.Fatalf("B02 row missing: %v", err)
+	}
+	if b2Status != "full_stopped" {
+		t.Errorf("B02 status = %q, want full_stopped (cascade)", b2Status)
 	}
 }
