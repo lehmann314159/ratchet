@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ratchet/internal/db"
+	"ratchet/internal/guidance"
 	"ratchet/internal/ollama"
 )
 
@@ -87,6 +88,24 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	}
 
 	outputFileStatus := checkOutputFiles(beadFullTextJSON, folderPath)
+
+	// Layout bead structural check: verify api_check_test.go (if owned by this
+	// bead) contains package-level blank-identifier assertions referencing exported
+	// identifiers. If the check fails, return a pre-built finding without calling
+	// the model — the structural violation is unambiguous and needs no interpretation.
+	var beadSpec struct {
+		OutputFiles []string `json:"output_files"`
+	}
+	json.Unmarshal([]byte(beadFullTextJSON), &beadSpec) //nolint:errcheck — malformed JSON handled by empty slice
+	lang := guidance.Detect(folderPath)
+	if finding := checkLayoutBeadOutput(lang, folderPath, beadSpec.OutputFiles); finding != "" {
+		out := AnalyzeExecutionOutput{
+			MechanicalFindings:     finding,
+			AnalyzerInterpretation: "Layout bead structural check failed before model analysis. The signature lock is absent or malformed; all other passing checks are unreliable until this is resolved.",
+		}
+		data, _ := json.Marshal(out)
+		return string(data), nil
+	}
 
 	model, err := loadVerbModel(ctx, d, job.ProjectID, db.VerbAnalyzeExecution)
 	if err != nil {

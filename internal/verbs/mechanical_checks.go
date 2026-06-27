@@ -3,6 +3,9 @@ package verbs
 import (
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"path/filepath"
 	"strings"
 
@@ -120,4 +123,73 @@ func hasNamedFile(files []string, name string) bool {
 		}
 	}
 	return false
+}
+
+// checkLayoutBeadOutput runs language-specific post-execution structural checks
+// on a layout bead's output. It is a no-op unless api_check_test.go appears in
+// outputFiles. Returns a non-empty finding string on failure; empty means pass.
+func checkLayoutBeadOutput(lang, folderPath string, outputFiles []string) string {
+	if !hasNamedFile(outputFiles, "api_check_test.go") {
+		return ""
+	}
+	switch lang {
+	case "go":
+		return goCheckApiAssertions(folderPath, outputFiles)
+	}
+	return ""
+}
+
+// goCheckApiAssertions parses api_check_test.go and verifies it contains at
+// least one package-level blank-identifier assignment referencing an exported
+// identifier. Assertions inside function bodies (including Test functions) are
+// not compile-time checks and do not satisfy this requirement.
+func goCheckApiAssertions(folderPath string, outputFiles []string) string {
+	// Locate api_check_test.go using the relative path from output_files.
+	var apiCheckPath string
+	for _, f := range outputFiles {
+		if filepath.Base(f) == "api_check_test.go" {
+			apiCheckPath = filepath.Join(folderPath, f)
+			break
+		}
+	}
+	if apiCheckPath == "" {
+		return ""
+	}
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, apiCheckPath, nil, 0)
+	if err != nil {
+		return fmt.Sprintf("api_check_test.go: parse error: %v", err)
+	}
+
+	// Scan package-level declarations for: var _ <type> = ExportedIdent
+	for _, decl := range file.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if name.Name != "_" || i >= len(vs.Values) {
+					continue
+				}
+				ident, ok := vs.Values[i].(*ast.Ident)
+				if !ok {
+					continue
+				}
+				// RHS must be an exported identifier (uppercase first letter).
+				if len(ident.Name) > 0 && ident.Name[0] >= 'A' && ident.Name[0] <= 'Z' {
+					return "" // at least one valid assertion found
+				}
+			}
+		}
+	}
+
+	return "api_check_test.go: no package-level blank-identifier type assertion found. " +
+		"Required form: var _ func(...) ... = ExportedName at file scope (not inside any function). " +
+		"Assertions inside Test functions or other function bodies are not compile-time checks."
 }

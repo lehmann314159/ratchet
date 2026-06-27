@@ -34,13 +34,20 @@ the layout Bead and any other Bead is expected and will not be flagged by AUDIT 
 independence violation.
 
 The layout Bead must include a signature verification file in its output_files (e.g.
-` + "`api_check_test.go`" + `). This file contains only compile-time type assertions for each exported
-function declared in the design doc's API/scope section — one assignment per function:
+` + "`api_check_test.go`" + `). This file contains compile-time type assertions — one per exported
+function — that lock the API before any logic Bead runs. If the stubs carry the wrong
+signature, ` + "`go build ./...`" + ` fails immediately, preventing signature drift across the project.
 
-  var _ func(<param types>) <return types> = FuncName
+Your layout Bead's full_text must include the exact, fully instantiated assertion lines for
+every exported function in the design doc's API section. Do not describe the pattern or leave
+types as placeholders — derive the real parameter and return types from the design doc and
+write the literal lines the execute model will copy verbatim into ` + "`api_check_test.go`" + `:
 
-If the stubs carry the wrong signature, ` + "`go build ./...`" + ` fails immediately. This locks the
-API before any logic Bead runs and prevents signature drift across the project.
+  var _ func(n int) (int, error) = Fib       ← example: fill in actual types, not placeholders
+  var _ func(s string) ([]byte, error) = Encode
+
+Each assertion must be a package-level variable declaration (` + "`var _`" + ` outside any function).
+Assertions inside test functions or init functions do not constitute compile-time checks.
 
 **Single logical concern:** Each non-layout Bead must implement exactly one coherent unit of
 functionality. Two algorithms that happen to be short are still two concerns if they can be
