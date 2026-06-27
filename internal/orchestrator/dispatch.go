@@ -70,6 +70,7 @@ func dispatch(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[str
 		_, _ = d.ExecContext(ctx, `UPDATE handoff_jobs SET status = 'pending' WHERE id = ?`, job.ID)
 		return err
 	}
+	slog.Info("ollama warmup ok", "verb", job.Verb, "job_id", job.ID, "model", model)
 
 	// Run: infrastructure error → return without counting as a strike.
 	startedAt := time.Now().UTC()
