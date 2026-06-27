@@ -4,6 +4,7 @@ package project
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -16,12 +17,13 @@ import (
 
 // Params holds everything needed to create a new project.
 type Params struct {
-	Label           string
-	FolderPath      string // must exist; stored as absolute path
-	DesignDocPath   string // relative to FolderPath; file must exist
-	MonitorOverride      string // 'honor' | 'ignore' — seed value for DECOMPOSE_SPEC
-	ExecutionBudget      int    // seconds — seed value for DECOMPOSE_SPEC
-	MaxExecutionAttempts int    // cap on execute→adjudicate retries per bead
+	Label                string
+	FolderPath           string         // must exist; stored as absolute path
+	DesignDocPath        string         // relative to FolderPath; file must exist
+	MonitorOverride      string         // 'honor' | 'ignore' — seed value for DECOMPOSE_SPEC
+	ExecutionBudget      int            // seconds — seed value for DECOMPOSE_SPEC
+	MaxExecutionAttempts int            // cap on execute→adjudicate retries per bead
+	Fleet                map[string]string // verb→model overrides; nil uses compiled-in defaults
 }
 
 // Create inserts a projects row, seeds the validated model fleet, and enqueues
@@ -80,9 +82,15 @@ func Create(ctx context.Context, d *db.DB, p Params) (int64, error) {
 	}
 	projectID, _ := res.LastInsertId()
 
-	if err := db.SeedVerbModelAssignments(ctx, tx, projectID); err != nil {
+	var seedErr error
+	if p.Fleet != nil {
+		seedErr = db.SeedVerbModelAssignmentsFromFleet(ctx, tx, projectID, p.Fleet)
+	} else {
+		seedErr = db.SeedVerbModelAssignments(ctx, tx, projectID)
+	}
+	if seedErr != nil {
 		_ = tx.Rollback()
-		return 0, fmt.Errorf("seed model assignments: %w", err)
+		return 0, fmt.Errorf("seed model assignments: %w", seedErr)
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -110,6 +118,7 @@ func RunNewProjectMain(args []string) {
 	monitorOverride := flags.String("monitor-override", "honor", "seed value for monitor_override on each Bead: honor or ignore")
 	budget := flags.Int("budget", 900, "seed value for execution_budget on each Bead, in seconds")
 	maxAttempts := flags.Int("max-attempts", 5, "maximum execute→adjudicate retries per Bead before escalation")
+	fleetFile := flags.String("fleet", "", "path to a JSON file mapping verb names to model names (optional; omit to use compiled-in defaults)")
 	_ = flags.Parse(args)
 
 	if *label == "" {
@@ -119,6 +128,19 @@ func RunNewProjectMain(args []string) {
 	if *folder == "" {
 		slog.Error("new-project: --folder is required")
 		os.Exit(1)
+	}
+
+	var fleet map[string]string
+	if *fleetFile != "" {
+		data, err := os.ReadFile(*fleetFile)
+		if err != nil {
+			slog.Error("new-project: read fleet file", "path", *fleetFile, "error", err)
+			os.Exit(1)
+		}
+		if err := json.Unmarshal(data, &fleet); err != nil {
+			slog.Error("new-project: parse fleet file", "path", *fleetFile, "error", err)
+			os.Exit(1)
+		}
 	}
 
 	d, err := db.Open(*dbPath)
@@ -135,6 +157,7 @@ func RunNewProjectMain(args []string) {
 		MonitorOverride:      *monitorOverride,
 		ExecutionBudget:      *budget,
 		MaxExecutionAttempts: *maxAttempts,
+		Fleet:                fleet,
 	})
 	if err != nil {
 		slog.Error("new-project: create failed", "error", err)

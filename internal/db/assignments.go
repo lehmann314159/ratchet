@@ -48,18 +48,13 @@ func (db *DB) SetVerbModelAssignment(ctx context.Context, projectID int64, verb,
 
 // SeedVerbModelAssignments writes all 8 verb→model assignments for a new
 // project in a single transaction, enforcing all three model-assignment
-// constraints. Assignments are the validated model fleet from Experiments 1–5.
-//
-// ADJUDICATE_NEXT_EXECUTION is seeded as gemma4:31b rather than glm-4.7-flash:
-// both are validated in Experiment 5, but GLM showed an internal-consistency
-// failure on the hardest case (self-contradicting field declaration), exactly
-// the failure mode the consistency check targets.
+// constraints.
 func SeedVerbModelAssignments(ctx context.Context, tx *sql.Tx, projectID int64) error {
 	assignments := map[string]string{
-		VerbDecomposeSpec:           "glm-4.7-flash",
+		VerbDecomposeSpec:           "mistral-small3.2:24b",
 		VerbAuditDecomposition:      "gemma4:31b",
-		VerbReconcileDecomposition:  "glm-4.7-flash",
-		VerbExecuteBead:             "glm-4.7-flash",
+		VerbReconcileDecomposition:  "mistral-small3.2:24b",
+		VerbExecuteBead:             "mistral-small3.2:24b",
 		VerbMonitorExecution:        "mistral-small3.2:24b",
 		VerbAnalyzeExecution:        "gemma4:31b",
 		VerbCompressAnalysis:        "gemma4:31b",
@@ -77,6 +72,29 @@ func SeedVerbModelAssignments(ctx context.Context, tx *sql.Tx, projectID int64) 
 			projectID, verb, model,
 		); err != nil {
 			return fmt.Errorf("seed %s: %w", verb, err)
+		}
+	}
+	return nil
+}
+
+// SeedVerbModelAssignmentsFromFleet writes verb→model assignments from an
+// explicit fleet map, enforcing the same three constraints as the default seed.
+// Every verb in AllVerbs must be present; missing verbs are an error.
+func SeedVerbModelAssignmentsFromFleet(ctx context.Context, tx *sql.Tx, projectID int64, fleet map[string]string) error {
+	for _, v := range AllVerbs {
+		if _, ok := fleet[v]; !ok {
+			return fmt.Errorf("fleet missing verb %q", v)
+		}
+	}
+	if err := checkModelConstraints(fleet); err != nil {
+		return fmt.Errorf("fleet rejected: %w", err)
+	}
+	for _, v := range AllVerbs {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO verb_model_assignments (project_id, verb, model) VALUES (?, ?, ?)`,
+			projectID, v, fleet[v],
+		); err != nil {
+			return fmt.Errorf("seed %s: %w", v, err)
 		}
 	}
 	return nil
