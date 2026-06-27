@@ -78,9 +78,13 @@ Specificity ratchet for RECURRING failures:
   - Apply this to every RECURRING failure class, not just the most recent one.
 
 Vacuous test pass detection:
-  - If mechanical_findings state that a test command completed with exit code 0 but
-    "[no test files]" or "no tests to run" was reported, the exit criterion has NOT been met —
-    no tests executed. Do not declare_success in this case.
+  - This rule applies ONLY when the bead's exit_criteria (visible in Input 1) include a test
+    command (e.g., go test, pytest, npm test). If the exit_criteria contain only non-test
+    commands (e.g., go build ./...), skip this rule entirely — a build-only bead reporting
+    "[no test files]" is correct behavior, not a vacuous pass.
+  - If the bead has a test-command exit criterion AND mechanical_findings state that the command
+    completed with exit code 0 but "[no test files]" or "no tests to run" was reported, the
+    exit criterion has NOT been met — no tests executed. Do not declare_success in this case.
   - Classify as bead_problem. The revised Bead must add a test file to output_files (or change
     the exit criterion to a non-test check that actually verifies the implementation).
 

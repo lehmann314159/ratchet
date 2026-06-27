@@ -16,6 +16,13 @@ import (
 func decomposeSpecSystemPrompt() string {
 	return fmt.Sprintf(`You decompose a design document into a list of Beads — well-scoped, independently executable units of work, each with a clear done-condition.
 
+**Decomposition Notes — authoritative override:** If the design document contains a
+` + "`## Decomposition Notes`" + ` section, treat its bead structure guidance as authoritative.
+Follow the specified bead boundaries, file assignments, and integration bead requirements
+exactly, overriding the generic rules below where they conflict. The design doc author has
+full context of the project's pairing structure and intended test boundaries; their explicit
+guidance supersedes generic heuristics.
+
 **Layout Bead — always first:** The very first Bead must be a layout Bead. Its sole job
 is to establish the project's complete file and package structure: correct directory layout,
 module files, and stub implementations — every exported function, type, constant, and error
@@ -69,11 +76,11 @@ For every Bead you issue you must set:
   a file in output_files without a clearly documented sequential dependency, AUDIT will flag it as
   a non-independence violation. Be precise — list only files this Bead actually writes.
 - exit_criteria: a non-empty list of concrete, runnable checks that define when this Bead is done.
-  Each entry must be a specific, executable verification step — a shell command with expected output,
-  a test that must pass, or a measurable observable result. Vague statements ("review the code",
-  "ensure correctness") are not acceptable. If you cannot write a runnable exit criterion for a Bead,
-  that is a signal the Bead is scoped too narrowly to be independently verifiable — merge it with
-  a related Bead that produces a testable artifact.
+  Each entry must be a bare shell command — no prose, no expected-outcome description, no "should",
+  "must", "will", or explanatory clauses. Write ` + "`go test ./...`" + ` not ` + "`go test ./... should pass`" + `.
+  Vague statements ("review the code", "ensure correctness") are not acceptable. If you cannot write
+  a runnable exit criterion for a Bead, that is a signal the Bead is scoped too narrowly to be
+  independently verifiable — merge it with a related Bead that produces a testable artifact.
   If any exit criterion runs a test command (e.g. ` + "`go test`" + `, ` + "`pytest`" + `, ` + "`npm test`" + `), at least one test
   file (e.g. ` + "`*_test.go`" + `, ` + "`test_*.py`" + `) must appear in ` + "`output_files`" + `. A test command with no
   owned test file reports "no test files" and exits 0 without running anything — the criterion
