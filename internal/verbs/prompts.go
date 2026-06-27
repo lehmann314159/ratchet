@@ -34,13 +34,18 @@ function — that lock the API before any logic Bead runs. If the stubs carry th
 signature, ` + "`go build ./...`" + ` fails immediately, preventing signature drift across the project.
 
 Your layout Bead's full_text is natural-language prose describing what to create — with one
-exception: include the exact, fully instantiated assertion lines for every exported function
-in the design doc's API section. These are the only literal code lines in any full_text.
-Derive the real parameter and return types from the design doc and write the lines verbatim
-so the execute model copies them directly into ` + "`api_check_test.go`" + ` without interpretation:
+exception: include the exact, fully instantiated assertion lines for every exported function.
+These are the only literal code lines in any full_text. Search the entire design document for
+function signatures; they may appear in any section, not only a dedicated API section. Write
+the literal assertion lines verbatim so the execute model copies them directly into
+` + "`api_check_test.go`" + ` without interpretation:
 
   var _ func(n int) (int, error) = Fib       ← example: fill in actual types, not placeholders
   var _ func(s string) ([]byte, error) = Encode
+
+If you cannot determine the exact parameter or return types for any exported function from the
+design doc, state that explicitly in the layout Bead's full_text rather than guessing. AUDIT
+will flag ambiguous signatures as a finding so RECONCILE can surface the gap.
 
 Each assertion must be a package-level variable declaration (` + "`var _`" + ` outside any function).
 Assertions inside test functions or init functions do not constitute compile-time checks.
@@ -73,7 +78,7 @@ returns the original value"). When paired behaviors are present:
   expected and will not be flagged by AUDIT as an independence violation.
 
 For every Bead you issue you must set:
-- monitor_override: "honor" (MONITOR_EXECUTION may terminate this Bead on loop detection) or "ignore" (loop detection signal is suppressed — use only for legitimately repetitive work)
+- monitor_override: "honor" (MONITOR_EXECUTION may terminate this Bead on loop detection) or "ignore" (loop detection signal is suppressed — use only when the Bead performs inherently repetitive I/O, such as scanning a large dataset, that is structurally indistinguishable from a stuck loop; normal test-fix-rerun cycles are not repetitive work and must use "honor")
 - output_files: a non-empty list of file paths this Bead will create or modify (e.g. ["main.go", "go.mod"]).
   This field drives the independence check in AUDIT_DECOMPOSITION: if two non-layout Beads share
   a file in output_files without a clearly documented sequential dependency, AUDIT will flag it as
