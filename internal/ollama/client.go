@@ -13,6 +13,15 @@ import (
 
 const DefaultTemperature = 0.3
 
+// Context window sizes sent with every request via num_ctx. These cap the KV
+// cache allocation so multiple models can coexist in unified memory.
+// Chat() (single-turn handoff prompts) fits well under 16K.
+// ChatWithTools() accumulates tool-call history and needs more headroom.
+const (
+	chatNumCtx     = 16384
+	executeNumCtx  = 32768
+)
+
 type Client struct {
 	BaseURL    string
 	httpClient *http.Client
@@ -101,7 +110,7 @@ func (c *Client) Warmup(ctx context.Context, model string) error {
 		Model:    model,
 		Messages: []Message{{Role: "user", Content: "hello"}},
 		Stream:   false,
-		Options:  map[string]any{"temperature": 0.0},
+		Options:  map[string]any{"temperature": 0.0, "num_ctx": chatNumCtx},
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -139,7 +148,7 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 		Model:    model,
 		Messages: msgs,
 		Stream:   false,
-		Options:  map[string]any{"temperature": temp},
+		Options:  map[string]any{"temperature": temp, "num_ctx": chatNumCtx},
 	}
 
 	body, err := json.Marshal(req)
@@ -201,7 +210,7 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		Messages: msgs,
 		Tools:    tools,
 		Stream:   true,
-		Options:  map[string]any{"temperature": temp},
+		Options:  map[string]any{"temperature": temp, "num_ctx": executeNumCtx},
 	}
 
 	body, err := json.Marshal(req)
