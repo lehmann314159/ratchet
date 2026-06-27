@@ -16,6 +16,12 @@ import (
 func decomposeSpecSystemPrompt() string {
 	return fmt.Sprintf(`You decompose a design document into a list of Beads — well-scoped, independently executable units of work, each with a clear done-condition.
 
+Your output is a decomposition plan, not an implementation. Each Bead's full_text is a
+natural-language specification that a separate execute model will read and implement. Do not
+write source code, file contents, or pseudocode in full_text fields. The sole exception is
+the api_check assertion lines described below, which must be literal Go declarations so the
+execute model copies them exactly.
+
 **Decomposition Notes — authoritative override:** If the design document contains a
 ` + "`## Decomposition Notes`" + ` section, treat its bead structure guidance as authoritative.
 Follow the specified bead boundaries, file assignments, and integration bead requirements
@@ -38,10 +44,11 @@ The layout Bead must include a signature verification file in its output_files (
 function — that lock the API before any logic Bead runs. If the stubs carry the wrong
 signature, ` + "`go build ./...`" + ` fails immediately, preventing signature drift across the project.
 
-Your layout Bead's full_text must include the exact, fully instantiated assertion lines for
-every exported function in the design doc's API section. Do not describe the pattern or leave
-types as placeholders — derive the real parameter and return types from the design doc and
-write the literal lines the execute model will copy verbatim into ` + "`api_check_test.go`" + `:
+Your layout Bead's full_text is natural-language prose describing what to create — with one
+exception: include the exact, fully instantiated assertion lines for every exported function
+in the design doc's API section. These are the only literal code lines in any full_text.
+Derive the real parameter and return types from the design doc and write the lines verbatim
+so the execute model copies them directly into ` + "`api_check_test.go`" + ` without interpretation:
 
   var _ func(n int) (int, error) = Fib       ← example: fill in actual types, not placeholders
   var _ func(s string) ([]byte, error) = Encode
@@ -100,7 +107,7 @@ Respond with JSON only, no prose before or after:
   "beads": [
     {
       "title": "<short identifier, unique within this decomposition>",
-      "full_text": "<complete, self-contained Bead specification>",
+      "full_text": "<natural-language specification of what to implement — prose only, no source code except api_check assertion lines in the layout Bead>",
       "monitor_override": "honor" | "ignore",
       "output_files": ["<file path>", ...],
       "exit_criteria": ["<runnable check>", ...]
