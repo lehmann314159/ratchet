@@ -56,45 +56,26 @@ Budget guidance for execute_revised:
     changes when the only observable failure is running out of time.
 
 Pre-implementation commitment for persistent capability failures:
-  - When bead_spec_fit is "execution_capability_problem" and the agent has repeated the same
-    mistake across multiple attempts (same wrong API, same wrong type, same misunderstanding),
-    add a "Step 0: Pre-implementation check" to the top of the revised full_text. Step 0 must
-    list specific technical claims the agent is required to state explicitly before writing any
-    code — e.g. "State which Go type you will use for pixel colors and why" or "Run go doc
-    image.NRGBA and confirm the type of img.At(x,y)". This forces the agent to surface its
-    understanding (or misunderstanding) in the trace before implementation, where it can be
-    caught early rather than after a full failed attempt.
+  - When the agent has repeated the same mistake across multiple attempts, require it to state
+    its approach for the failing area before writing any code. This surfaces misunderstandings
+    in the trace early rather than after a full failed attempt.
 
 Specificity ratchet for RECURRING failures:
   - The compressed history tags failure classes as NEW or RECURRING (N prior attempts).
   - For any failure class marked RECURRING with 2 or more prior attempts, prose descriptions
     in the revised spec are insufficient — the agent has already read prose descriptions and
     failed. Escalate to verbatim code: include the exact function call, correct type, or a
-    minimal working skeleton directly in the revised full_text.
-  - Example: if "undefined: nrgba.RGBAAt" is RECURRING (2 prior attempts), do not write
-    "use the correct NRGBA access method" — instead write the exact pattern:
-      c := nrgba.NRGBAAt(x, y)   // returns color.NRGBA; fields R, G, B, A are uint8
-      bit := c.R & 1              // extract LSB; no type conversion needed
+    minimal working skeleton directly in the revised full_text. Do not describe the correct
+    approach — write it out literally so the agent can copy it without interpretation.
   - Apply this to every RECURRING failure class, not just the most recent one.
 
-Vacuous test pass detection:
-  - This rule applies ONLY when the bead's exit_criteria (visible in Input 1) include a test
-    command (e.g., go test, pytest, npm test). If the exit_criteria contain only non-test
-    commands (e.g., go build ./...), skip this rule entirely — a build-only bead reporting
-    "[no test files]" is correct behavior, not a vacuous pass.
-  - If the bead has a test-command exit criterion AND mechanical_findings state that the command
-    completed with exit code 0 but "[no test files]" or "no tests to run" was reported, the
-    exit criterion has NOT been met — no tests executed. Do not declare_success in this case.
-  - Classify as bead_problem. The revised Bead must add a test file to output_files (or change
-    the exit criterion to a non-test check that actually verifies the implementation).
+Vacuous test pass: if the bead's exit_criteria include a test command and mechanical_findings
+report exit code 0 but no tests executed ("[no test files]" or "no tests to run"), do not
+declare_success — no verification occurred. Does not apply to build-only beads.
 
-Workspace repair when stray files exist:
-  - If the trace shows write_file calls to paths outside the output_files list, those files
-    may contain conflicting declarations that will break compilation on the next attempt.
-  - In the revised full_text, add an explicit cleanup instruction naming each stray file:
-    "Before implementing anything, overwrite <file> with only the package declaration line."
-  - Do not rely on the agent discovering stray files on its own — name them explicitly in
-    the spec so the cleanup is unambiguous.
+Workspace repair: if the trace shows writes to files outside output_files, name those files
+explicitly in the revised spec with a cleanup instruction (overwrite with package declaration
+only) — the execute model will not discover stray files on its own.
 
 Respond with JSON only, no prose before or after:
 {
