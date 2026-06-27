@@ -138,15 +138,6 @@ func TestAnalyzeExecutionValidate(t *testing.T) {
 		{"empty mechanical_findings", `{"mechanical_findings":""}`, false},
 		{"whitespace mechanical_findings", `{"mechanical_findings":"   "}`, false},
 		{"missing mechanical_findings", `{"analyzer_interpretation":"x"}`, false},
-		// All eight forbidden causal phrases.
-		{"forbidden: due to", `{"mechanical_findings":"exit 1 due to nil pointer"}`, false},
-		{"forbidden: because", `{"mechanical_findings":"failed because stack overflow"}`, false},
-		{"forbidden: caused by", `{"mechanical_findings":"exit 2 caused by OOM"}`, false},
-		{"forbidden: causes", `{"mechanical_findings":"X causes Y to fail"}`, false},
-		{"forbidden: results in", `{"mechanical_findings":"X results in panic"}`, false},
-		{"forbidden: the reason", `{"mechanical_findings":"the reason test failed"}`, false},
-		{"forbidden: the error is", `{"mechanical_findings":"the error is nil"}`, false},
-		{"forbidden: fails because", `{"mechanical_findings":"TestX fails because buffer overrun"}`, false},
 		{"not JSON", `not json`, false},
 	}
 	runValidate(t, h.Validate, tests)

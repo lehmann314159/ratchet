@@ -13,6 +13,7 @@ import (
 	"ratchet/internal/db"
 	"ratchet/internal/guidance"
 	"ratchet/internal/ollama"
+	"ratchet/internal/trace"
 )
 
 type AnalyzeExecution struct{}
@@ -44,21 +45,23 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		return "", fmt.Errorf("load execution for bead %d: %w", beadID, err)
 	}
 
-	trace, err := os.ReadFile(tracePath)
+	traceData, err := os.ReadFile(tracePath)
 	if err != nil {
 		return "", fmt.Errorf("read trace %s: %w", tracePath, err)
 	}
 
 	outputFileStatus := checkOutputFiles(beadFullTextJSON, folderPath)
 
+	var beadSpec struct {
+		OutputFiles  []string `json:"output_files"`
+		ExitCriteria []string `json:"exit_criteria"`
+	}
+	json.Unmarshal([]byte(beadFullTextJSON), &beadSpec) //nolint:errcheck — malformed JSON handled by empty slices
+
 	// Layout bead structural check: verify api_check_test.go (if owned by this
 	// bead) contains package-level blank-identifier assertions referencing exported
 	// identifiers. If the check fails, return a pre-built finding without calling
 	// the model — the structural violation is unambiguous and needs no interpretation.
-	var beadSpec struct {
-		OutputFiles []string `json:"output_files"`
-	}
-	json.Unmarshal([]byte(beadFullTextJSON), &beadSpec) //nolint:errcheck — malformed JSON handled by empty slice
 	lang := guidance.Detect(folderPath)
 	if finding := checkLayoutBeadOutput(lang, folderPath, beadSpec.OutputFiles); finding != "" {
 		out := AnalyzeExecutionOutput{
@@ -68,6 +71,14 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		data, _ := json.Marshal(out)
 		return string(data), nil
 	}
+
+	// Generate mechanical_findings from structured trace data — no model call,
+	// no causal-language risk.
+	pt := trace.Parse(traceData)
+	mechanicalFindings := trace.GenerateMechanicalFindings(
+		pt, terminationCause, monitorFired, monitorHonored,
+		beadSpec.ExitCriteria, outputFileStatus,
+	)
 
 	model, err := loadVerbModel(ctx, d, job.ProjectID, db.VerbAnalyzeExecution)
 	if err != nil {
@@ -79,11 +90,28 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		return "", fmt.Errorf("load last validation failure: %w", err)
 	}
 
-	userMsg := buildAnalyzeUserMsg(execID, terminationCause, monitorFired, monitorHonored, outputFileStatus, string(trace), lastFailure)
-	return oc.Chat(ctx, model, []ollama.Message{
+	userMsg := buildAnalyzeUserMsg(mechanicalFindings, lastFailure)
+	raw, err := oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: analyzeExecutionSystemPrompt},
 		{Role: "user", Content: userMsg},
 	}, nil)
+	if err != nil {
+		return "", err
+	}
+
+	// Parse the model's interpretation-only response and assemble the full output.
+	var modelOut struct {
+		AnalyzerInterpretation string `json:"analyzer_interpretation"`
+	}
+	if err := json.Unmarshal([]byte(ollama.ExtractJSON(raw)), &modelOut); err != nil {
+		return "", fmt.Errorf("parse analyzer interpretation: %w", err)
+	}
+	out := AnalyzeExecutionOutput{
+		MechanicalFindings:     mechanicalFindings,
+		AnalyzerInterpretation: modelOut.AnalyzerInterpretation,
+	}
+	result, _ := json.Marshal(out)
+	return string(result), nil
 }
 
 // checkOutputFiles stats each file listed in the bead's output_files and
@@ -108,48 +136,10 @@ func checkOutputFiles(beadFullTextJSON, folderPath string) string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-func buildAnalyzeUserMsg(execID int64, cause string, monitorFired, monitorHonored *bool, outputFileStatus, trace, lastFailure string) string {
-	fired := "unknown"
-	if monitorFired != nil {
-		if *monitorFired {
-			fired = "yes"
-		} else {
-			fired = "no"
-		}
-	}
-	honored := "unknown"
-	if monitorHonored != nil {
-		if *monitorHonored {
-			honored = "yes (override flag was 'honor')"
-		} else {
-			honored = "no (override flag was 'ignore')"
-		}
-	}
-	// monitor_force_killed means EXECUTE_BEAD did not respond to SIGTERM within
-	// the grace window and was hard-killed by the orchestrator. The trace may
-	// have a truncated final line.
-	causeNote := cause
-	if cause == "monitor_force_killed" {
-		causeNote = "monitor_force_killed (EXECUTE_BEAD did not respond to graceful signal; trace may be truncated)"
-	}
-
-	msg := fmt.Sprintf(`## Composite Record
-
-Execution ID: %d
-Termination cause: %s
-Monitor fired: %s
-Monitor honored: %s
-
-## Output Files (filesystem state at analysis time)
-
-%s
-
-## Execution Trace
-
-%s`, execID, causeNote, fired, honored, outputFileStatus, trace)
-
+func buildAnalyzeUserMsg(mechanicalFindings, lastFailure string) string {
+	msg := "## Mechanical Findings\n\n" + mechanicalFindings
 	if lastFailure != "" {
-		msg += fmt.Sprintf("\n\n## Previous Attempt Rejected\n\nYour previous attempt was rejected for this reason: %s\n\nReview your mechanical_findings before responding to ensure no forbidden phrases appear.", lastFailure)
+		msg += "\n\n## Previous Attempt Rejected\n\nYour previous attempt was rejected: " + lastFailure
 	}
 	return msg
 }
@@ -161,13 +151,6 @@ func (h *AnalyzeExecution) Validate(raw string) (string, any) {
 	}
 	if strings.TrimSpace(out.MechanicalFindings) == "" {
 		return "malformed: mechanical_findings is empty", nil
-	}
-	// Causal-language discipline check (Experiment 2 finding).
-	lower := strings.ToLower(out.MechanicalFindings)
-	for _, phrase := range forbiddenPhrases {
-		if strings.Contains(lower, phrase) {
-			return fmt.Sprintf("malformed: causal language in mechanical_findings: found %q", phrase), nil
-		}
 	}
 	return "valid", out
 }

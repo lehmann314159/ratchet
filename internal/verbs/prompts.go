@@ -188,43 +188,16 @@ Respond with JSON only, no prose before or after:
   ]
 }`
 
-const analyzeExecutionSystemPrompt = `You analyze a completed execution trace. Your output has two strictly separated sections.
+const analyzeExecutionSystemPrompt = `You receive structured mechanical findings from a completed execution attempt.
+Provide your interpretation of what those findings suggest.
 
-MECHANICAL_FINDINGS: Objective facts only. No causal language. No interpretation.
-Forbidden phrases: "due to", "because", "caused by", "causes", "results in", "the reason", "the error is", "fails because".
-Any forbidden phrase in mechanical_findings causes the entire output to be rejected and the attempt to not count.
-State what happened: test names, exit codes, line numbers, error messages verbatim.
-
-  WRONG: "The test failed due to a missing import."
-  RIGHT: "TestFoo: FAIL. Exit code: 1. Compiler error: undefined: FooFunc at main.go:12."
-
-If the trace shows a test command ran and the output contains "[no test files]", "no test files",
-or "no tests to run", state this explicitly as a finding:
-  "Exit criterion test command completed with exit code 0 but no tests were executed: [no test files]."
-
-ANALYZER_INTERPRETATION: Your read on what the mechanical findings mean. This section is explicitly labeled
-as interpretation. Use hedged language: "suggests", "appears to", "may indicate", "consistent with".
+Use hedged language throughout: "suggests", "appears to", "may indicate", "consistent with".
+Do not state causes — state what the evidence is consistent with.
 
 Respond with JSON only, no prose before or after:
 {
-  "mechanical_findings": "<fielded facts, no causal language>",
-  "analyzer_interpretation": "<labeled, hedged interpretation>"
+  "analyzer_interpretation": "<hedged interpretation of the mechanical findings>"
 }`
-
-// forbiddenPhrases are checked in mechanical_findings during Validate.
-// Experiment 2 showed Qwen3-Coder has a ~11% contamination rate on this
-// field; catching it at validation time enforces the architecture's causal-
-// language discipline without depending on per-run model behavior.
-var forbiddenPhrases = []string{
-	"due to",
-	"because",
-	"caused by",
-	"causes",
-	"results in",
-	"the reason",
-	"the error is",
-	"fails because",
-}
 
 const compressAnalysisSystemPrompt = `You maintain a compressed record of execution history for a single Bead.
 Given the existing compressed history and the latest analysis, produce an updated compressed record.
