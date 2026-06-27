@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -88,10 +89,75 @@ func (h *CompressAnalysis) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		sb.WriteString(analysis.AnalyzerInterpretation)
 	}
 
-	return oc.Chat(ctx, model, []ollama.Message{
+	raw, err := oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: compressAnalysisSystemPrompt},
 		{Role: "user", Content: sb.String()},
 	}, nil)
+	if err != nil {
+		return "", err
+	}
+
+	// Post-process: inject RESOLVED tags for RECURRING failure classes whose
+	// signals are absent from the latest mechanical_findings.
+	var out CompressAnalysisOutput
+	if err := json.Unmarshal([]byte(ollama.ExtractJSON(raw)), &out); err == nil {
+		out.CompressedText = injectResolvedTags(out.CompressedText, analysis.MechanicalFindings)
+		updated, _ := json.Marshal(out)
+		return string(updated), nil
+	}
+	return raw, nil // parse failed; Validate will catch it
+}
+
+var (
+	reTestName     = regexp.MustCompile(`\bTest[A-Z]\w*\b`)
+	reUndefinedSym = regexp.MustCompile(`\bundefined:\s+(\w+)`)
+)
+
+// extractFailureSignals returns strings that would appear in mechanical_findings
+// if the described failure is still active. Returns nil if no signals are found,
+// in which case the caller leaves the line unchanged (safe default).
+func extractFailureSignals(line string) []string {
+	var sigs []string
+	for _, name := range reTestName.FindAllString(line, -1) {
+		// go test stdout for a still-failing test contains "FAIL: TestName"
+		sigs = append(sigs, "FAIL: "+name)
+	}
+	for _, m := range reUndefinedSym.FindAllStringSubmatch(line, -1) {
+		if len(m) > 1 {
+			// go build/test stderr for a still-undefined symbol contains "undefined: Name"
+			sigs = append(sigs, "undefined: "+m[1])
+		}
+	}
+	return sigs
+}
+
+// injectResolvedTags post-processes the model's compressed_text: for each line
+// tagged RECURRING, it extracts failure signals and checks whether any appear in
+// mechanicalFindings. If none do, the failure class is absent from the latest
+// attempt and the line is annotated [RESOLVED — absent from latest attempt].
+// Lines with no extractable signals are left unchanged.
+func injectResolvedTags(compressedText, mechanicalFindings string) string {
+	lines := strings.Split(compressedText, "\n")
+	for i, line := range lines {
+		if !strings.Contains(line, "RECURRING") || strings.Contains(line, "RESOLVED") {
+			continue
+		}
+		sigs := extractFailureSignals(line)
+		if len(sigs) == 0 {
+			continue
+		}
+		stillPresent := false
+		for _, sig := range sigs {
+			if strings.Contains(mechanicalFindings, sig) {
+				stillPresent = true
+				break
+			}
+		}
+		if !stillPresent {
+			lines[i] = line + " [RESOLVED — absent from latest attempt]"
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (h *CompressAnalysis) Validate(raw string) (string, any) {
