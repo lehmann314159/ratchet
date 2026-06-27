@@ -53,9 +53,20 @@ func dispatch(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[str
 		return fmt.Errorf("mark running: %w", err)
 	}
 
-	// Ping before the 30-minute Chat() call to fail fast if Ollama is unreachable.
-	if err := oc.Ping(ctx); err != nil {
-		slog.Error("ollama ping failed, will retry", "verb", job.Verb, "job_id", job.ID, "error", err)
+	// Warm up the model before the real Chat() call. A trivial "hello" request
+	// forces the model into VRAM so a cold swap costs at most 1 minute here
+	// instead of silently burning the full 30-minute job timeout.
+	var model string
+	if err := d.QueryRowContext(ctx,
+		`SELECT model FROM verb_model_assignments WHERE project_id = ? AND verb = ?`,
+		job.ProjectID, job.Verb,
+	).Scan(&model); err != nil {
+		slog.Error("warmup: model lookup failed, will retry", "verb", job.Verb, "job_id", job.ID, "error", err)
+		_, _ = d.ExecContext(ctx, `UPDATE handoff_jobs SET status = 'pending' WHERE id = ?`, job.ID)
+		return err
+	}
+	if err := oc.Warmup(ctx, model); err != nil {
+		slog.Error("ollama warmup failed, will retry", "verb", job.Verb, "job_id", job.ID, "model", model, "error", err)
 		_, _ = d.ExecContext(ctx, `UPDATE handoff_jobs SET status = 'pending' WHERE id = ?`, job.ID)
 		return err
 	}

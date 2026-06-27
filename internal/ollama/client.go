@@ -91,23 +91,34 @@ type chatResponse struct {
 	Error   string  `json:"error,omitempty"`
 }
 
-// Ping verifies the Ollama server is reachable by hitting /api/tags with a
-// short timeout. Call before Chat() to fail fast instead of waiting 30 minutes
-// for a hung or unreachable server to time out.
-func (c *Client) Ping(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/api/tags", nil)
-	if err != nil {
-		return fmt.Errorf("ping: %w", err)
+// Warmup sends a trivial "hello" chat request to the given model with a
+// 1-minute timeout. This forces the model into VRAM before the real request,
+// so a cold model-swap costs at most 1 minute instead of 30. If the warmup
+// times out, the caller should treat it as an infrastructure error and retry.
+func (c *Client) Warmup(ctx context.Context, model string) error {
+	wc := &http.Client{Timeout: time.Minute}
+	req := chatRequest{
+		Model:    model,
+		Messages: []Message{{Role: "user", Content: "hello"}},
+		Stream:   false,
+		Options:  map[string]any{"temperature": 0.0},
 	}
-	resp, err := http.DefaultClient.Do(req)
+	body, err := json.Marshal(req)
 	if err != nil {
-		return fmt.Errorf("ping: %w", err)
+		return fmt.Errorf("warmup marshal: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/chat", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("warmup: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := wc.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("warmup: %w", err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("ping: ollama returned %d", resp.StatusCode)
+		return fmt.Errorf("warmup: ollama returned %d", resp.StatusCode)
 	}
 	return nil
 }
