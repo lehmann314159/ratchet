@@ -53,6 +53,13 @@ func dispatch(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[str
 		return fmt.Errorf("mark running: %w", err)
 	}
 
+	// Ping before the 30-minute Chat() call to fail fast if Ollama is unreachable.
+	if err := oc.Ping(ctx); err != nil {
+		slog.Error("ollama ping failed, will retry", "verb", job.Verb, "job_id", job.ID, "error", err)
+		_, _ = d.ExecContext(ctx, `UPDATE handoff_jobs SET status = 'pending' WHERE id = ?`, job.ID)
+		return err
+	}
+
 	// Run: infrastructure error → return without counting as a strike.
 	startedAt := time.Now().UTC()
 	rawOutput, runErr := handler.Run(ctx, d, oc, job)

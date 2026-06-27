@@ -91,6 +91,27 @@ type chatResponse struct {
 	Error   string  `json:"error,omitempty"`
 }
 
+// Ping verifies the Ollama server is reachable by hitting /api/tags with a
+// short timeout. Call before Chat() to fail fast instead of waiting 30 minutes
+// for a hung or unreachable server to time out.
+func (c *Client) Ping(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/api/tags", nil)
+	if err != nil {
+		return fmt.Errorf("ping: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("ping: %w", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ping: ollama returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // Chat sends a non-streaming chat request and returns the assistant's complete reply.
 // Handoff verbs (DECOMPOSE, AUDIT, RECONCILE, etc.) use this path. Streaming is
 // intentionally off here: per-token HTTP flushing adds overhead that compounds
