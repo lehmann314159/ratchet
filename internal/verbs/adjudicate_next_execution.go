@@ -467,10 +467,13 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 
 		// Clamp execution_budget to at least the project default so ADJUDICATE
 		// cannot accidentally starve a retry with a too-small budget estimate.
-		budget := out.RevisedBead.ExecutionBudget
-		if budget < h.budgetDefault {
-			budget = h.budgetDefault
+		// Apply the clamp to the struct before marshaling so full_text stored in
+		// the DB reflects the enforced budget — ADJUDICATE reads full_text on the
+		// next round and would otherwise anchor to the unclamped value.
+		if out.RevisedBead.ExecutionBudget < h.budgetDefault {
+			out.RevisedBead.ExecutionBudget = h.budgetDefault
 		}
+		budget := out.RevisedBead.ExecutionBudget
 
 		fullText, _ := json.Marshal(out.RevisedBead)
 		res, err := tx.ExecContext(ctx, `
