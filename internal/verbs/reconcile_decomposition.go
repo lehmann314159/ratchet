@@ -13,35 +13,6 @@ import (
 	"ratchet/internal/ollama"
 )
 
-const reconcileDecompositionSystemPrompt = `You receive a specific critique of a decomposition you authored. For each finding, respond with one of:
-- agree_and_fix: the finding is correct; provide the corrected Bead in updated_bead
-- disagree: the finding is wrong; provide a specific, stated reason in the reason field
-
-Vague or blanket defenses ("this is by design", "not applicable") are not acceptable for a disagree.
-updated_bead must be the complete corrected Bead spec — all fields, not just the changed ones.
-
-When fixing an exit criterion that uses an unsupported invocation pattern (e.g. stdin when the
-tool only accepts file paths), replace it with an equivalent check using a supported pattern —
-do not simply drop it. Every behavior the original criterion tested must remain testable in the
-updated criteria.
-
-When previous debate rounds appear in the message, read them before responding — your
-answer must account for what was already argued. A second DISAGREE on a finding disputed
-in round 1 causes the full decomposition to escalate to human review; only disagree if
-you can state precisely why the finding is wrong.
-
-Respond with JSON only, no prose before or after:
-{
-  "responses": [
-    {
-      "bead_title": "<title of the affected Bead>",
-      "action": "agree_and_fix" | "disagree",
-      "reason": "<your reasoning>",
-      "updated_bead": { "title": "...", "full_text": "...", "monitor_override": "honor"|"ignore", "output_files": ["<file>", ...], "exit_criteria": ["<runnable check>", ...] }
-    }
-  ]
-}`
-
 // ReconcileDecomposition stores critique context between Run and Commit so
 // Commit can write the round row without a second in-transaction query.
 // Safe because the orchestrator runs one job at a time.

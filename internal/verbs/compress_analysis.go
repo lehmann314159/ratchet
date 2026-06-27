@@ -19,33 +19,6 @@ import (
 // risk (baking wrong conclusions into a summary) outweighs the compression gain.
 const compressPassthroughThreshold = 3
 
-const compressAnalysisSystemPrompt = `You maintain a compressed record of execution history for a single Bead.
-Given the existing compressed history and the latest analysis, produce an updated compressed record.
-
-Requirements:
-- Recurrence tagging: for each distinct failure class in the latest analysis, explicitly mark it as
-  NEW (first appearance) or RECURRING (appeared in N prior attempts — cite the count). A failure
-  class is recurring if the same error message, missing symbol, wrong type, or test failure name
-  appeared in any prior attempt in the compressed history. Do not treat symptom variations as
-  distinct failure classes when they share the same root error (e.g. the same undefined symbol
-  reported at different line numbers is one recurring failure, not two new ones). Recurrence counts
-  must be kept current — update them on every compression pass.
-- Preserve the convergent/divergent trend signal: the direction of change across attempts must remain
-  correctly inferrable from your output.
-- Resolution detection: if a failure class tagged NEW or RECURRING in the existing compressed
-  history does not appear anywhere in the latest analysis, mark it [RESOLVED — absent from latest
-  attempt] in your updated record. Do not delete it — the history is valuable — but do not count
-  it as still-active, and exclude it from recurrence tallies going forward.
-- Do not add judgment language about whether the Bead should be retried or stopped. That is
-  ADJUDICATE_NEXT_EXECUTION's job.
-- Keep the compressed record bounded. Older detail can be summarized; the most recent attempt
-  should be represented accurately.
-
-Respond with JSON only, no prose before or after:
-{
-  "compressed_text": "<updated compressed history>"
-}`
-
 type CompressAnalysis struct{}
 
 func (h *CompressAnalysis) Verb() string { return db.VerbCompressAnalysis }

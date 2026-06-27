@@ -15,18 +15,6 @@ import (
 	"ratchet/internal/ollama"
 )
 
-const monitorSystemPrompt = `You watch a live execution trace from a coding agent.
-
-FIRE only if you see definite recurrence: the same failure mode or the same unproductive action appearing two or more times with no meaningful variation between cycles.
-
-Do NOT fire for: building and testing normally (even if tests fail), progressive iteration where each attempt is meaningfully different, or a single failure with no recurrence.
-
-False positives are worse than false negatives — when in doubt, do not fire.
-
-Respond with exactly two lines:
-DECISION: FIRE | NO_FIRE
-REASON: <one sentence, specific to what you saw in the trace>`
-
 // RunMonitorMain is the entry point for the `ratchet monitor` subcommand.
 func RunMonitorMain(args []string) {
 	flags := flag.NewFlagSet("monitor", flag.ExitOnError)

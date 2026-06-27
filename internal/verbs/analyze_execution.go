@@ -15,44 +15,6 @@ import (
 	"ratchet/internal/ollama"
 )
 
-const analyzeExecutionSystemPrompt = `You analyze a completed execution trace. Your output has two strictly separated sections.
-
-MECHANICAL_FINDINGS: Objective facts only. No causal language. No interpretation.
-Forbidden phrases: "due to", "because", "caused by", "causes", "results in", "the reason", "the error is", "fails because".
-Any forbidden phrase in mechanical_findings causes the entire output to be rejected and the attempt to not count.
-State what happened: test names, exit codes, line numbers, error messages verbatim.
-
-  WRONG: "The test failed due to a missing import."
-  RIGHT: "TestFoo: FAIL. Exit code: 1. Compiler error: undefined: FooFunc at main.go:12."
-
-If the trace shows a test command ran and the output contains "[no test files]", "no test files",
-or "no tests to run", state this explicitly as a finding:
-  "Exit criterion test command completed with exit code 0 but no tests were executed: [no test files]."
-
-ANALYZER_INTERPRETATION: Your read on what the mechanical findings mean. This section is explicitly labeled
-as interpretation. Use hedged language: "suggests", "appears to", "may indicate", "consistent with".
-
-Respond with JSON only, no prose before or after:
-{
-  "mechanical_findings": "<fielded facts, no causal language>",
-  "analyzer_interpretation": "<labeled, hedged interpretation>"
-}`
-
-// forbiddenPhrases are checked in mechanical_findings during validation.
-// Experiment 2 showed Qwen3-Coder has a ~11% contamination rate on this
-// field; catching it at validation time enforces the architecture's causal-
-// language discipline without depending on per-run model behavior.
-var forbiddenPhrases = []string{
-	"due to",
-	"because",
-	"caused by",
-	"causes",
-	"results in",
-	"the reason",
-	"the error is",
-	"fails because",
-}
-
 type AnalyzeExecution struct{}
 
 func (h *AnalyzeExecution) Verb() string { return db.VerbAnalyzeExecution }
