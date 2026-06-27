@@ -100,7 +100,8 @@ func (h *CompressAnalysis) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	// Post-process: inject RESOLVED tags for RECURRING failure classes whose
 	// signals are absent from the latest mechanical_findings.
 	var out CompressAnalysisOutput
-	if err := json.Unmarshal([]byte(ollama.ExtractJSON(raw)), &out); err == nil {
+	cleaned := sanitizeJSON(ollama.ExtractJSON(raw))
+	if err := json.Unmarshal([]byte(cleaned), &out); err == nil {
 		out.CompressedText = injectResolvedTags(out.CompressedText, analysis.MechanicalFindings)
 		updated, _ := json.Marshal(out)
 		return string(updated), nil
@@ -111,7 +112,23 @@ func (h *CompressAnalysis) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 var (
 	reTestName     = regexp.MustCompile(`\bTest[A-Z]\w*\b`)
 	reUndefinedSym = regexp.MustCompile(`\bundefined:\s+(\w+)`)
+	// reBareBackslash matches either a valid \\ pair (preserved) or a lone
+	// backslash before an invalid JSON escape char (fixed to \\). The \\\\
+	// alternative must come first so the second \ of a valid \\ pair is
+	// consumed before the lone-backslash arm can incorrectly grab it.
+	reBareBackslash = regexp.MustCompile(`\\\\|\\([^"\\/bfnrtu])`)
 )
+
+// sanitizeJSON escapes lone backslashes that would produce invalid JSON escape
+// sequences. It consumes valid \\ pairs as a unit so they are never split.
+func sanitizeJSON(s string) string {
+	return reBareBackslash.ReplaceAllStringFunc(s, func(m string) string {
+		if m == `\\` {
+			return m // valid escaped backslash — preserve
+		}
+		return `\\` + m[1:] // lone backslash before invalid char — escape it
+	})
+}
 
 // extractFailureSignals returns strings that would appear in mechanical_findings
 // if the described failure is still active. Returns nil if no signals are found,
@@ -161,8 +178,9 @@ func injectResolvedTags(compressedText, mechanicalFindings string) string {
 }
 
 func (h *CompressAnalysis) Validate(raw string) (string, any) {
+	cleaned := sanitizeJSON(ollama.ExtractJSON(raw))
 	var out CompressAnalysisOutput
-	if err := json.Unmarshal([]byte(ollama.ExtractJSON(raw)), &out); err != nil {
+	if err := json.Unmarshal([]byte(cleaned), &out); err != nil {
 		return fmt.Sprintf("malformed: JSON parse error: %v", err), nil
 	}
 	if strings.TrimSpace(out.CompressedText) == "" {
