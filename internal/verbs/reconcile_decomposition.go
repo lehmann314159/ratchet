@@ -201,6 +201,17 @@ func (h *ReconcileDecomposition) Commit(ctx context.Context, tx *sql.Tx, job *db
 }
 
 func (h *ReconcileDecomposition) applyFixes(ctx context.Context, tx *sql.Tx, projectID int64, out ReconcileDecompositionOutput, now string) error {
+	// Detect language once before the loop. Collect all output_files from the
+	// updated beads so detectLang can fall back to extension scanning when the
+	// layout bead has not yet run and go.mod / equivalents do not exist yet.
+	var allOutputFiles []string
+	for _, r := range out.Responses {
+		if r.UpdatedBead != nil {
+			allOutputFiles = append(allOutputFiles, r.UpdatedBead.OutputFiles...)
+		}
+	}
+	lang := detectLang(h.folderPath, allOutputFiles)
+
 	for _, r := range out.Responses {
 		if r.Action != "agree_and_fix" || r.UpdatedBead == nil {
 			continue
@@ -218,7 +229,6 @@ func (h *ReconcileDecomposition) applyFixes(ctx context.Context, tx *sql.Tx, pro
 			return fmt.Errorf("find bead %q for fix: %w", r.BeadTitle, err)
 		}
 
-		lang := guidance.Detect(h.folderPath)
 		applyMechanicalBeadFixes(lang, r.UpdatedBead)
 
 		fullText, _ := json.Marshal(r.UpdatedBead)

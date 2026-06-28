@@ -13,11 +13,47 @@ import (
 	"ratchet/internal/ollama"
 )
 
+// detectLang returns the programming language for a project. It first checks
+// the filesystem (reliable after the layout bead has run), then falls back to
+// scanning outputFiles — the union of all bead output_files entries — which
+// works before any bead has executed and go.mod / requirements.txt / etc. do
+// not yet exist.
+func detectLang(folderPath string, outputFiles []string) string {
+	if lang := guidance.Detect(folderPath); lang != "" {
+		return lang
+	}
+	for _, f := range outputFiles {
+		switch {
+		case strings.HasSuffix(f, ".go"):
+			return "go"
+		case strings.HasSuffix(f, ".py"):
+			return "python"
+		case strings.HasSuffix(f, ".rs") || f == "Cargo.toml":
+			return "rust"
+		case strings.HasSuffix(f, ".ts") || strings.HasSuffix(f, ".tsx"):
+			return "typescript"
+		case strings.HasSuffix(f, ".js") || strings.HasSuffix(f, ".jsx"):
+			return "javascript"
+		}
+	}
+	return ""
+}
+
+// beadOutputFiles flattens a slice of beadState into the union of all
+// output_files entries, for passing to detectLang.
+func beadOutputFiles(beads []beadState) []string {
+	var files []string
+	for _, b := range beads {
+		files = append(files, b.OutputFiles...)
+	}
+	return files
+}
+
 // injectMechanicalFindings parses the raw AUDIT model output, appends any
 // mechanical structural violations the model missed, and re-serializes. If raw
 // is not valid JSON or no mechanical findings exist, it is returned unchanged.
 func injectMechanicalFindings(raw, folderPath string, beads []beadState) string {
-	lang := guidance.Detect(folderPath)
+	lang := detectLang(folderPath, beadOutputFiles(beads))
 	if lang == "" {
 		return raw
 	}

@@ -83,7 +83,8 @@ func checkConsistency(fit, reasoning string) (bool, string) {
 }
 
 type AdjudicateNextExecution struct {
-	budgetDefault int // cached from Run for use in Commit
+	budgetDefault int    // cached from Run for use in Commit
+	folderPath    string // cached from Run for use in Commit
 }
 
 func (h *AdjudicateNextExecution) Verb() string { return db.VerbAdjudicateNextExecution }
@@ -140,6 +141,7 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 		return "", err
 	}
 	h.budgetDefault = project.ExecutionBudgetDefault
+	h.folderPath = project.FolderPath
 
 	model, err := loadVerbModel(ctx, d, job.ProjectID, db.VerbAdjudicateNextExecution)
 	if err != nil {
@@ -376,6 +378,14 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 			out.RevisedBead.ExecutionBudget = h.budgetDefault
 		}
 		budget := out.RevisedBead.ExecutionBudget
+
+		// Apply language-specific structural fixes to the revised spec before
+		// storing it, catching the same class of errors that DECOMPOSE and
+		// RECONCILE fix at decomposition time (e.g. go test without a test file).
+		applyMechanicalBeadFixes(
+			detectLang(h.folderPath, out.RevisedBead.OutputFiles),
+			out.RevisedBead,
+		)
 
 		fullText, _ := json.Marshal(out.RevisedBead)
 		res, err := tx.ExecContext(ctx, `

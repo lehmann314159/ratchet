@@ -73,7 +73,11 @@ func (h *DecomposeSpec) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJ
 	out := parsed.(DecomposeSpecOutput)
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	lang := guidance.Detect(h.folderPath)
+	var allOutputFiles []string
+	for _, pb := range out.Beads {
+		allOutputFiles = append(allOutputFiles, pb.OutputFiles...)
+	}
+	lang := detectLang(h.folderPath, allOutputFiles)
 	for _, pb := range out.Beads {
 		applyMechanicalBeadFixes(lang, &pb)
 

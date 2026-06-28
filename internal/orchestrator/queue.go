@@ -10,16 +10,13 @@ import (
 )
 
 // verbTolerance returns the malformed-output strike limit for a verb.
-// ADJUDICATE_NEXT_EXECUTION has zero tolerance (escalate immediately).
+// All verbs share the same tolerance — 2 bad outputs before escalating —
+// so that a single malformed model response auto-retries rather than
+// requiring human intervention.
 // AUDIT_DECOMPOSITION and RECONCILE_DECOMPOSITION share the round-cap
 // counter rather than this mechanism (see queue handling in dispatch.go).
 func verbTolerance(verb string) int {
-	switch verb {
-	case db.VerbAdjudicateNextExecution:
-		return 0
-	default:
-		return 2
-	}
+	return 2
 }
 
 // activeProject returns the single active project, or an error if none exists.

@@ -119,15 +119,68 @@ var (
 	reBareBackslash = regexp.MustCompile(`\\\\|\\([^"\\/bfnrtu])`)
 )
 
-// sanitizeJSON escapes lone backslashes that would produce invalid JSON escape
-// sequences. It consumes valid \\ pairs as a unit so they are never split.
+// sanitizeJSON fixes two classes of invalid JSON that local models commonly emit:
+//  1. Lone backslashes before non-special characters (e.g. \A → \\A)
+//  2. Raw control characters inside string literals (e.g. literal tab → \t)
 func sanitizeJSON(s string) string {
-	return reBareBackslash.ReplaceAllStringFunc(s, func(m string) string {
+	// Pass 1: fix lone backslashes.
+	s = reBareBackslash.ReplaceAllStringFunc(s, func(m string) string {
 		if m == `\\` {
-			return m // valid escaped backslash — preserve
+			return m
 		}
-		return `\\` + m[1:] // lone backslash before invalid char — escape it
+		return `\\` + m[1:]
 	})
+	// Pass 2: escape raw control characters inside JSON string literals.
+	return escapeControlCharsInStrings(s)
+}
+
+// escapeControlCharsInStrings walks s as a JSON token stream and replaces raw
+// control characters (0x00–0x1F, 0x7F) found inside string literals with their
+// JSON escape sequences. Pass 1 must run first so that all backslashes in the
+// input are already valid JSON escape leaders.
+func escapeControlCharsInStrings(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	inString := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			switch {
+			case c == '\\': // valid escape sequence — consume leader + next byte verbatim
+				b.WriteByte(c)
+				i++
+				if i < len(s) {
+					b.WriteByte(s[i])
+				}
+			case c == '"': // end of string literal
+				inString = false
+				b.WriteByte(c)
+			case c < 0x20 || c == 0x7F: // raw control character — must be escaped in JSON
+				switch c {
+				case '\t':
+					b.WriteString(`\t`)
+				case '\n':
+					b.WriteString(`\n`)
+				case '\r':
+					b.WriteString(`\r`)
+				case '\b':
+					b.WriteString(`\b`)
+				case '\f':
+					b.WriteString(`\f`)
+				default:
+					fmt.Fprintf(&b, `\u%04x`, c)
+				}
+			default:
+				b.WriteByte(c)
+			}
+		} else {
+			if c == '"' {
+				inString = true
+			}
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // extractFailureSignals returns strings that would appear in mechanical_findings
