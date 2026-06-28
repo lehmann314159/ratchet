@@ -82,6 +82,41 @@ func checkConsistency(fit, reasoning string) (bool, string) {
 	return true, ""
 }
 
+// vacuousPassNote returns a non-empty structural note to inject into the
+// mechanical findings when the vacuous test pass is Type B (inherent) — the
+// bead's output_files contain no *_test.go, so the test named in the exit
+// criterion was never part of this bead's deliverable.
+//
+// Type A (test file IS in output_files but tests didn't run) returns "" — the
+// standard vacuous-pass principle in the ADJUDICATE prompt applies there.
+func vacuousPassNote(bead *beadState, mechanicalFindings string) string {
+	hasTestCriterion := false
+	for _, c := range bead.ExitCriteria {
+		if strings.Contains(c, "go test") {
+			hasTestCriterion = true
+			break
+		}
+	}
+	if !hasTestCriterion {
+		return ""
+	}
+	lower := strings.ToLower(mechanicalFindings)
+	isVacuous := strings.Contains(lower, "no tests to run") ||
+		strings.Contains(lower, "[no test files]") ||
+		strings.Contains(lower, "no test files")
+	if !isVacuous {
+		return ""
+	}
+	if hasTestGoFile(bead.OutputFiles) {
+		return "" // Type A — test file was in scope; standard rule applies
+	}
+	return "[Structural note: Type B vacuous pass] This bead's output_files contain no " +
+		"*_test.go file, so the test named in the exit criterion is outside this bead's " +
+		"scope. The vacuous-pass rule does not block declare_success here. Evaluate only " +
+		"whether the non-test output files listed in output_files were correctly written " +
+		"(file exists, content is correct for the bead's stated purpose)."
+}
+
 type AdjudicateNextExecution struct {
 	budgetDefault int    // cached from Run for use in Commit
 	folderPath    string // cached from Run for use in Commit
@@ -148,7 +183,11 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 		return "", err
 	}
 
-	userMsg := buildAdjudicateUserMsg(currentBead, revLog, analysis.MechanicalFindings, compressedHistory, diffSignal)
+	findings := analysis.MechanicalFindings
+	if note := vacuousPassNote(currentBead, findings); note != "" {
+		findings += "\n\n" + note
+	}
+	userMsg := buildAdjudicateUserMsg(currentBead, revLog, findings, compressedHistory, diffSignal)
 	return oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: guidance.Inject(adjudicateNextExecutionSystemPrompt, project.FolderPath)},
 		{Role: "user", Content: userMsg},

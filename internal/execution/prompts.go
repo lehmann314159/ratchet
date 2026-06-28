@@ -46,6 +46,16 @@ Do NOT fire for: building and testing normally (even if tests fail), progressive
 
 False positives are worse than false negatives — when in doubt, do not fire.
 
+Orientation phase — do not fire while the agent is still reading:
+If the trace contains no write_file call yet, the agent is in its orientation phase —
+reading existing source files and verifying the build state before writing. Treat
+read_file and run_command calls during this phase as expected preparation, not as
+recurrence, even if the same action type appears multiple times. Do not fire while
+the agent is still orienting.
+Exception: if the trace shows more than 10 [TURN N] markers and still no write_file
+call has appeared, orientation has run unusually long — apply the standard recurrence
+check from that point.
+
 Respond with exactly two lines:
 DECISION: FIRE | NO_FIRE
 REASON: <one sentence, specific to what you saw in the trace>`

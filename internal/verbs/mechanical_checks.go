@@ -94,7 +94,10 @@ func goMechanicalBeadChecks(beads []beadState) []AuditFinding {
 					BeadTitle: b.Title,
 					Issue: fmt.Sprintf(
 						"exit criterion %q runs go test but output_files contains no *_test.go file — "+
-							"the command exits 0 with \"no test files\" and verifies nothing (vacuous pass)",
+							"add the test file to output_files (e.g. game_test.go for game.go); "+
+							"without an owned test file the command exits 0 with \"no test files\" "+
+							"and verifies nothing (vacuous pass). Do not downgrade the criterion to "+
+							"go build ./... — that removes the test goal from the executor.",
 						criterion),
 					DesignDocReference: "N/A — structural",
 				})
@@ -127,20 +130,85 @@ func applyMechanicalBeadFixes(lang string, bead *ParsedBead) bool {
 // goFixBeadSpec fixes Go-specific structural violations in-place:
 //
 //   - If a bead has a "go test" exit criterion but no *_test.go in output_files,
-//     those criteria are changed to "go build ./...". A bead that does not own a
-//     test file cannot verify test results; the build check is the correct gate.
+//     and the bead owns non-test .go files: add a derived *_test.go to output_files
+//     so the executor knows it must write tests (preserves goal visibility).
+//   - If the bead has no .go files at all (content-only bead, e.g. HTML templates):
+//     downgrade those criteria to "go build ./..." — the bead cannot own tests.
 func goFixBeadSpec(bead *ParsedBead) bool {
 	if hasTestGoFile(bead.OutputFiles) {
 		return false // owns test file — no fix needed
 	}
-	fixed := false
-	for i, c := range bead.ExitCriteria {
+	hasGoTestCriterion := false
+	for _, c := range bead.ExitCriteria {
 		if strings.Contains(c, "go test") {
-			bead.ExitCriteria[i] = "go build ./..."
-			fixed = true
+			hasGoTestCriterion = true
+			break
 		}
 	}
-	return fixed
+	if !hasGoTestCriterion {
+		return false
+	}
+
+	var goFiles []string
+	for _, f := range bead.OutputFiles {
+		if strings.HasSuffix(f, ".go") && !strings.HasSuffix(f, "_test.go") {
+			goFiles = append(goFiles, f)
+		}
+	}
+
+	if len(goFiles) == 0 {
+		// Content-only bead (no .go files). Downgrading is the correct fallback.
+		for i, c := range bead.ExitCriteria {
+			if strings.Contains(c, "go test") {
+				bead.ExitCriteria[i] = "go build ./..."
+			}
+		}
+		return true
+	}
+
+	// Bead owns .go files: add the derived test file instead of downgrading.
+	bead.OutputFiles = append(bead.OutputFiles, deriveTestFileName(bead.ExitCriteria, goFiles))
+	return true
+}
+
+// deriveTestFileName picks the *_test.go filename to add when a bead has go
+// test exit criteria but no test file. It tries to match a .go file whose base
+// name appears as a substring of the test name from any -run= flag; falls back
+// to the first .go file's _test.go.
+func deriveTestFileName(exitCriteria, goFiles []string) string {
+	for _, c := range exitCriteria {
+		if !strings.Contains(c, "go test") {
+			continue
+		}
+		testName := strings.ToLower(extractRunTestName(c))
+		if testName == "" {
+			continue
+		}
+		for _, gf := range goFiles {
+			base := strings.ToLower(strings.TrimSuffix(filepath.Base(gf), ".go"))
+			if strings.Contains(testName, base) {
+				return filepath.Join(filepath.Dir(gf), base+"_test.go")
+			}
+		}
+	}
+	first := goFiles[0]
+	base := strings.TrimSuffix(filepath.Base(first), ".go")
+	return filepath.Join(filepath.Dir(first), base+"_test.go")
+}
+
+// extractRunTestName returns the value of the -run= flag in a go test command,
+// or "" if no -run= flag is present.
+func extractRunTestName(criterion string) string {
+	const flag = "-run="
+	idx := strings.Index(criterion, flag)
+	if idx < 0 {
+		return ""
+	}
+	rest := criterion[idx+len(flag):]
+	if i := strings.IndexAny(rest, " \t"); i >= 0 {
+		return rest[:i]
+	}
+	return rest
 }
 
 func hasTestGoFile(files []string) bool {
