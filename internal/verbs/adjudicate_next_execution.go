@@ -12,6 +12,7 @@ import (
 	"ratchet/internal/db"
 	"ratchet/internal/guidance"
 	"ratchet/internal/ollama"
+	"ratchet/internal/report"
 )
 
 // consistencyKeywords maps each bead_spec_fit value to keyword sets.
@@ -197,7 +198,7 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 func buildAdjudicateUserMsg(bead *beadState, revLog []revisionEntry, mechanicalFindings, compressedHistory, diffSignal string) string {
 	var sb strings.Builder
 
-	fmt.Fprintf(&sb, "## Input 1: Current Bead State\n\nBead ID: %d\n\n%s\n\n", bead.BeadID, bead.FullText)
+	fmt.Fprintf(&sb, "## Input 1: Current Bead State\n\nBead ID: %d\nActual execution budget: %ds\n\n%s\n\n", bead.BeadID, bead.ExecutionBudget, bead.FullText)
 
 	sb.WriteString("## Input 2: Bead Revision Log\n\n")
 	for _, r := range revLog {
@@ -456,6 +457,11 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 			`UPDATE beads SET status = 'full_stopped' WHERE id = ?`, beadID); err != nil {
 			return err
 		}
+		report.WriteBead(ctx, tx, h.folderPath, beadID, "full_stopped")
+
+		// Collect cascade bead IDs before the bulk update.
+		cascadeIDs, _ := queryCascadeBeadIDs(ctx, tx, job.ProjectID, beadID)
+
 		// Mark all subsequent pending beads stopped — they will never run now.
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE beads SET status = 'full_stopped'
@@ -464,23 +470,34 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 		); err != nil {
 			return fmt.Errorf("mark remaining beads full_stopped: %w", err)
 		}
-		return h.checkProjectTerminal(ctx, tx, job.ProjectID, "full_stopped", now)
+		for _, cascadeID := range cascadeIDs {
+			report.WriteBead(ctx, tx, h.folderPath, cascadeID,
+				fmt.Sprintf("full_stopped (cascade — stopped by bead %d)", beadID))
+		}
+		if err := h.checkProjectTerminal(ctx, tx, job.ProjectID, "full_stopped", now); err != nil {
+			return err
+		}
+		report.WriteProject(ctx, tx, job.ProjectID, h.folderPath)
+		return nil
 
 	case "declare_success":
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE beads SET status = 'succeeded' WHERE id = ?`, beadID); err != nil {
 			return fmt.Errorf("mark bead succeeded: %w", err)
 		}
+		report.WriteBead(ctx, tx, h.folderPath, beadID, "succeeded")
 		advanced, err := h.advanceToNextBead(ctx, tx, job.ProjectID, beadID, now)
 		if err != nil {
 			return err
 		}
 		if !advanced {
 			// Last bead — project is complete.
-			_, err = tx.ExecContext(ctx,
+			if _, err = tx.ExecContext(ctx,
 				`UPDATE projects SET status = 'complete', updated_at = ? WHERE id = ?`,
-				now, job.ProjectID)
-			return err
+				now, job.ProjectID); err != nil {
+				return err
+			}
+			report.WriteProject(ctx, tx, job.ProjectID, h.folderPath)
 		}
 		return nil
 	}
@@ -514,7 +531,30 @@ func (h *AdjudicateNextExecution) atExecutionCap(ctx context.Context, tx *sql.Tx
 	slog.Error("ESCALATION — max execution attempts reached",
 		"project_id", projectID, "bead_id", beadID,
 		"attempts", count, "cap", cap, "job_id", jobID)
+	report.WriteBead(ctx, tx, h.folderPath, beadID, "escalated")
 	return true, nil
+}
+
+// queryCascadeBeadIDs returns IDs of pending beads after beadID in the project.
+// Called before the bulk full_stop update so we can write cascade reports.
+func queryCascadeBeadIDs(ctx context.Context, tx *sql.Tx, projectID, afterBeadID int64) ([]int64, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id FROM beads
+		WHERE project_id = ? AND id > ? AND status = 'pending'
+		ORDER BY id`, projectID, afterBeadID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // advanceToNextBead enqueues an EXECUTE_BEAD job for the next pending bead

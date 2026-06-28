@@ -95,6 +95,9 @@ func safePath(relPath, projectFolder string) (string, error) {
 }
 
 func toolWriteFile(path, content, projectFolder string) string {
+	if path == "" {
+		return "error: write_file requires a 'path' argument specifying the filename (e.g. path=\"game.go\"); no path was provided"
+	}
 	abs, err := safePath(path, projectFolder)
 	if err != nil {
 		return "error: " + err.Error()

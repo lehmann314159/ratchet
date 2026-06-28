@@ -127,6 +127,77 @@ exit: 0
 	if pt.Commands[0].Command != "go build ./..." {
 		t.Errorf("Commands[0].Command = %q", pt.Commands[0].Command)
 	}
+	// but it should be captured as a WriteFileResult
+	if len(pt.WriteFiles) != 1 {
+		t.Fatalf("len(WriteFiles) = %d, want 1", len(pt.WriteFiles))
+	}
+	wf := pt.WriteFiles[0]
+	if wf.Turn != 1 {
+		t.Errorf("WriteFiles[0].Turn = %d, want 1", wf.Turn)
+	}
+	if wf.Path != "fib.go" {
+		t.Errorf("WriteFiles[0].Path = %q, want %q", wf.Path, "fib.go")
+	}
+	if !wf.Succeeded {
+		t.Error("WriteFiles[0].Succeeded should be true")
+	}
+}
+
+func TestParse_WriteFileNoPath(t *testing.T) {
+	// Simulates the bug where model omits path argument.
+	input := `[TURN 1]
+[tool: write_file map[content:package main
+
+func main() {}
+]]
+[result]
+error: write_file requires a 'path' argument specifying the filename (e.g. path="game.go"); no path was provided
+[TURN 2]
+[tool: write_file map[content:package main
+
+func main() {}
+ path:main.go]]
+[result]
+ok: wrote 42 bytes to main.go
+[done — no further tool calls]
+`
+	pt := Parse([]byte(input))
+	if len(pt.WriteFiles) != 2 {
+		t.Fatalf("len(WriteFiles) = %d, want 2", len(pt.WriteFiles))
+	}
+	// First: no path, failed
+	if pt.WriteFiles[0].Path != "" {
+		t.Errorf("WriteFiles[0].Path = %q, want empty", pt.WriteFiles[0].Path)
+	}
+	if pt.WriteFiles[0].Succeeded {
+		t.Error("WriteFiles[0].Succeeded should be false")
+	}
+	// Second: has path, succeeded
+	if pt.WriteFiles[1].Path != "main.go" {
+		t.Errorf("WriteFiles[1].Path = %q, want %q", pt.WriteFiles[1].Path, "main.go")
+	}
+	if !pt.WriteFiles[1].Succeeded {
+		t.Error("WriteFiles[1].Succeeded should be true")
+	}
+}
+
+func TestExtractWritePath(t *testing.T) {
+	cases := []struct {
+		line string
+		want string
+	}{
+		{" path:game.go]]", "game.go"},
+		{"} path:fib.go]]", "fib.go"},
+		{"return nil\n path:templates/board.html]]", "templates/board.html"},
+		{"no path here]]", ""},
+		{"]]", ""},
+	}
+	for _, tc := range cases {
+		got := extractWritePath(tc.line)
+		if got != tc.want {
+			t.Errorf("extractWritePath(%q) = %q, want %q", tc.line, got, tc.want)
+		}
+	}
 }
 
 func TestParse_Truncated(t *testing.T) {

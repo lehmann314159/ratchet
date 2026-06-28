@@ -17,16 +17,25 @@ type CommandResult struct {
 	ExitCode int    // 0 on success; N from "exit status N"; -1 if trace truncated
 }
 
+// WriteFileResult holds the outcome of one write_file tool call.
+type WriteFileResult struct {
+	Turn      int
+	Path      string // empty if the model omitted the path argument
+	Succeeded bool   // true if the result line starts with "ok:"
+}
+
 // ParsedTrace is the structured result of parsing an execution trace.
 type ParsedTrace struct {
 	// TerminationMarker is the payload of [terminated: X], "success" for
 	// [done — no further tool calls], or "" if the trace is truncated.
 	TerminationMarker string
 	Commands          []CommandResult
+	WriteFiles        []WriteFileResult
 }
 
 const (
 	runCommandPrefix = "[tool: run_command map[command:"
+	writeFilePrefix  = "[tool: write_file map[content:"
 	resultMarker     = "[result]"
 	doneMarker       = "[done \xe2\x80\x94 no further tool calls]" // em-dash
 )
@@ -38,6 +47,13 @@ func Parse(data []byte) ParsedTrace {
 	var inResult bool
 	var resultLines []string
 	var currentTurn int
+
+	// write_file tracking state
+	var inWriteFile     bool   // inside a multi-line write_file content block
+	var wfTurn          int    // turn number of the current write_file call
+	var wfPath          string // path extracted from the closing ]] line
+	var wfAwaitResult   bool   // saw ]], now waiting for [result]
+	var wfInResult      bool   // next non-empty line is the write_file result
 
 	finalize := func() {
 		if pendingCmd == "" || !inResult {
@@ -57,6 +73,13 @@ func Parse(data []byte) ParsedTrace {
 		resultLines = nil
 	}
 
+	resetWriteFile := func() {
+		inWriteFile = false
+		wfPath = ""
+		wfAwaitResult = false
+		wfInResult = false
+	}
+
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scanner.Scan() {
@@ -65,21 +88,37 @@ func Parse(data []byte) ParsedTrace {
 		switch {
 		case isTurnMarker(line):
 			finalize()
+			resetWriteFile()
 			currentTurn = parseTurnNumber(line)
 
 		case strings.HasPrefix(line, runCommandPrefix):
 			finalize()
+			resetWriteFile()
 			pendingCmd = extractRunCommand(line)
 
-		case strings.HasPrefix(line, "[tool: "):
-			// write_file or read_file — discard any pending run_command state
+		case strings.HasPrefix(line, writeFilePrefix):
 			finalize()
-			pendingCmd = "" // already cleared by finalize, but explicit
+			resetWriteFile()
+			wfTurn = currentTurn
+			if strings.HasSuffix(line, "]]") {
+				wfPath = extractWritePath(line)
+				wfAwaitResult = true
+			} else {
+				inWriteFile = true
+			}
+
+		case strings.HasPrefix(line, "[tool: "):
+			// read_file or unknown tool — discard pending state
+			finalize()
+			resetWriteFile()
 
 		case line == resultMarker:
 			if pendingCmd != "" {
 				inResult = true
 				resultLines = nil
+			} else if wfAwaitResult {
+				wfAwaitResult = false
+				wfInResult = true
 			}
 
 		case strings.HasPrefix(line, "[terminated: "):
@@ -92,6 +131,25 @@ func Parse(data []byte) ParsedTrace {
 			pt.TerminationMarker = "success"
 			return pt
 
+		case inWriteFile:
+			// Inside write_file content — watch for the closing ]] line.
+			if strings.HasSuffix(line, "]]") {
+				wfPath = extractWritePath(line)
+				inWriteFile = false
+				wfAwaitResult = true
+			}
+
+		case wfInResult:
+			// First non-empty result line tells us success or failure.
+			if line != "" {
+				pt.WriteFiles = append(pt.WriteFiles, WriteFileResult{
+					Turn:      wfTurn,
+					Path:      wfPath,
+					Succeeded: strings.HasPrefix(line, "ok:"),
+				})
+				wfInResult = false
+			}
+
 		default:
 			if inResult {
 				resultLines = append(resultLines, line)
@@ -101,6 +159,18 @@ func Parse(data []byte) ParsedTrace {
 
 	finalize()
 	return pt
+}
+
+// extractWritePath extracts the path value from the closing line of a write_file
+// tool call. The line ends with "]]" and, when a path was provided, contains
+// " path:FILENAME" immediately before "]]". Returns empty string if no path.
+func extractWritePath(line string) string {
+	s := strings.TrimSuffix(line, "]]")
+	idx := strings.LastIndex(s, " path:")
+	if idx < 0 {
+		return ""
+	}
+	return s[idx+len(" path:"):]
 }
 
 func isTurnMarker(line string) bool {
