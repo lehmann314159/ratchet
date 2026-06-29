@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"ratchet/internal/ollama"
@@ -129,6 +130,17 @@ func toolRunCommand(ctx context.Context, command, projectFolder string) string {
 
 	cmd := exec.CommandContext(cmdCtx, "bash", "-c", command)
 	cmd.Dir = projectFolder
+	// Place bash in its own process group so that Cancel sends SIGKILL to the
+	// entire group, including any grandchildren (e.g. curl in a command
+	// substitution) that would otherwise outlive bash and hold the stdout/stderr
+	// pipe write-ends open, causing cmd.Wait to block indefinitely.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	// If any grandchild still holds a pipe open after the kill, WaitDelay forces
+	// the pipe-copy goroutines to stop and cmd.Wait to return after this window.
+	cmd.WaitDelay = 10 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

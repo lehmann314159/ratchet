@@ -34,14 +34,21 @@ function — that lock the API before any logic Bead runs. If the stubs carry th
 signature, ` + "`go build ./...`" + ` fails immediately, preventing signature drift across the project.
 
 Your layout Bead's full_text is natural-language prose describing what to create — with one
-exception: include the exact, fully instantiated assertion lines for every exported function.
-These are the only literal code lines in any full_text. Search the entire design document for
-function signatures; they may appear in any section, not only a dedicated API section. Write
-the literal assertion lines verbatim so the execute model copies them directly into
+exception: include the exact, fully instantiated assertion lines for every exported function
+and every package-level variable that subsequent Beads will reference by name. These are the
+only literal code lines in any full_text. Search the entire design document for function
+signatures and named package-level variables; they may appear in any section. Write the
+literal assertion lines verbatim so the execute model copies them directly into
 ` + "`api_check_test.go`" + ` without interpretation:
 
-  var _ func(n int) (int, error) = Fib       ← example: fill in actual types, not placeholders
+  var _ func(n int) (int, error) = Fib          ← exported function
   var _ func(s string) ([]byte, error) = Encode
+  var _ *template.Template = templates           ← package-level variable
+
+Package-level variable assertions lock the identifier name and type before any logic Bead
+runs, preventing the name from drifting across Beads (e.g. one Bead writing initTemplates
+while another calls ParseTemplates). Include an assertion for every package-level variable
+that is declared in one Bead's output_files and consumed by another's.
 
 If you cannot determine the exact parameter or return types for any exported function from the
 design doc, state that explicitly in the layout Bead's full_text rather than guessing. AUDIT
@@ -123,10 +130,12 @@ For every Bead you issue you must set:
   HTTP handler Beads require a runtime smoke test, not a build check. If a Bead's output_files
   include files that register HTTP routes (e.g. handlers.go, routes.go, server.go), ` + "`go build ./...`" + `
   is not a sufficient exit criterion — build success cannot catch template render errors, missing
-  FuncMap entries, or incorrect HTML structure. The exit criterion must: build the binary, start the
-  server in the background, wait briefly, make at least one HTTP request with curl or wget, verify a
-  structural property of the response (e.g. expected element count via grep -c), kill the server, and
-  exit non-zero on any failure. Chain all steps with ` + "`&&`" + ` and capture the PID for cleanup.
+  FuncMap entries, or incorrect HTML structure. The exit criterion must be a ` + "`go test`" + ` invocation
+  whose test function uses ` + "`net/http/httptest.NewServer`" + ` to start the handler on a randomly
+  assigned free port, makes HTTP requests against it, and asserts structural properties of the
+  responses (e.g. expected element count, status code, required HTML attributes). Do not use a
+  fixed port (e.g. :8080) in the exit criterion — the execution environment may already have a
+  process bound to that port, causing the check to silently verify the wrong server.
 
 Surface ambiguities in the design doc explicitly in the ambiguities field. Do not silently resolve them.
 
@@ -168,6 +177,9 @@ const auditDecompositionSystemPrompt = `You review a decomposition against its s
    server.go, or similarly named files) and its exit_criteria contain only a build check
    (` + "`go build ./...`" + ` or equivalent), flag it — build success cannot verify template rendering,
    FuncMap registration, or handler response structure; a runtime smoke test is required.
+   Also flag if the exit criterion starts a server on a fixed port (e.g. :8080) rather than
+   using ` + "`net/http/httptest.NewServer`" + ` — a fixed port may collide with the execution
+   environment and cause the criterion to silently verify the wrong server.
 
 4. Layout Bead (Bead 1): the first Bead must be a layout Bead — its purpose is to establish file
    structure and stub implementations only, with no logic. Flag if: (a) Bead 1 contains non-trivial

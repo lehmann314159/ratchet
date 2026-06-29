@@ -239,6 +239,12 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 	var toolCalls []ToolCall
 	dec := json.NewDecoder(resp.Body)
 	for {
+		// Check context before each decode so a cancelled budget timer unblocks
+		// the loop even if the underlying HTTP transport hasn't closed the
+		// connection yet (e.g. data already buffered in the kernel receive buffer).
+		if err := ctx.Err(); err != nil {
+			return Message{}, err
+		}
 		var chunk chatResponse
 		if err := dec.Decode(&chunk); err != nil {
 			if err == io.EOF {
