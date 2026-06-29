@@ -23,6 +23,10 @@ Process:
    by a previous attempt, clear them: overwrite with only the language's package or
    module declaration line (e.g. the package statement in Go, or an empty module in
    other languages).
+   When writing a file that already exists (especially test files like *_test.go), you
+   MUST include all existing content in your write. Read the file first, then write the
+   complete file with your additions appended. Never write a file that omits existing
+   functions, test cases, or other declarations that were present before you started.
 3. Implement exactly what the Bead specification asks for — nothing more, nothing less.
 4. Verify your work by running each item in the Exit Criteria. These are your done condition.
    Run ONLY the commands listed in the Exit Criteria — do not run broader checks.

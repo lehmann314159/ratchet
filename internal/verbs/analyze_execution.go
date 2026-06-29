@@ -126,12 +126,23 @@ func checkOutputFiles(beadFullTextJSON, folderPath string) string {
 	}
 	var sb strings.Builder
 	for _, rel := range spec.OutputFiles {
-		info, err := os.Stat(filepath.Join(folderPath, rel))
+		fullPath := filepath.Join(folderPath, rel)
+		info, err := os.Stat(fullPath)
 		if err != nil {
 			fmt.Fprintf(&sb, "%s: missing\n", rel)
-		} else {
-			fmt.Fprintf(&sb, "%s: present (%d bytes)\n", rel, info.Size())
+			continue
 		}
+		if strings.HasSuffix(rel, "_test.go") {
+			if content, rerr := os.ReadFile(fullPath); rerr == nil {
+				n := strings.Count(string(content), "\nfunc Test")
+				if n == 0 && strings.HasPrefix(string(content), "func Test") {
+					n = 1 // file starts with a test function (no leading newline)
+				}
+				fmt.Fprintf(&sb, "%s: present (%d bytes, %d test function(s))\n", rel, info.Size(), n)
+				continue
+			}
+		}
+		fmt.Fprintf(&sb, "%s: present (%d bytes)\n", rel, info.Size())
 	}
 	return strings.TrimRight(sb.String(), "\n")
 }
