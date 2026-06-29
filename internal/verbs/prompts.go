@@ -77,6 +77,36 @@ returns the original value"). When paired behaviors are present:
   writes only test files. Its sequential dependency on the paired Beads' output files is
   expected and will not be flagged by AUDIT as an independence violation.
 
+**Cross-bead contracts:** If the design document contains a ` + "`## Cross-Bead Contracts`" + ` section,
+read all entries before finalizing any Bead's spec or exit criteria. Each entry declares a
+type, a producer Bead title, a consumer Bead title, an interface description, and optional
+notes. Handle by contract type:
+
+- ` + "`data-shape`" + `: The interface flows one-way from producer to consumer (e.g. a struct a handler
+  passes to a template, or a record type one Bead writes and another reads). The consumer
+  Bead's full_text must quote the interface description verbatim — do not paraphrase. Any
+  notes in the entry (scoping rules, naming conventions, required helper registrations) must
+  appear verbatim in the consumer Bead's full_text. The consumer Bead's exit_criteria must
+  include a test that renders or instantiates the interface — a build-only exit criterion is
+  insufficient and will be flagged by AUDIT.
+
+- ` + "`format`" + `: The contract is a serialization format shared by a writer and a reader. Treat
+  the producer and consumer as a paired behavior (see above): add a dedicated round-trip
+  integration Bead immediately after both, whose exit criterion verifies that decoding an
+  encoded value recovers the original. Do not include round-trip assertions in the individual
+  Bead exit criteria.
+
+- ` + "`protocol`" + `: The contract is a request/response exchange (HTTP, RPC, message queue). Add a
+  dedicated integration Bead that sends a message through the producer side and asserts the
+  consumer handles it correctly. Exit criterion must be a runnable test, not a build check.
+
+- ` + "`schema`" + `: The contract is a validation schema (JSON Schema, protobuf, SQL DDL). The
+  producing Bead's exit_criteria must include tests against both a known-good document
+  (expects success) and a known-bad document (expects an error).
+
+If the design document has no ` + "`## Cross-Bead Contracts`" + ` section, apply only the
+paired-behaviors heuristics above.
+
 For every Bead you issue you must set:
 - monitor_override: "honor" (MONITOR_EXECUTION may terminate this Bead on loop detection) or "ignore" (loop detection signal is suppressed — use only when the Bead performs inherently repetitive I/O, such as scanning a large dataset, that is structurally indistinguishable from a stuck loop; normal test-fix-rerun cycles are not repetitive work and must use "honor")
 - output_files: a non-empty list of file paths this Bead will create or modify (e.g. ["main.go", "go.mod"]).
@@ -89,6 +119,14 @@ For every Bead you issue you must set:
   Vague statements ("review the code", "ensure correctness") are not acceptable. If you cannot write
   a runnable exit criterion for a Bead, that is a signal the Bead is scoped too narrowly to be
   independently verifiable — merge it with a related Bead that produces a testable artifact.
+
+  HTTP handler Beads require a runtime smoke test, not a build check. If a Bead's output_files
+  include files that register HTTP routes (e.g. handlers.go, routes.go, server.go), ` + "`go build ./...`" + `
+  is not a sufficient exit criterion — build success cannot catch template render errors, missing
+  FuncMap entries, or incorrect HTML structure. The exit criterion must: build the binary, start the
+  server in the background, wait briefly, make at least one HTTP request with curl or wget, verify a
+  structural property of the response (e.g. expected element count via grep -c), kill the server, and
+  exit non-zero on any failure. Chain all steps with ` + "`&&`" + ` and capture the PID for cleanup.
 
 Surface ambiguities in the design doc explicitly in the ambiguities field. Do not silently resolve them.
 
@@ -126,6 +164,10 @@ const auditDecompositionSystemPrompt = `You review a decomposition against its s
    entry that is vague ("review the code"), untestable ("ensure correctness"), or out of scope for
    what the Bead actually produces. A Bead with no runnable exit criterion is a structural problem:
    it likely cannot be executed independently and should be merged with a related Bead.
+   Additionally, if a Bead's output_files include HTTP handler files (handlers.go, routes.go,
+   server.go, or similarly named files) and its exit_criteria contain only a build check
+   (` + "`go build ./...`" + ` or equivalent), flag it — build success cannot verify template rendering,
+   FuncMap registration, or handler response structure; a runtime smoke test is required.
 
 4. Layout Bead (Bead 1): the first Bead must be a layout Bead — its purpose is to establish file
    structure and stub implementations only, with no logic. Flag if: (a) Bead 1 contains non-trivial
@@ -147,6 +189,21 @@ const auditDecompositionSystemPrompt = `You review a decomposition against its s
    output type, bounds checks). An integration Bead that lists paired Beads' output files in its
    own output_files is an expected sequential dependency — do not flag it as an independence
    violation. Use "N/A — structural" for design_doc_reference on paired-behavior findings.
+
+7. Cross-bead contracts: if the design document contains a ` + "`## Cross-Bead Contracts`" + ` section,
+   for each declared contract verify the following by contract type:
+   (a) ` + "`data-shape`" + `: the consumer Bead's full_text includes the interface description verbatim
+       (not paraphrased); the consumer Bead's exit_criteria contains a test that exercises the
+       interface — a bare build check is insufficient; any notes from the contract entry appear
+       in the consumer Bead's full_text.
+   (b) ` + "`format`" + `: an integration Bead exists with a round-trip exit criterion; neither the
+       producer nor the consumer Bead's exit_criteria include round-trip assertions.
+   (c) ` + "`protocol`" + `: an integration Bead exists that verifies the joint message exchange with a
+       runnable test.
+   (d) ` + "`schema`" + `: a Bead's exit_criteria include tests against both a valid and an invalid
+       document.
+   Flag any contract not covered appropriately. Use "N/A — structural" for design_doc_reference
+   on contract-coverage findings.
 
 You are an independent reviewer — you did not author this decomposition.
 A clean decomposition with no findings is a valid outcome. Do not fabricate findings on clean material.
@@ -264,6 +321,15 @@ Guidance on choosing between execute_as_is and execute_revised when bead_spec_fi
     execute_revised with more explicit step-by-step implementation guidance — even
     when the spec is technically correct, a more prescriptive spec can unblock an
     agent that cannot infer the right approach from a high-level description.
+
+Orientation-only timeout (fast path): if the mechanical findings show termination_cause=timeout,
+writes_ok=0 (no output files written), and the only commands run were read-only orientation
+probes (ls, find, pwd, cat on existing files, or equivalent), do not analyze trend or
+bead_spec_fit further — the agent did not begin the task. Issue execute_revised immediately
+with trend=same, bead_spec_fit=execution_capability_problem, execution_budget doubled, and
+prepend exactly one sentence to the existing full_text: "Begin writing to output_files
+immediately; do not re-run ls or other orientation commands before starting implementation."
+Make no other changes to the spec — the content is not the problem.
 
 Budget guidance for execute_revised:
   - execution_budget and monitor_override must be explicitly stated, not inherited silently.

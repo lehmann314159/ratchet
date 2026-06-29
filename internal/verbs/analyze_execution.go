@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,11 +30,11 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	// Load the most recent completed execution for this bead, plus the bead
 	// revision's full_text (for output_files) and the project folder path.
 	var execID int64
-	var tracePath, terminationCause, beadFullTextJSON, folderPath string
+	var tracePath, terminationCause, beadFullTextJSON, folderPath, designDocPath string
 	var monitorFired, monitorHonored *bool
 	if err := d.QueryRowContext(ctx, `
 		SELECT e.id, e.trace_path, e.termination_cause, e.monitor_fired, e.monitor_honored,
-		       br.full_text, p.folder_path
+		       br.full_text, p.folder_path, p.design_doc_path
 		FROM executions e
 		JOIN bead_revisions br ON br.id = e.bead_revision_id
 		JOIN projects p ON p.id = e.project_id
@@ -41,7 +42,7 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		ORDER BY e.ended_at DESC
 		LIMIT 1`, beadID,
 	).Scan(&execID, &tracePath, &terminationCause, &monitorFired, &monitorHonored,
-		&beadFullTextJSON, &folderPath); err != nil {
+		&beadFullTextJSON, &folderPath, &designDocPath); err != nil {
 		return "", fmt.Errorf("load execution for bead %d: %w", beadID, err)
 	}
 
@@ -79,6 +80,13 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		pt, terminationCause, monitorFired, monitorHonored,
 		beadSpec.ExitCriteria, outputFileStatus,
 	)
+
+	// Detect files the execute model wrote outside its declared output_files.
+	// This is structural fact, not interpretation — append directly to findings.
+	allBeads, _ := loadCurrentBeads(ctx, d, job.ProjectID)
+	if undeclared := checkUndeclaredFiles(folderPath, designDocPath, allBeads); undeclared != "" {
+		mechanicalFindings += "\n\n" + undeclared
+	}
 
 	model, err := loadVerbModel(ctx, d, job.ProjectID, db.VerbAnalyzeExecution)
 	if err != nil {
@@ -205,4 +213,71 @@ func nullableString(s string) any {
 		return nil
 	}
 	return s
+}
+
+// checkUndeclaredFiles walks the project folder and reports any file that is
+// present on disk but absent from every bead's output_files. These are files
+// the execute model created without declaring them — invisible to ADJUDICATE's
+// mechanical checks until surfaced here.
+//
+// Excluded from the scan: traces/ and .git/ directories; auto-generated files
+// (go.sum, go.work.sum); OS metadata (.DS_Store); the project design doc;
+// and compiled executables (no file extension, executable bit set).
+func checkUndeclaredFiles(folderPath, designDocPath string, allBeads []beadState) string {
+	expected := make(map[string]bool)
+	for _, b := range allBeads {
+		for _, f := range b.OutputFiles {
+			expected[filepath.ToSlash(filepath.Clean(f))] = true
+		}
+	}
+	if designDocPath != "" {
+		expected[filepath.ToSlash(filepath.Clean(designDocPath))] = true
+	}
+
+	skipDirs := map[string]bool{"traces": true, ".git": true}
+	skipFiles := map[string]bool{"go.sum": true, "go.work.sum": true, ".DS_Store": true}
+
+	var undeclared []string
+	_ = filepath.WalkDir(folderPath, func(path string, de os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, relErr := filepath.Rel(folderPath, path)
+		if relErr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+
+		if de.IsDir() {
+			top := strings.SplitN(rel, "/", 2)[0]
+			if skipDirs[top] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		base := filepath.Base(rel)
+		if skipFiles[base] {
+			return nil
+		}
+
+		// Skip compiled executables: no file extension and executable bit set.
+		if filepath.Ext(base) == "" {
+			if info, infoErr := de.Info(); infoErr == nil && info.Mode()&0o111 != 0 {
+				return nil
+			}
+		}
+
+		if !expected[rel] {
+			undeclared = append(undeclared, rel)
+		}
+		return nil
+	})
+
+	if len(undeclared) == 0 {
+		return ""
+	}
+	sort.Strings(undeclared)
+	return "undeclared files (present on disk but absent from all bead output_files): " +
+		strings.Join(undeclared, ", ")
 }
