@@ -129,14 +129,34 @@ func applyMechanicalBeadFixes(lang string, bead *ParsedBead) bool {
 
 // goFixBeadSpec fixes Go-specific structural violations in-place:
 //
+//   - If a bead owns api_check_test.go, strengthen any "go build ./..." exit
+//     criterion with a grep check that verifies package-level blank-identifier
+//     assertions. go build passes whether assertions are at file scope or inside
+//     a function body; grep -q '^var _' enforces the structural requirement.
 //   - If a bead has a "go test" exit criterion but no *_test.go in output_files,
 //     and the bead owns non-test .go files: add a derived *_test.go to output_files
 //     so the executor knows it must write tests (preserves goal visibility).
 //   - If the bead has no .go files at all (content-only bead, e.g. HTML templates):
 //     downgrade those criteria to "go build ./..." — the bead cannot own tests.
 func goFixBeadSpec(bead *ParsedBead) bool {
+	fixed := false
+
+	// Strengthen any "go build ./..." exit criterion when api_check_test.go is
+	// owned by this bead. go build cannot distinguish package-level blank-identifier
+	// assertions from identically-compiling assertions inside a function body.
+	if hasNamedFile(bead.OutputFiles, "api_check_test.go") {
+		apiPath := apiCheckTestFilePath(bead.OutputFiles)
+		grepSuffix := " && grep -q '^var _' " + apiPath
+		for i, c := range bead.ExitCriteria {
+			if strings.Contains(c, "go build") && !strings.Contains(c, "grep -q '^var _'") {
+				bead.ExitCriteria[i] = c + grepSuffix
+				fixed = true
+			}
+		}
+	}
+
 	if hasTestGoFile(bead.OutputFiles) {
-		return false // owns test file — no fix needed
+		return fixed // owns a test file — no further structural fix needed
 	}
 	hasGoTestCriterion := false
 	for _, c := range bead.ExitCriteria {
@@ -146,7 +166,7 @@ func goFixBeadSpec(bead *ParsedBead) bool {
 		}
 	}
 	if !hasGoTestCriterion {
-		return false
+		return fixed
 	}
 
 	var goFiles []string
@@ -169,6 +189,17 @@ func goFixBeadSpec(bead *ParsedBead) bool {
 	// Bead owns .go files: add the derived test file instead of downgrading.
 	bead.OutputFiles = append(bead.OutputFiles, deriveTestFileName(bead.ExitCriteria, goFiles))
 	return true
+}
+
+// apiCheckTestFilePath returns the path of api_check_test.go as listed in
+// output_files, preserving any subdirectory prefix, or the bare filename as fallback.
+func apiCheckTestFilePath(files []string) string {
+	for _, f := range files {
+		if filepath.Base(f) == "api_check_test.go" {
+			return f
+		}
+	}
+	return "api_check_test.go"
 }
 
 // deriveTestFileName picks the *_test.go filename to add when a bead has go

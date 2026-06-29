@@ -212,21 +212,42 @@ func (h *ReconcileDecomposition) applyFixes(ctx context.Context, tx *sql.Tx, pro
 	}
 	lang := detectLang(h.folderPath, allOutputFiles)
 
-	for _, r := range out.Responses {
+	// Deduplicate: multiple findings may all request updates to the same bead
+	// (e.g. three findings about missing test files each produce an updated_bead
+	// for "layout"). Preserve insertion order; last response per title wins.
+	order := []string{}
+	byTitle := map[string]*ReconcileResponse{}
+	for i := range out.Responses {
+		r := &out.Responses[i]
 		if r.Action != "agree_and_fix" || r.UpdatedBead == nil {
 			continue
 		}
+		title := r.UpdatedBead.Title
+		if _, seen := byTitle[title]; !seen {
+			order = append(order, title)
+		}
+		byTitle[title] = r
+	}
+
+	for _, title := range order {
+		r := byTitle[title]
+
 		var beadID int64
 		var currentRevNum int
+		// Use r.UpdatedBead.Title (not r.BeadTitle) to find the bead to update.
+		// r.BeadTitle names the bead cited in the finding; the model sometimes
+		// sets it to the problematic bead rather than the bead being fixed, which
+		// are not always the same (e.g. a finding about "game-state" whose fix
+		// is to update "layout").
 		if err := tx.QueryRowContext(ctx, `
 			SELECT b.id, br.revision_number
 			FROM beads b
 			JOIN bead_revisions br ON br.id = b.current_revision_id
 			WHERE b.project_id = ?
 			  AND json_extract(br.full_text, '$.title') = ?`,
-			projectID, r.BeadTitle,
+			projectID, title,
 		).Scan(&beadID, &currentRevNum); err != nil {
-			return fmt.Errorf("find bead %q for fix: %w", r.BeadTitle, err)
+			return fmt.Errorf("find bead %q for fix: %w", title, err)
 		}
 
 		applyMechanicalBeadFixes(lang, r.UpdatedBead)
@@ -241,13 +262,13 @@ func (h *ReconcileDecomposition) applyFixes(ctx context.Context, tx *sql.Tx, pro
 			h.budgetDefault, r.UpdatedBead.MonitorOverride,
 			db.VerbReconcileDecomposition, now)
 		if err != nil {
-			return fmt.Errorf("insert revision for bead %q: %w", r.BeadTitle, err)
+			return fmt.Errorf("insert revision for bead %q: %w", title, err)
 		}
 		revID, _ := res.LastInsertId()
 
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE beads SET current_revision_id = ? WHERE id = ?`, revID, beadID); err != nil {
-			return fmt.Errorf("update bead %q current_revision_id: %w", r.BeadTitle, err)
+			return fmt.Errorf("update bead %q current_revision_id: %w", title, err)
 		}
 	}
 	return nil
