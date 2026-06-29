@@ -109,6 +109,9 @@ Common uses:
 - Specify exact bead boundaries when multiple beads share a file (sequential dependency)
 - Designate which bead owns cross-function integration tests
 - Call out constraints on individual beads (e.g. "bead 8 must not embed HTML inline")
+- For integration beads, describe one specific, bounded scenario (fixed inputs, one asserted
+  output) rather than a coverage goal — a focused test that runs is more useful than an
+  exhaustive one that times out mid-generation
 
 ### Bead list
 

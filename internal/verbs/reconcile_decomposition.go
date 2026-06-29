@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"ratchet/internal/db"
-	"ratchet/internal/guidance"
 	"ratchet/internal/ollama"
 )
 
@@ -58,7 +57,7 @@ func (h *ReconcileDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.C
 	h.folderPath = project.FolderPath
 
 	return oc.Chat(ctx, model, []ollama.Message{
-		{Role: "system", Content: guidance.Inject(reconcileDecompositionSystemPrompt, project.FolderPath)},
+		{Role: "system", Content: reconcileDecompositionSystemPrompt},
 		{Role: "user", Content: buildReconcileUserMsg(doc, beads, history, critique)},
 	}, nil)
 }

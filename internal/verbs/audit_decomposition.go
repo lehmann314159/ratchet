@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"ratchet/internal/db"
-	"ratchet/internal/guidance"
 	"ratchet/internal/ollama"
 )
 
@@ -37,7 +36,7 @@ func (h *AuditDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.Clien
 	}
 	userMsg := buildAuditUserMsg(doc, beads)
 	raw, err := oc.Chat(ctx, model, []ollama.Message{
-		{Role: "system", Content: guidance.Inject(auditDecompositionSystemPrompt, project.FolderPath)},
+		{Role: "system", Content: auditDecompositionSystemPrompt},
 		{Role: "user", Content: userMsg},
 	}, nil)
 	if err != nil {

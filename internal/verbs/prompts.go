@@ -82,7 +82,10 @@ returns the original value"). When paired behaviors are present:
 - Add a dedicated integration Bead immediately after the paired Beads. Its sole purpose is
   verifying the joint correctness invariant (round-trip tests, inverse property checks). It
   writes only test files. Its sequential dependency on the paired Beads' output files is
-  expected and will not be flagged by AUDIT as an independence violation.
+  expected and will not be flagged by AUDIT as an independence violation. The exit criterion
+  should exercise one specific, bounded scenario (e.g. a single round-trip with fixed inputs
+  and one asserted output) rather than comprehensive coverage — a focused test that runs and
+  passes is more valuable than an exhaustive test that times out mid-generation.
 
 **Cross-bead contracts:** If the design document contains a ` + "`## Cross-Bead Contracts`" + ` section,
 read all entries before finalizing any Bead's spec or exit criteria. Each entry declares a
@@ -342,6 +345,16 @@ with trend=same, bead_spec_fit=execution_capability_problem, execution_budget do
 prepend exactly one sentence to the existing full_text: "Begin writing to output_files
 immediately; do not re-run ls or other orientation commands before starting implementation."
 Make no other changes to the spec — the content is not the problem.
+
+Missing write_file path (fast path): if the mechanical findings contain "[Fast path — missing
+write_file path]", the agent generated correct content but called write_file without a path
+argument and no file was written. Do not analyze trend or bead_spec_fit further. Issue
+execute_revised immediately with trend=same, bead_spec_fit=execution_capability_problem,
+the same execution_budget, and prepend exactly one sentence to the existing full_text:
+"Your previous attempt generated correct content but called write_file without a path
+argument — begin immediately by calling write_file with an explicit path= argument naming
+the output file; do not re-read files or regenerate content from scratch."
+Make no other changes to the spec.
 
 Budget guidance for execute_revised:
   - execution_budget and monitor_override must be explicitly stated, not inherited silently.

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"ratchet/internal/guidance"
 	"ratchet/internal/ollama"
 	"ratchet/internal/report"
+	"ratchet/internal/trace"
 )
 
 // consistencyKeywords maps each bead_spec_fit value to keyword sets.
@@ -118,6 +120,41 @@ func vacuousPassNote(bead *beadState, mechanicalFindings string) string {
 		"(file exists, content is correct for the bead's stated purpose)."
 }
 
+// missingPathNote detects the pattern where the latest execution ended with a
+// write_file call that omitted the path argument. The model generated correct
+// content but the file was never written. Returns a note to inject into
+// mechanical findings so ADJUDICATE can apply the fast path.
+func missingPathNote(ctx context.Context, d *db.DB, beadID int64) string {
+	var tracePath string
+	err := d.QueryRowContext(ctx, `
+		SELECT trace_path FROM executions
+		WHERE bead_id = ? ORDER BY id DESC LIMIT 1`, beadID).Scan(&tracePath)
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(tracePath)
+	if err != nil {
+		return ""
+	}
+	pt := trace.Parse(data)
+	if len(pt.WriteFiles) == 0 {
+		return ""
+	}
+	// Any successful write means the file landed — not this failure mode.
+	for _, wf := range pt.WriteFiles {
+		if wf.Succeeded {
+			return ""
+		}
+	}
+	// Last write_file had no path argument.
+	if pt.WriteFiles[len(pt.WriteFiles)-1].Path != "" {
+		return ""
+	}
+	return "[Fast path — missing write_file path] The previous attempt generated correct " +
+		"content but called write_file without a path argument. No file was written. " +
+		"The content itself is not the problem."
+}
+
 type AdjudicateNextExecution struct {
 	budgetDefault int    // cached from Run for use in Commit
 	folderPath    string // cached from Run for use in Commit
@@ -186,6 +223,9 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 
 	findings := analysis.MechanicalFindings
 	if note := vacuousPassNote(currentBead, findings); note != "" {
+		findings += "\n\n" + note
+	}
+	if note := missingPathNote(ctx, d, beadID); note != "" {
 		findings += "\n\n" + note
 	}
 	userMsg := buildAdjudicateUserMsg(currentBead, revLog, findings, compressedHistory, diffSignal)
