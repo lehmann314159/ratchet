@@ -93,6 +93,10 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		mechanicalFindings += "\n\n" + testErr
 	}
 
+	if pkgErr := checkPackageMain(folderPath, beadSpec.OutputFiles); pkgErr != "" {
+		mechanicalFindings += "\n\n" + pkgErr
+	}
+
 	model, err := loadVerbModel(ctx, d, job.ProjectID, db.VerbAnalyzeExecution)
 	if err != nil {
 		return "", err
@@ -285,6 +289,47 @@ func checkUndeclaredFiles(folderPath, designDocPath string, allBeads []beadState
 	sort.Strings(undeclared)
 	return "undeclared files (present on disk but absent from all bead output_files): " +
 		strings.Join(undeclared, ", ")
+}
+
+// checkPackageMain verifies that main.go (if in output_files) declares "package main".
+// A project whose files all use a non-main package name will compile as a static library —
+// go build ./... succeeds but go build -o binary . produces an ar archive, not an executable.
+// Returns a finding string if the violation is detected; empty string if OK or not applicable.
+func checkPackageMain(folderPath string, outputFiles []string) string {
+	hasmain := false
+	for _, f := range outputFiles {
+		if filepath.Base(f) == "main.go" {
+			hasmain = true
+			break
+		}
+	}
+	if !hasmain {
+		return ""
+	}
+	mainPath := filepath.Join(folderPath, "main.go")
+	content, err := os.ReadFile(mainPath)
+	if err != nil {
+		return "" // main.go not yet written; nothing to check
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.TrimSpace(line) == "package main" {
+			return ""
+		}
+	}
+	// Identify the actual package name for a more actionable message.
+	for _, line := range strings.Split(string(content), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "package ") {
+			pkg := strings.Fields(trimmed)[1]
+			return fmt.Sprintf(
+				"package main missing: main.go declares \"package %s\" instead of \"package main\". "+
+					"go build ./... will produce a static library (ar archive), not an executable. "+
+					"Every .go source file in this project must declare \"package main\".", pkg)
+		}
+	}
+	return "package main missing: main.go does not declare \"package main\". " +
+		"go build ./... will produce a static library (ar archive), not an executable. " +
+		"Every .go source file in this project must declare \"package main\"."
 }
 
 // checkGoTestCompilation runs "go test -run=^$ ./..." to compile all test files

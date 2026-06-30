@@ -338,13 +338,27 @@ Guidance on choosing between execute_as_is and execute_revised when bead_spec_fi
     agent that cannot infer the right approach from a high-level description.
 
 Orientation-only timeout (fast path): if the mechanical findings show termination_cause=timeout,
-writes_ok=0 (no output files written), and the only commands run were read-only orientation
-probes (ls, find, pwd, cat on existing files, or equivalent), do not analyze trend or
-bead_spec_fit further — the agent did not begin the task. Issue execute_revised immediately
-with trend=same, bead_spec_fit=execution_capability_problem, execution_budget doubled, and
-prepend exactly one sentence to the existing full_text: "Begin writing to output_files
-immediately; do not re-run ls or other orientation commands before starting implementation."
+writes_total=0 (no write_file calls were even attempted), and the only commands run were
+read-only orientation probes (ls, find, pwd, cat on existing files, or equivalent), do not
+analyze trend or bead_spec_fit further — the agent did not begin the task. Issue
+execute_revised immediately with trend=same, bead_spec_fit=execution_capability_problem,
+execution_budget doubled, and prepend exactly one sentence to the existing full_text:
+"Begin writing to output_files immediately; do not re-run ls or other orientation commands
+before starting implementation."
 Make no other changes to the spec — the content is not the problem.
+This fast path applies ONLY when writes_total=0. If the agent attempted writes
+(writes_total > 0, even if writes_ok=0), do not use this fast path — use the repair
+guidance below if a compile error is present.
+
+Compile error in previously-written file (repair guidance): when the mechanical findings
+include a compile error in a file that was written in a prior attempt (e.g.,
+"game_test.go:240: missing ','") and you are providing a verbatim fix in the revised
+full_text, do NOT prepend "Begin writing to output_files immediately." That instruction
+causes the agent to skip reading the file and regenerate it from memory, risking new
+corruption. Instead, prepend: "Before rewriting <filename>, call read_file on <filename>
+first to get the exact on-disk content, then write the complete file with only the
+targeted fix applied — do not regenerate any section from memory."
+Replace <filename> with the actual file name containing the compile error.
 
 Missing write_file path (fast path): if the mechanical findings contain "[Fast path — missing
 write_file path]", the agent generated correct content but called write_file without a path

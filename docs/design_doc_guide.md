@@ -161,15 +161,25 @@ Example — an HTTP handler that auto-plays an AI move after a human placement:
 - consumer: http-handlers
 - interface: RandomAIMove(g *Game) (Point, bool, error)
 - notes: handlePlace must call RandomAIMove after a successful PlaceStone and before
-  responding. If RandomAIMove returns pass=true, call g.Pass() instead. If the game
-  is already over (CheckWinner != Empty), skip the AI call. TestHandlerSmoke must
-  verify that after POST /place, the response contains both a human stone and an AI
-  stone.
+  responding. If RandomAIMove returns pass=true (AI has no legal moves), call g.Pass()
+  instead — omitting this leaves ConsecutivePasses stuck and the game never ends.
+  If the game is already over (CheckWinner != Empty), skip the AI call.
+  TestHandlerSmoke must verify two branches:
+  (1) Happy path: after POST /place, the AI places a stone (white score increases).
+  (2) AI-pass branch: set up a game state where White has no valid moves; call the
+  handler; verify ConsecutivePasses incremented (not just that no stone was placed).
 ```
 
 Without this contract, the handler bead spec says nothing about calling `RandomAIMove`,
 the smoke test doesn't verify it, and the function is implemented in isolation and never
 wired in. The app compiles and all tests pass; the feature is simply absent.
+
+**Protocol contract completeness:** A protocol contract is only complete if it specifies
+what to do for every return value of the called function — not just the success case.
+For any function that can return a "no action" result (pass, error, game over, empty
+result), the contract notes must state the handler-side obligation for that case, and
+the smoke test must exercise it. The AI-pass case (`passed=true`) is the canonical
+example: the handler must call `g.Pass()`, not just skip placing a stone.
 
 Protocol contracts are also relevant outside web apps: a CLI command that formats output
 using a library function, or a background worker that calls a queue consumer, both require
@@ -277,7 +287,16 @@ A web application has handlers, view models, and templates. The dominant contrac
 - [ ] Notes on every FuncMap helper required by templates
 - [ ] Notes on `$`-prefix scoping for any template that iterates and accesses root data
 - [ ] Every handler bead has an httptest smoke test exit criterion
+- [ ] HTMX swap target contains all dynamic state (score, turn, game-over message)
 - [ ] Integration bead tests one user flow end-to-end (not "all routes")
+
+**HTMX fragment scope:** For projects using HTMX fragment updates, all user-visible
+state that changes after a move — score, turn indicator, game-over message — must
+render inside the HTMX swap target. The fragment template must be self-contained.
+Never place dynamic state in elements outside the swap target. The failure mode is
+silent: the page loads correctly, but scores and turn indicators stop updating after
+the first move. Specify the swap target explicitly in the handler bead spec and require
+the smoke test to verify that the response fragment includes score and turn fields.
 
 **Common pitfall:** Protocol contracts omitted. The handler and the logic function are both
 implemented correctly in isolation; the wiring between them is never specified; the feature
@@ -315,5 +334,8 @@ displayed in a specific way, write the exact format in the protocol contract.
 | `$.X` vs `.X` inside `{{range}}` | Wrong value rendered; invisible to `go build` | Note "$-prefix required inside {{range}}" in data-shape contract |
 | Shared file not sequenced in Decomposition Notes | Later bead overwrites earlier bead's content | List every shared file and which bead writes first |
 | Behavioral wiring left implicit | Feature absent at runtime; all tests pass | Write a protocol contract for every cross-bead function call in a handler |
+| Protocol contract covers success only | "No action" branch (AI pass, game over) missing; state machine breaks silently | Contract notes must specify handler obligation for every return variant; smoke test must exercise each |
+| HTMX swap target too narrow | Score, turn, game-over outside swap target never update after moves | All dynamic state inside swap target; fragment template must be self-contained |
+| `package main` omitted from source files | `go build ./...` succeeds but produces ar archive (library), not executable | All `.go` files must declare `package main`; module name in `go.mod` does not determine package name |
 | `var _` assertions omitted | Layout bead invents its own assertions; signature drift across beads | Write assertions subsection; include package-level variables |
 | Per-bead constraints omitted | Handlers bead creates inline templates; templates bead becomes redundant | Add "must not embed HTML inline" to handler bead constraints |

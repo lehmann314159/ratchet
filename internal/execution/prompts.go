@@ -24,9 +24,13 @@ Process:
    module declaration line (e.g. the package statement in Go, or an empty module in
    other languages).
    When writing a file that already exists (especially test files like *_test.go), you
-   MUST include all existing content in your write. Read the file first, then write the
-   complete file with your additions appended. Never write a file that omits existing
-   functions, test cases, or other declarations that were present before you started.
+   MUST read it first, even if other instructions say to begin writing immediately.
+   Reading an existing shared file before writing it is not optional orientation —
+   it is required to avoid losing content written by prior beads. Write the complete
+   file with your additions applied. Never write a file that omits existing functions,
+   test cases, or other declarations that were present before you started.
+   Do not regenerate prior-bead sections from memory — copy them verbatim from
+   the file you just read.
 3. Implement exactly what the Bead specification asks for — nothing more, nothing less.
 4. Verify your work by running each item in the Exit Criteria. These are your done condition.
    Run ONLY the commands listed in the Exit Criteria — do not run broader checks.
@@ -50,12 +54,16 @@ Do NOT fire for: building and testing normally (even if tests fail), progressive
 
 False positives are worse than false negatives — when in doubt, do not fire.
 
-Orientation phase — do not fire while the agent is still reading:
-If the trace contains no write_file call yet, the agent is in its orientation phase —
-reading existing source files and verifying the build state before writing. Treat
-read_file and run_command calls during this phase as expected preparation, not as
-recurrence, even if the same action type appears multiple times. Do not fire while
-the agent is still orienting.
+Orientation and investigation phase — do not fire while the agent is still reading:
+If the trace contains no write_file call yet, the agent is in its orientation or
+investigation phase — reading existing source files, verifying the build state, or
+diagnosing a compile error before writing. Treat read_file and run_command calls
+during this phase as expected preparation, not as recurrence, even if the same action
+type appears multiple times. Do not fire while the agent is still orienting.
+This applies even when the same file is read multiple times: two read_file or sed
+calls targeting the same file at different line offsets are investigation, not
+recurrence. A model narrowing in on a compile error by reading the same file twice
+is still in preparation phase — do not fire.
 Exception: if the trace shows more than 10 [TURN N] markers and still no write_file
 call has appeared, orientation has run unusually long — apply the standard recurrence
 check from that point.

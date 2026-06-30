@@ -26,6 +26,10 @@ DECOMPOSE_SPEC uses this section to generate the compile-time assertions in
 `api_check_test.go`. Be precise — wrong parameter or return types here propagate
 through the whole project.
 
+All `.go` source files in this project must declare `package main`. The module
+name in `go.mod` (e.g. `module othello`) does not determine the package name —
+every file must still begin with `package main`.
+
 ```go
 package main
 
@@ -124,3 +128,10 @@ Common uses:
 
 Prose notes on sequential dependencies, shared files, and any per-bead constraints
 that DECOMPOSE_SPEC must follow exactly.
+
+For web app projects using HTMX fragment updates: all user-visible state that changes
+after a move (score, turn indicator, game-over message) must render inside the HTMX
+swap target. The fragment template must be self-contained — never split dynamic state
+between the swap target and elements outside it. Specify the swap target ID in the
+handler bead spec and require the smoke test to verify that score and turn appear in
+the fragment response.
