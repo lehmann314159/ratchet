@@ -50,6 +50,13 @@ runs, preventing the name from drifting across Beads (e.g. one Bead writing init
 while another calls ParseTemplates). Include an assertion for every package-level variable
 that is declared in one Bead's output_files and consumed by another's.
 
+Also include the complete Data Types block from the design document verbatim in the layout
+Bead's full_text — every type declaration, constant definition with its explicit value, and
+struct field list must appear exactly as written in the design doc. Do not paraphrase or
+infer type internals from function signatures alone. The execute model reads the bead spec,
+not the full design document, and cannot know that ` + "`White = -1`" + ` (not ` + "`iota`" + `) or that
+` + "`Point`" + ` has ` + "`Row, Col`" + ` fields (not ` + "`X, Y`" + `) unless you copy those lines into the spec.
+
 If you cannot determine the exact parameter or return types for any exported function from the
 design doc, state that explicitly in the layout Bead's full_text rather than guessing. AUDIT
 will flag ambiguous signatures as a finding so RECONCILE can surface the gap.
