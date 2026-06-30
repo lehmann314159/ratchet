@@ -74,7 +74,7 @@ func runStart(args []string) {
 	flags := flag.NewFlagSet("start", flag.ExitOnError)
 	dbPath := flags.String("db", "ratchet.db", "path to the SQLite database")
 	ollamaURL := flags.String("ollama", "http://192.168.50.241:11434", "Ollama base URL")
-	addr := flags.String("addr", "localhost:8080", "UI listen address")
+	addr := flags.String("addr", "localhost:7474", "UI listen address")
 	_ = flags.Parse(args)
 
 	database, err := db.Open(*dbPath)
@@ -104,7 +104,7 @@ func runStart(args []string) {
 func runUI(args []string) {
 	flags := flag.NewFlagSet("ui", flag.ExitOnError)
 	dbPath := flags.String("db", "ratchet.db", "path to the SQLite database")
-	addr := flags.String("addr", "localhost:8080", "address to listen on")
+	addr := flags.String("addr", "localhost:7474", "address to listen on")
 	_ = flags.Parse(args)
 
 	database, err := db.Open(*dbPath)

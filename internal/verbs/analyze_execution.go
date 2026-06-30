@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -86,6 +87,10 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	allBeads, _ := loadCurrentBeads(ctx, d, job.ProjectID)
 	if undeclared := checkUndeclaredFiles(folderPath, designDocPath, allBeads); undeclared != "" {
 		mechanicalFindings += "\n\n" + undeclared
+	}
+
+	if testErr := checkGoTestCompilation(ctx, folderPath); testErr != "" {
+		mechanicalFindings += "\n\n" + testErr
 	}
 
 	model, err := loadVerbModel(ctx, d, job.ProjectID, db.VerbAnalyzeExecution)
@@ -280,4 +285,24 @@ func checkUndeclaredFiles(folderPath, designDocPath string, allBeads []beadState
 	sort.Strings(undeclared)
 	return "undeclared files (present on disk but absent from all bead output_files): " +
 		strings.Join(undeclared, ", ")
+}
+
+// checkGoTestCompilation runs "go test -run=^$ ./..." to compile all test files
+// without executing any tests. go build ./... silently skips *_test.go files, so
+// syntax errors introduced into a shared test file by a prior bead are invisible
+// to the cleanup check and accumulate across attempts. This catches them immediately.
+// Returns the compiler output if compilation fails, empty string otherwise.
+func checkGoTestCompilation(ctx context.Context, folderPath string) string {
+	if _, err := os.Stat(filepath.Join(folderPath, "go.mod")); err != nil {
+		return ""
+	}
+	tctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(tctx, "go", "test", "-run=^$", "./...")
+	cmd.Dir = folderPath
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return ""
+	}
+	return "go test -run=^$ ./... (compile-only check) failed:\n" + strings.TrimSpace(string(out))
 }
