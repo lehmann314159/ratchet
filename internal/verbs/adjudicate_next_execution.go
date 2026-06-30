@@ -43,7 +43,7 @@ func checkConsistency(fit, reasoning string) (bool, string) {
 		// explicitly says the spec is NOT the problem.
 		contradict := []string{
 			"runner-capability", "runner capability",
-			"execution capability", "capability problem", "capability case",
+			"capability problem", "capability case",
 			"execution error", "implementation error",
 			// Spec-exonerating phrases (Exp-5 pattern: "despite the spec being unambiguous")
 			"spec being unambiguous", "spec is clear", "spec is correct",
@@ -340,9 +340,6 @@ func (h *AdjudicateNextExecution) Validate(raw string) (string, any) {
 	if out.Decision == "execute_revised" {
 		if out.RevisedBead == nil {
 			return "malformed: decision is execute_revised but revised_bead is absent", nil
-		}
-		if out.RevisedBead.ExecutionBudget <= 0 {
-			return "malformed: revised_bead execution_budget must be a positive integer", nil
 		}
 		if out.RevisedBead.MonitorOverride != "honor" && out.RevisedBead.MonitorOverride != "ignore" {
 			return fmt.Sprintf("malformed: revised_bead monitor_override must be \"honor\" or \"ignore\", got %q", out.RevisedBead.MonitorOverride), nil

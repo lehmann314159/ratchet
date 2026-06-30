@@ -332,10 +332,11 @@ func checkPackageMain(folderPath string, outputFiles []string) string {
 		"Every .go source file in this project must declare \"package main\"."
 }
 
-// checkGoTestCompilation runs "go test -run=^$ ./..." to compile all test files
-// without executing any tests. go build ./... silently skips *_test.go files, so
-// syntax errors introduced into a shared test file by a prior bead are invisible
-// to the cleanup check and accumulate across attempts. This catches them immediately.
+// checkGoTestCompilation runs "go test -c -o /dev/null ./..." to compile all test
+// files without executing any tests and without producing "no tests to run" output.
+// go build ./... silently skips *_test.go files, so syntax errors or missing imports
+// in test files are invisible to the exit criterion build check and accumulate across
+// attempts. This catches them immediately at analysis time.
 // Returns the compiler output if compilation fails, empty string otherwise.
 func checkGoTestCompilation(ctx context.Context, folderPath string) string {
 	if _, err := os.Stat(filepath.Join(folderPath, "go.mod")); err != nil {
@@ -343,11 +344,11 @@ func checkGoTestCompilation(ctx context.Context, folderPath string) string {
 	}
 	tctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(tctx, "go", "test", "-run=^$", "./...")
+	cmd := exec.CommandContext(tctx, "go", "test", "-c", "-o", "/dev/null", "./...")
 	cmd.Dir = folderPath
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		return ""
 	}
-	return "go test -run=^$ ./... (compile-only check) failed:\n" + strings.TrimSpace(string(out))
+	return "go test -c -o /dev/null ./... (compile-only check) failed:\n" + strings.TrimSpace(string(out))
 }

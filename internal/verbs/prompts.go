@@ -7,9 +7,11 @@ func decomposeSpecSystemPrompt() string {
 
 Your output is a decomposition plan, not an implementation. Each Bead's full_text is a
 natural-language specification that a separate execute model will read and implement. Do not
-write source code, file contents, or pseudocode in full_text fields. The sole exception is
-the api_check assertion lines described below, which must be literal Go declarations so the
-execute model copies them exactly.
+write source code, file contents, or pseudocode in full_text fields. There are exactly two
+exceptions, both in the layout Bead only: (1) the api_check assertion lines, which must be
+literal Go declarations so the execute model copies them exactly; and (2) the complete Data
+Types block from the design document, copied verbatim so the execute model has the exact
+field names, constant values, and struct layouts without having to infer them.
 
 **Decomposition Notes — authoritative override:** If the design document contains a
 ` + "`## Decomposition Notes`" + ` section, treat its bead structure guidance as authoritative.
@@ -33,29 +35,64 @@ The layout Bead must include a signature verification file in its output_files (
 function — that lock the API before any logic Bead runs. If the stubs carry the wrong
 signature, ` + "`go build ./...`" + ` fails immediately, preventing signature drift across the project.
 
-Your layout Bead's full_text is natural-language prose describing what to create — with one
-exception: include the exact, fully instantiated assertion lines for every exported function
-and every package-level variable that subsequent Beads will reference by name. These are the
-only literal code lines in any full_text. Search the entire design document for function
-signatures and named package-level variables; they may appear in any section. Write the
-literal assertion lines verbatim so the execute model copies them directly into
-` + "`api_check_test.go`" + ` without interpretation:
+The layout Bead's exit_criteria must be exactly:
+  ` + "`go test -c -o /dev/null ./... && grep -q '^var _' api_check_test.go`" + `
+` + "`go test -c -o /dev/null ./...`" + ` compiles all source files including test files
+(catching missing imports or type errors in api_check_test.go) and exits 0 on success
+with no output — it does not execute any tests and does not print "no tests to run".
+Do not use ` + "`go test ./...`" + ` (without ` + "`-c`" + `), which prints "no tests to run" and
+blocks adjudication.
 
-  var _ func(n int) (int, error) = Fib          ← exported function
+Your layout Bead's full_text must include the complete, ready-to-copy content of
+` + "`api_check_test.go`" + ` — not just the assertion lines, but the entire file: package
+declaration, all required imports, and every ` + "`var _`" + ` assertion. The execute model
+copies this block verbatim; it will not infer missing imports or add a package line.
+
+Search the entire design document for every exported function signature and every named
+package-level variable. For each one, write a ` + "`var _`" + ` assertion. Derive the required
+imports from the types used in the assertions (e.g. ` + "`*template.Template`" + ` requires
+` + "`\"html/template\"`" + `). Include only the imports actually needed.
+
+Example of the expected block in full_text:
+  api_check_test.go must contain exactly:
+  ` + "```" + `
+  package main
+
+  import "html/template"
+
+  var _ func(n int) (int, error) = Fib
   var _ func(s string) ([]byte, error) = Encode
-  var _ *template.Template = templates           ← package-level variable
+  var _ *template.Template = Templates
+  ` + "```" + `
 
 Package-level variable assertions lock the identifier name and type before any logic Bead
 runs, preventing the name from drifting across Beads (e.g. one Bead writing initTemplates
 while another calls ParseTemplates). Include an assertion for every package-level variable
 that is declared in one Bead's output_files and consumed by another's.
 
-Also include the complete Data Types block from the design document verbatim in the layout
-Bead's full_text — every type declaration, constant definition with its explicit value, and
-struct field list must appear exactly as written in the design doc. Do not paraphrase or
-infer type internals from function signatures alone. The execute model reads the bead spec,
-not the full design document, and cannot know that ` + "`White = -1`" + ` (not ` + "`iota`" + `) or that
-` + "`Point`" + ` has ` + "`Row, Col`" + ` fields (not ` + "`X, Y`" + `) unless you copy those lines into the spec.
+Also copy the complete Data Types block from the design document directly into the layout
+Bead's full_text right now, as you write this output. Do not instruct the execute model to
+look it up — EXECUTE will never see design_doc.md, only the bead spec you produce. Every
+type declaration, constant definition with its explicit value, and struct field list must
+appear as a literal block inside full_text, exactly as written in the design doc. Do not
+paraphrase or infer type internals from function signatures alone.
+
+Wrong (delegates to EXECUTE, does not work):
+  "Implement Color, Point, and Game types as defined in the design document."
+  "Include the Data Types block from the design document verbatim."
+
+Right (copies the types into the spec right now):
+  "Use exactly these type definitions, copied from the design doc:
+
+  type Color int
+  const (
+      Empty Color = 0
+      Black Color = 1
+      White Color = -1  // NOT iota
+  )
+  type Point struct { Row, Col int }  // NOT X, Y
+  type Game struct { Board [8][8]Color; Turn Color; ... }
+  "
 
 If you cannot determine the exact parameter or return types for any exported function from the
 design doc, state that explicitly in the layout Bead's full_text rather than guessing. AUDIT
@@ -379,6 +416,8 @@ Make no other changes to the spec.
 
 Budget guidance for execute_revised:
   - execution_budget and monitor_override must be explicitly stated, not inherited silently.
+  - For non-timeout failures, copy the "Actual execution budget" value from Input 1 unchanged
+    unless you have a specific reason to change it.
   - If the primary failure across recent attempts is timeout (termination_cause: timeout) with
     no new spec-related errors, the budget is the bottleneck — the spec is not the problem.
     Double the current execution_budget in the revised bead. Do not spend the revision on spec
