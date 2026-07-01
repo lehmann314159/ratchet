@@ -8,8 +8,9 @@ func decomposeSpecSystemPrompt() string {
 Your output is a decomposition plan, not an implementation. Each Bead's full_text is a
 natural-language specification that a separate execute model will read and implement. Do not
 write source code, file contents, or pseudocode in full_text fields. There are exactly two
-exceptions, both in the layout Bead only: (1) the api_check assertion lines, which must be
-literal Go declarations so the execute model copies them exactly; and (2) the complete Data
+exceptions, both in the layout Bead only: (1) the complete api_check_test.go file (package
+declaration, imports, and all var _ assertion lines), which must be literal Go so the execute
+model copies it exactly; and (2) the complete Data
 Types block from the design document, copied verbatim so the execute model has the exact
 field names, constant values, and struct layouts without having to infer them.
 
@@ -210,7 +211,18 @@ Respond with JSON only, no prose before or after:
 }`)
 }
 
-const auditDecompositionSystemPrompt = `You review a decomposition against its source design document, checking for the following:
+func auditDecompositionSystemPrompt(lang string) string {
+	goSection := ""
+	if lang == "go" {
+		goSection = "\n   Additionally, if a Bead's output_files include HTTP handler files (handlers.go, routes.go,\n" +
+			"   server.go, or similarly named files) and its exit_criteria contain only a build check\n" +
+			"   (`go build ./...` or equivalent), flag it — build success cannot verify template rendering,\n" +
+			"   FuncMap registration, or handler response structure; a runtime smoke test is required.\n" +
+			"   Also flag if the exit criterion starts a server on a fixed port (e.g. :8080) rather than\n" +
+			"   using `net/http/httptest.NewServer` — a fixed port may collide with the execution\n" +
+			"   environment and cause the criterion to silently verify the wrong server."
+	}
+	return `You review a decomposition against its source design document, checking for the following:
 
 1. Correctness drift: does each Bead accurately reflect the design document? For each finding,
    cite the specific Bead and the exact design-doc text it drifts from.
@@ -228,20 +240,13 @@ const auditDecompositionSystemPrompt = `You review a decomposition against its s
    runnable check — a shell command, a test invocation, or a specific measurable output. Flag any
    entry that is vague ("review the code"), untestable ("ensure correctness"), or out of scope for
    what the Bead actually produces. A Bead with no runnable exit criterion is a structural problem:
-   it likely cannot be executed independently and should be merged with a related Bead.
-   Additionally, if a Bead's output_files include HTTP handler files (handlers.go, routes.go,
-   server.go, or similarly named files) and its exit_criteria contain only a build check
-   (` + "`go build ./...`" + ` or equivalent), flag it — build success cannot verify template rendering,
-   FuncMap registration, or handler response structure; a runtime smoke test is required.
-   Also flag if the exit criterion starts a server on a fixed port (e.g. :8080) rather than
-   using ` + "`net/http/httptest.NewServer`" + ` — a fixed port may collide with the execution
-   environment and cause the criterion to silently verify the wrong server.
+   it likely cannot be executed independently and should be merged with a related Bead.` + goSection + `
 
 4. Layout Bead (Bead 1): the first Bead must be a layout Bead — its purpose is to establish file
    structure and stub implementations only, with no logic. Flag if: (a) Bead 1 contains non-trivial
    implementation logic rather than stubs; (b) any non-layout Bead creates new source files instead
-   of filling in stubs from Bead 1; (c) Bead 1's exit criteria do not include a build check (e.g.
-   ` + "`go build ./...`" + `). Use "N/A — structural" for design_doc_reference on layout findings.
+   of filling in stubs from Bead 1; (c) Bead 1's exit criteria do not include a build check.
+   Use "N/A — structural" for design_doc_reference on layout findings.
 
 5. Bead complexity: each non-layout Bead must implement a single logical concern and is expected to
    require no more than 200 lines of new or modified code. Flag any non-layout Bead that: (a) bundles
@@ -288,8 +293,18 @@ Respond with JSON only, no prose before or after:
   ],
   "overall_verdict": "no_issues" | "issues_found"
 }`
+}
 
-const reconcileDecompositionSystemPrompt = `You receive a specific critique of a decomposition you authored. For each finding, respond with one of:
+func reconcileDecompositionSystemPrompt(lang string) string {
+	goSection := ""
+	if lang == "go" {
+		goSection = "When the corrected Bead owns a *_test.go file, the updated full_text must explicitly name the\n" +
+			"test functions to write (e.g. \"Write TestFindFlips and TestValidMoves to game_test.go\"). An\n" +
+			"executor that writes the implementation without the test functions will see " +
+			"`go test -run TestFoo .`" +
+			"\nexit 0 with \"no tests to run\" and may not realize the test functions are still missing.\n\n"
+	}
+	return `You receive a specific critique of a decomposition you authored. For each finding, respond with one of:
 - agree_and_fix: the finding is correct; provide the corrected Bead in updated_bead
 - disagree: the finding is wrong; provide a specific, stated reason in the reason field
 
@@ -301,7 +316,7 @@ tool only accepts file paths), replace it with an equivalent check using a suppo
 do not simply drop it. Every behavior the original criterion tested must remain testable in the
 updated criteria.
 
-When previous debate rounds appear in the message, read them before responding — your
+` + goSection + `When previous debate rounds appear in the message, read them before responding — your
 answer must account for what was already argued. A second DISAGREE on a finding disputed
 in round 1 causes the full decomposition to escalate to human review; only disagree if
 you can state precisely why the finding is wrong.
@@ -317,6 +332,7 @@ Respond with JSON only, no prose before or after:
     }
   ]
 }`
+}
 
 const analyzeExecutionSystemPrompt = `You receive structured mechanical findings from a completed execution attempt.
 Provide your interpretation of what those findings suggest.
@@ -449,6 +465,9 @@ Specificity ratchet for RECURRING failures:
 Vacuous test pass: if the bead's exit_criteria include a test command and mechanical_findings
 report exit code 0 but no tests executed ("[no test files]" or "no tests to run"), do not
 declare_success — no verification occurred. Does not apply to build-only beads.
+When issuing execute_revised for a vacuous pass, the exit criterion itself needs a guard: update
+it to fail hard when the test function has not been written rather than silently exiting 0
+(e.g. ` + "`grep -q 'func TestFoo' foo_test.go && go test -run TestFoo .`" + `).
 
 Workspace repair: if the trace shows writes to files outside output_files, name those files
 explicitly in the revised spec with a cleanup instruction (overwrite with package declaration

@@ -57,7 +57,7 @@ func (h *ReconcileDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.C
 	h.folderPath = project.FolderPath
 
 	return oc.Chat(ctx, model, []ollama.Message{
-		{Role: "system", Content: reconcileDecompositionSystemPrompt},
+		{Role: "system", Content: reconcileDecompositionSystemPrompt(detectLang(project.FolderPath, beadOutputFiles(beads)))},
 		{Role: "user", Content: buildReconcileUserMsg(doc, beads, history, critique)},
 	}, nil)
 }
