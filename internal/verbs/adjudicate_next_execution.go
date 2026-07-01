@@ -120,6 +120,38 @@ func vacuousPassNote(bead *beadState, mechanicalFindings string) string {
 		"(file exists, content is correct for the bead's stated purpose)."
 }
 
+// orientationOnlyNote detects the pattern where the latest execution ended with
+// no write_file calls at all — the agent spent its entire budget on read-only
+// orientation commands and never began writing. Covers both timeout and
+// monitor_terminated termination causes (MONITOR fires after 10+ turns with no
+// write_file, producing the same orientation-only pattern as a timeout).
+// Returns a note to inject into mechanical findings so ADJUDICATE can apply the
+// orientation-only fast path without having to infer the pattern from field names
+// that do not appear in the mechanical findings output.
+func orientationOnlyNote(ctx context.Context, d *db.DB, beadID int64) string {
+	var tracePath, terminationCause string
+	err := d.QueryRowContext(ctx, `
+		SELECT trace_path, termination_cause FROM executions
+		WHERE bead_id = ? ORDER BY id DESC LIMIT 1`, beadID).Scan(&tracePath, &terminationCause)
+	if err != nil {
+		return ""
+	}
+	if terminationCause != "timeout" && terminationCause != "monitor_terminated" {
+		return ""
+	}
+	data, err := os.ReadFile(tracePath)
+	if err != nil {
+		return ""
+	}
+	pt := trace.Parse(data)
+	if len(pt.WriteFiles) > 0 {
+		return "" // agent made at least one write attempt — not orientation-only
+	}
+	return "[Fast path — orientation only] The previous attempt ran only read-only commands " +
+		"(ls, read_file, etc.) and made no write_file calls before terminating. The agent did " +
+		"not begin the task. The content of the bead spec is not the problem."
+}
+
 // missingPathNote detects the pattern where the latest execution ended with a
 // write_file call that omitted the path argument. The model generated correct
 // content but the file was never written. Returns a note to inject into
@@ -223,6 +255,9 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 
 	findings := analysis.MechanicalFindings
 	if note := vacuousPassNote(currentBead, findings); note != "" {
+		findings += "\n\n" + note
+	}
+	if note := orientationOnlyNote(ctx, d, beadID); note != "" {
 		findings += "\n\n" + note
 	}
 	if note := missingPathNote(ctx, d, beadID); note != "" {

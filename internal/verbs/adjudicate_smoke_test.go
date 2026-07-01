@@ -26,6 +26,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -189,13 +190,12 @@ func TestAdjudicateConsistencyCleanFixture(t *testing.T) {
 //
 // Requires Ollama at 192.168.50.241:11434 with gemma4:31b loaded.
 // Gemma's reasoning on complex material (B02 has interacting constraints)
-// can take 3–5 minutes — the default 10-minute test timeout is fine but
-// do not pass -timeout values below 5m.
+// can take 3–5 minutes — do not pass -timeout values below 5m.
 //
-// Run with: go test -v -run TestAdjudicateLiveModelDP3 ./internal/verbs/
+// Run with: RATCHET_LIVE_TESTS=1 go test -v -timeout 10m -run TestAdjudicateLiveModelDP3 ./internal/verbs/
 func TestAdjudicateLiveModelDP3(t *testing.T) {
-	if testing.Short() {
-		t.Skip("live model test: requires Ollama at 192.168.50.241:11434 with gemma4:31b")
+	if os.Getenv("RATCHET_LIVE_TESTS") == "" {
+		t.Skip("live model test: set RATCHET_LIVE_TESTS=1 and ensure gemma4:31b is loaded at 192.168.50.241:11434")
 	}
 
 	// Fast reachability check — skip rather than hang if the GX10 is offline.

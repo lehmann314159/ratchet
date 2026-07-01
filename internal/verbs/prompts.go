@@ -171,6 +171,8 @@ For every Bead you issue you must set:
 - exit_criteria: a non-empty list of concrete, runnable checks that define when this Bead is done.
   Each entry must be a bare shell command — no prose, no expected-outcome description, no "should",
   "must", "will", or explanatory clauses. Write ` + "`go test ./...`" + ` not ` + "`go test ./... should pass`" + `.
+  (The ` + "`go test ./...`" + ` form is correct for all non-layout Beads. The layout Bead uses a different
+  form — see the Layout Bead section above.)
   Vague statements ("review the code", "ensure correctness") are not acceptable. If you cannot write
   a runnable exit criterion for a Bead, that is a signal the Bead is scoped too narrowly to be
   independently verifiable — merge it with a related Bead that produces a testable artifact.
@@ -201,7 +203,7 @@ Respond with JSON only, no prose before or after:
   "beads": [
     {
       "title": "<short identifier, unique within this decomposition>",
-      "full_text": "<natural-language specification of what to implement — prose only, no source code except api_check assertion lines in the layout Bead>",
+      "full_text": "<natural-language specification — prose only; no source code except in the layout Bead: (1) complete api_check_test.go file and (2) complete Data Types block>",
       "monitor_override": "honor" | "ignore",
       "output_files": ["<file path>", ...],
       "exit_criteria": ["<runnable check>", ...]
@@ -406,18 +408,16 @@ Guidance on choosing between execute_as_is and execute_revised when bead_spec_fi
     when the spec is technically correct, a more prescriptive spec can unblock an
     agent that cannot infer the right approach from a high-level description.
 
-Orientation-only timeout (fast path): if the mechanical findings show termination_cause=timeout,
-writes_total=0 (no write_file calls were even attempted), and the only commands run were
-read-only orientation probes (ls, find, pwd, cat on existing files, or equivalent), do not
-analyze trend or bead_spec_fit further — the agent did not begin the task. Issue
-execute_revised immediately with trend=same, bead_spec_fit=execution_capability_problem,
-execution_budget doubled, and prepend exactly one sentence to the existing full_text:
+Orientation-only (fast path): if the mechanical findings contain "[Fast path — orientation only]",
+the agent ran only read-only commands and wrote no files — it did not begin the task. Do not
+analyze trend or bead_spec_fit further. Issue execute_revised immediately with trend=same,
+bead_spec_fit=execution_capability_problem, execution_budget doubled, and prepend exactly one
+sentence to the existing full_text:
 "Begin writing to output_files immediately; do not re-run ls or other orientation commands
 before starting implementation."
-Make no other changes to the spec — the content is not the problem.
-This fast path applies ONLY when writes_total=0. If the agent attempted writes
-(writes_total > 0, even if writes_ok=0), do not use this fast path — use the repair
-guidance below if a compile error is present.
+Make no other changes to the spec — the content is not the problem. If the agent made any
+write_file calls (even failed ones), this note will be absent — do not use this fast path;
+use the repair guidance below if a compile error is present.
 
 Compile error in previously-written file (repair guidance): when the mechanical findings
 include a compile error in a file that was written in a prior attempt (e.g.,
@@ -455,16 +455,24 @@ Pre-implementation commitment for persistent capability failures:
 
 Specificity ratchet for RECURRING failures:
   - The compressed history tags failure classes as NEW or RECURRING (N prior attempts).
-  - For any failure class marked RECURRING with 2 or more prior attempts, prose descriptions
-    in the revised spec are insufficient — the agent has already read prose descriptions and
-    failed. Escalate to verbatim code: include the exact function call, correct type, or a
-    minimal working skeleton directly in the revised full_text. Do not describe the correct
-    approach — write it out literally so the agent can copy it without interpretation.
+    Note: compression is passthrough for the first two attempts — the history contains raw
+    findings text with no NEW/RECURRING tags. For those early attempts, infer recurrence
+    yourself: if the same error, missing symbol, or test failure name appears in the raw
+    history across multiple attempts, treat it as RECURRING and apply the ratchet.
+  - For any failure class that is RECURRING (tagged or inferred) with 2 or more prior
+    attempts, prose descriptions in the revised spec are insufficient — the agent has
+    already read prose descriptions and failed. Escalate to verbatim code: include the
+    exact function call, correct type, or a minimal working skeleton directly in the
+    revised full_text. Do not describe the correct approach — write it out literally so
+    the agent can copy it without interpretation.
   - Apply this to every RECURRING failure class, not just the most recent one.
 
 Vacuous test pass: if the bead's exit_criteria include a test command and mechanical_findings
 report exit code 0 but no tests executed ("[no test files]" or "no tests to run"), do not
-declare_success — no verification occurred. Does not apply to build-only beads.
+declare_success — no verification occurred. Does not apply to build-only beads. Does not
+apply when a "[Structural note: Type B vacuous pass]" appears in the mechanical findings —
+that note means the test file is outside this bead's output_files scope; follow the note's
+guidance and evaluate the non-test output files instead.
 When issuing execute_revised for a vacuous pass, the exit criterion itself needs a guard: update
 it to fail hard when the test function has not been written rather than silently exiting 0
 (e.g. ` + "`grep -q 'func TestFoo' foo_test.go && go test -run TestFoo .`" + `).

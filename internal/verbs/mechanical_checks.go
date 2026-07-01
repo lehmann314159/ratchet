@@ -148,15 +148,30 @@ func applyMechanicalBeadFixes(lang string, bead *ParsedBead) bool {
 func goFixBeadSpec(bead *ParsedBead) bool {
 	fixed := false
 
-	// Strengthen any "go build ./..." exit criterion when api_check_test.go is
-	// owned by this bead. go build cannot distinguish package-level blank-identifier
-	// assertions from identically-compiling assertions inside a function body.
+	// When api_check_test.go is owned by this bead, ensure the exit criterion
+	// uses go test -c (not go build) and carries the grep guard for package-scope
+	// var_ assertions. go build cannot compile test files, so type errors in
+	// api_check_test.go are silently missed. go test -c compiles all *_test.go
+	// files and exits 0/1 without executing any tests.
 	if hasNamedFile(bead.OutputFiles, "api_check_test.go") {
 		apiPath := apiCheckTestFilePath(bead.OutputFiles)
 		grepSuffix := " && grep -q '^var _' " + apiPath
 		for i, c := range bead.ExitCriteria {
-			if strings.Contains(c, "go build") && !strings.Contains(c, "grep -q '^var _'") {
-				bead.ExitCriteria[i] = c + grepSuffix
+			result := c
+			// Upgrade any go build form to go test -c. Check longest-first to avoid
+			// partial matches (e.g. "go build ." matching inside "go build ./...").
+			for _, old := range []string{"go build ./...", "go build .", "go build"} {
+				if strings.Contains(result, old) {
+					result = strings.Replace(result, old, "go test -c -o /dev/null ./...", 1)
+					break
+				}
+			}
+			// Add grep guard for package-scope var_ assertion check.
+			if strings.Contains(result, "go test") && !strings.Contains(result, "grep -q '^var _'") {
+				result += grepSuffix
+			}
+			if result != c {
+				bead.ExitCriteria[i] = result
 				fixed = true
 			}
 		}
@@ -221,6 +236,12 @@ func goFixBeadSpec(bead *ParsedBead) bool {
 // true if a rewrite occurred.
 func fixFileBasedGoTest(criterion string) (string, bool) {
 	if !strings.Contains(criterion, "go test") {
+		return criterion, false
+	}
+	// The compile-only form (go test -c) is never file-based and may be part of
+	// a compound criterion whose subsequent stages contain .go file paths (e.g.
+	// grep arguments). Skip it entirely to avoid stripping those paths.
+	if strings.Contains(criterion, "go test -c") {
 		return criterion, false
 	}
 	parts := strings.Fields(criterion)

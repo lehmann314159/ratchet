@@ -121,7 +121,7 @@ Common uses:
 
 | # | Title | Output files | Exit criterion |
 |---|-------|-------------|----------------|
-| 1 | layout | foo.go, main.go, go.mod, api_check_test.go | `go build ./...` |
+| 1 | layout | foo.go, main.go, go.mod, api_check_test.go | `go test -c -o /dev/null ./... && grep -q '^var _' api_check_test.go` |
 | 2 | ... | ... | ... |
 
 ### Bead boundaries and rules

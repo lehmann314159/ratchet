@@ -95,7 +95,7 @@ func TestGoFixBeadSpec(t *testing.T) {
 		}
 	})
 
-	t.Run("layout bead with api_check_test.go — grep suffix added to go build", func(t *testing.T) {
+	t.Run("layout bead with api_check_test.go — go build upgraded to go test -c and grep guard added", func(t *testing.T) {
 		b := &ParsedBead{
 			OutputFiles:  []string{"game.go", "ai.go", "main.go", "api_check_test.go"},
 			ExitCriteria: []string{"go build ./..."},
@@ -104,22 +104,40 @@ func TestGoFixBeadSpec(t *testing.T) {
 		if !fixed {
 			t.Fatal("expected fix to be applied")
 		}
-		want := "go build ./... && grep -q '^var _' api_check_test.go"
+		want := "go test -c -o /dev/null ./... && grep -q '^var _' api_check_test.go"
 		if b.ExitCriteria[0] != want {
 			t.Errorf("criterion = %q, want %q", b.ExitCriteria[0], want)
 		}
 	})
 
-	t.Run("layout bead with api_check_test.go — no double-add if grep already present", func(t *testing.T) {
+	t.Run("layout bead with api_check_test.go — go build+grep upgraded, no double grep", func(t *testing.T) {
+		// Transition case: a criterion that already had the grep guard from a prior
+		// fix pass but still uses go build. Should upgrade go build without adding
+		// a second grep guard.
 		b := &ParsedBead{
 			OutputFiles:  []string{"game.go", "api_check_test.go"},
 			ExitCriteria: []string{"go build ./... && grep -q '^var _' api_check_test.go"},
 		}
 		fixed := goFixBeadSpec(b)
-		if fixed {
-			t.Fatal("expected no fix when grep already present")
+		if !fixed {
+			t.Fatal("expected go build to be upgraded even when grep guard already present")
 		}
-		want := "go build ./... && grep -q '^var _' api_check_test.go"
+		want := "go test -c -o /dev/null ./... && grep -q '^var _' api_check_test.go"
+		if b.ExitCriteria[0] != want {
+			t.Errorf("criterion = %q, want %q", b.ExitCriteria[0], want)
+		}
+	})
+
+	t.Run("layout bead with api_check_test.go — already correct form, idempotent", func(t *testing.T) {
+		b := &ParsedBead{
+			OutputFiles:  []string{"game.go", "api_check_test.go"},
+			ExitCriteria: []string{"go test -c -o /dev/null ./... && grep -q '^var _' api_check_test.go"},
+		}
+		fixed := goFixBeadSpec(b)
+		if fixed {
+			t.Fatal("expected no fix when criterion is already in correct form")
+		}
+		want := "go test -c -o /dev/null ./... && grep -q '^var _' api_check_test.go"
 		if b.ExitCriteria[0] != want {
 			t.Errorf("criterion should be unchanged, got %q", b.ExitCriteria[0])
 		}
