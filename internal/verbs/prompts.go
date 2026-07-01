@@ -184,6 +184,15 @@ For every Bead you issue you must set:
   fixed port (e.g. :8080) in the exit criterion — the execution environment may already have a
   process bound to that port, causing the check to silently verify the wrong server.
 
+  Go testing conventions: always use the package invocation form — ` + "`go test -run TestFoo .`" + `
+  or ` + "`go test ./...`" + ` — never the file-based form ` + "`go test ./game_test.go -run TestFoo`" + `.
+  File-based invocations compile that file in isolation as command-line-arguments and cannot see
+  symbols from any other file in the package, producing undefined errors for every package-level
+  name. When a Bead writes to a *_test.go file, the full_text must explicitly name the test
+  functions to write (e.g. "Write TestFindFlips and TestValidMoves to game_test.go"). An executor
+  that writes the implementation without the test functions will see ` + "`go test -run TestFoo .`" + `
+  exit 0 with "no tests to run" and may not realize the test functions are still missing.
+
 Surface ambiguities in the design doc explicitly in the ambiguities field. Do not silently resolve them.
 
 Respond with JSON only, no prose before or after:

@@ -69,17 +69,18 @@ func TestGoFixBeadSpec(t *testing.T) {
 		}
 	})
 
-	t.Run("with test file already present — no fix", func(t *testing.T) {
+	t.Run("with test file present — adds grep guard for -run TestFoo", func(t *testing.T) {
 		b := &ParsedBead{
 			OutputFiles:  []string{"game.go", "game_test.go"},
 			ExitCriteria: []string{"go test -v . -run=TestFoo"},
 		}
 		fixed := goFixBeadSpec(b)
-		if fixed {
-			t.Fatal("expected no fix when test file is present")
+		if !fixed {
+			t.Fatal("expected grep guard to be added")
 		}
-		if b.ExitCriteria[0] != "go test -v . -run=TestFoo" {
-			t.Errorf("criterion should be unchanged, got %q", b.ExitCriteria[0])
+		want := "grep -q 'func TestFoo' game_test.go && go test -v . -run=TestFoo"
+		if b.ExitCriteria[0] != want {
+			t.Errorf("criterion = %q, want %q", b.ExitCriteria[0], want)
 		}
 	})
 
