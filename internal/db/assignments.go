@@ -65,6 +65,7 @@ func SeedVerbModelAssignments(ctx context.Context, tx *sql.Tx, projectID int64) 
 		VerbAnalyzeExecution:        "gemma4:31b",
 		VerbCompressAnalysis:        "gemma4:31b",
 		VerbAdjudicateNextExecution: "gemma4:31b",
+		VerbRevisePending:           "gemma4:31b",
 	}
 
 	// Validate constraints before writing anything.
@@ -104,6 +105,11 @@ func SeedVerbModelAssignmentsFromFleet(ctx context.Context, tx *sql.Tx, projectI
 	if _, ok := enriched[VerbCertifyManifest]; !ok {
 		if m, ok := enriched[VerbAuditDecomposition]; ok {
 			enriched[VerbCertifyManifest] = m
+		}
+	}
+	if _, ok := enriched[VerbRevisePending]; !ok {
+		if m, ok := enriched[VerbAuditDecomposition]; ok {
+			enriched[VerbRevisePending] = m
 		}
 	}
 	for _, v := range AllVerbs {

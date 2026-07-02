@@ -105,6 +105,21 @@ type CompressAnalysisOutput struct {
 	CompressedText string `json:"compressed_text"`
 }
 
+// --- REVISE_PENDING ---
+
+// RevisePendingRevision is one entry in the REVISE_PENDING output: a decision
+// for a single pending bead. action is "update_spec" or "no_change".
+type RevisePendingRevision struct {
+	BeadTitle       string `json:"bead_title"`
+	Action          string `json:"action"`
+	UpdatedFullText string `json:"updated_full_text,omitempty"`
+}
+
+// RevisePendingOutput is the structured output of REVISE_PENDING.
+type RevisePendingOutput struct {
+	Revisions []RevisePendingRevision `json:"revisions"`
+}
+
 // --- ADJUDICATE_NEXT_EXECUTION ---
 
 type AdjudicateNextExecutionOutput struct {

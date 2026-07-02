@@ -84,15 +84,15 @@ func TestCreateHappyPath(t *testing.T) {
 		t.Errorf("design_doc_path = %q, want %q", docPath, designDoc)
 	}
 
-	// Model fleet seeded: all 10 verbs (AllVerbs excludes VERIFY_MANIFEST which is model-free).
+	// Model fleet seeded: all verbs in AllVerbs (VERIFY_MANIFEST excluded — model-free).
 	var assignmentCount int
 	if err := d.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM verb_model_assignments WHERE project_id = ?`, projectID,
 	).Scan(&assignmentCount); err != nil {
 		t.Fatalf("count assignments: %v", err)
 	}
-	if assignmentCount != 10 {
-		t.Errorf("verb_model_assignments = %d, want 10", assignmentCount)
+	if assignmentCount != len(db.AllVerbs) {
+		t.Errorf("verb_model_assignments = %d, want %d", assignmentCount, len(db.AllVerbs))
 	}
 
 	// DECOMPOSE_SPEC and RECONCILE_DECOMPOSITION share a model.

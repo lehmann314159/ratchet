@@ -558,20 +558,31 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 			return fmt.Errorf("mark bead succeeded: %w", err)
 		}
 		report.WriteBead(ctx, tx, h.folderPath, beadID, "succeeded")
-		advanced, err := h.advanceToNextBead(ctx, tx, job.ProjectID, beadID, now)
-		if err != nil {
-			return err
+
+		var pendingCount int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM beads WHERE project_id = ? AND status = 'pending'`,
+			job.ProjectID,
+		).Scan(&pendingCount); err != nil {
+			return fmt.Errorf("count pending beads: %w", err)
 		}
-		if !advanced {
-			// Last bead — project is complete.
-			if _, err = tx.ExecContext(ctx,
+
+		if pendingCount == 0 {
+			if _, err := tx.ExecContext(ctx,
 				`UPDATE projects SET status = 'complete', updated_at = ? WHERE id = ?`,
 				now, job.ProjectID); err != nil {
 				return err
 			}
 			report.WriteProject(ctx, tx, job.ProjectID, h.folderPath)
+			return nil
 		}
-		return nil
+
+		// Fire REVISE_PENDING to update remaining specs before dispatching next bead.
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
+			VALUES (?, ?, ?, 'pending', ?, ?)`,
+			job.ProjectID, db.VerbRevisePending, beadID, now, now)
+		return err
 	}
 	return nil
 }
@@ -627,29 +638,6 @@ func queryCascadeBeadIDs(ctx context.Context, tx *sql.Tx, projectID, afterBeadID
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
-}
-
-// advanceToNextBead enqueues an EXECUTE_BEAD job for the next pending bead
-// after currentBeadID. Returns true if a next bead was found and enqueued,
-// false if currentBeadID was the last bead (caller should then close the project).
-func (h *AdjudicateNextExecution) advanceToNextBead(ctx context.Context, tx *sql.Tx, projectID, currentBeadID int64, now string) (bool, error) {
-	var nextBeadID int64
-	err := tx.QueryRowContext(ctx, `
-		SELECT id FROM beads
-		WHERE project_id = ? AND id > ? AND status = 'pending'
-		ORDER BY id LIMIT 1`, projectID, currentBeadID,
-	).Scan(&nextBeadID)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("find next bead: %w", err)
-	}
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
-		VALUES (?, ?, ?, 'pending', ?, ?)`,
-		projectID, db.VerbExecuteBead, nextBeadID, now, now)
-	return true, err
 }
 
 // checkProjectTerminal checks whether all beads in the project have reached a

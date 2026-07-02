@@ -18,6 +18,7 @@ const (
 	VerbAnalyzeExecution           = "ANALYZE_EXECUTION"
 	VerbCompressAnalysis           = "COMPRESS_ANALYSIS"
 	VerbAdjudicateNextExecution    = "ADJUDICATE_NEXT_EXECUTION"
+	VerbRevisePending              = "REVISE_PENDING"
 )
 
 // AllVerbs lists every model-assigned verb in FSM order.
@@ -33,6 +34,7 @@ var AllVerbs = []string{
 	VerbAnalyzeExecution,
 	VerbCompressAnalysis,
 	VerbAdjudicateNextExecution,
+	VerbRevisePending,
 }
 
 // Project represents a row in the projects table.

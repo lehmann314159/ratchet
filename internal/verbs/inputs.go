@@ -314,6 +314,86 @@ func latestCertifyFeedback(ctx context.Context, d *db.DB, projectID int64) (stri
 	return feedback, nil
 }
 
+// loadVerbModelOrFallback returns the model assigned to verb for projectID,
+// falling back to fallbackVerb if verb has no assignment. Used for verbs added
+// after a project was created; the table migration seeds the assignment, but
+// this fallback guards against any gap.
+func loadVerbModelOrFallback(ctx context.Context, d *db.DB, projectID int64, verb, fallbackVerb string) (string, error) {
+	model, err := loadVerbModel(ctx, d, projectID, verb)
+	if err == nil {
+		return model, nil
+	}
+	return loadVerbModel(ctx, d, projectID, fallbackVerb)
+}
+
+// loadBeadByID returns a single bead's current state by bead ID.
+func loadBeadByID(ctx context.Context, d *db.DB, beadID int64) (*beadState, error) {
+	var s beadState
+	if err := d.QueryRowContext(ctx, `
+		SELECT b.id, br.full_text, br.execution_budget, br.monitor_override, br.revision_number
+		FROM beads b
+		JOIN bead_revisions br ON br.id = b.current_revision_id
+		WHERE b.id = ?`, beadID,
+	).Scan(&s.BeadID, &s.FullText, &s.ExecutionBudget, &s.MonitorOverride, &s.RevisionNumber); err != nil {
+		return nil, fmt.Errorf("load bead %d: %w", beadID, err)
+	}
+	var tmp struct {
+		Title        string   `json:"title"`
+		OutputFiles  []string `json:"output_files"`
+		ExitCriteria []string `json:"exit_criteria"`
+	}
+	if json.Unmarshal([]byte(s.FullText), &tmp) == nil {
+		if tmp.Title != "" {
+			s.Title = tmp.Title
+		}
+		s.OutputFiles = tmp.OutputFiles
+		s.ExitCriteria = tmp.ExitCriteria
+	}
+	if s.Title == "" {
+		s.Title = fmt.Sprintf("bead-%d", beadID)
+	}
+	return &s, nil
+}
+
+// loadPendingBeads returns all pending beads for projectID with their current revision.
+func loadPendingBeads(ctx context.Context, d *db.DB, projectID int64) ([]beadState, error) {
+	rows, err := d.QueryContext(ctx, `
+		SELECT b.id, br.full_text, br.execution_budget, br.monitor_override, br.revision_number
+		FROM beads b
+		JOIN bead_revisions br ON br.id = b.current_revision_id
+		WHERE b.project_id = ? AND b.status = 'pending'
+		ORDER BY b.id`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("load pending beads: %w", err)
+	}
+	defer rows.Close()
+
+	var out []beadState
+	for rows.Next() {
+		var s beadState
+		if err := rows.Scan(&s.BeadID, &s.FullText, &s.ExecutionBudget, &s.MonitorOverride, &s.RevisionNumber); err != nil {
+			return nil, err
+		}
+		var tmp struct {
+			Title        string   `json:"title"`
+			OutputFiles  []string `json:"output_files"`
+			ExitCriteria []string `json:"exit_criteria"`
+		}
+		if json.Unmarshal([]byte(s.FullText), &tmp) == nil {
+			if tmp.Title != "" {
+				s.Title = tmp.Title
+			}
+			s.OutputFiles = tmp.OutputFiles
+			s.ExitCriteria = tmp.ExitCriteria
+		}
+		if s.Title == "" {
+			s.Title = fmt.Sprintf("bead-%d", s.BeadID)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // loadBeadRevisionLog returns the full revision log for beadID.
 func loadBeadRevisionLog(ctx context.Context, d *db.DB, beadID int64) ([]revisionEntry, error) {
 	rows, err := d.QueryContext(ctx, `

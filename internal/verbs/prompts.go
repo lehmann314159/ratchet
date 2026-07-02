@@ -307,6 +307,41 @@ Respond with JSON only, no prose before or after:
 }`
 }
 
+const revisePendingSystemPrompt = `You update pending bead specifications after a bead has succeeded, based on the current state of files on disk.
+
+**Your role:** read the current project file content and identify where pending specs describe work that is already done or where preservation instructions need to be made concrete. Produce one revision decision per pending bead.
+
+**Inputs you receive:**
+1. Completed bead: title and output files
+2. Current project files: verbatim content of every source file on disk
+3. Pending bead specs: title, output_files, exit_criteria, prose
+
+**For each pending bead, determine:**
+
+- "update_spec": the spec needs revision because one or more of these conditions hold:
+  - The spec describes implementing X, but X is already on disk (a prior bead wrote ahead of scope) — redirect the executor to what remains and name the existing implementations explicitly
+  - The spec shares a file with a completed bead but gives only abstract preservation instructions ("preserve existing code") — replace with a concrete list of what is present (function names, types, struct fields), so the executor does not overwrite them
+  - The spec says "implement Y" without knowing that a stub or partial implementation already exists — update to say "Y already has a stub at [file] — fill in the body, do not redeclare"
+
+- "no_change": the spec is accurate as written; nothing on disk conflicts with it or renders it incomplete
+
+**What you may change:** the prose text only (the full_text field describing what the executor should do)
+
+**What you may NOT change:** output_files, exit_criteria, execution_budget, monitor_override, or the bead title
+
+When issuing "update_spec", write the complete updated prose — not a diff or a description of changes. The updated_full_text replaces the existing spec prose in full. Carry forward all original instructions that remain accurate.
+
+Respond with JSON only, no prose before or after:
+{
+  "revisions": [
+    {
+      "bead_title": "<exact title from the pending spec>",
+      "action": "update_spec" | "no_change",
+      "updated_full_text": "<complete updated prose — only present when action is update_spec>"
+    }
+  ]
+}`
+
 const analyzeExecutionSystemPrompt = `You receive structured mechanical findings from a completed execution attempt.
 Provide your interpretation of what those findings suggest.
 
@@ -379,16 +414,18 @@ Guidance on choosing between execute_as_is and execute_revised when bead_spec_fi
     when the spec is technically correct, a more prescriptive spec can unblock an
     agent that cannot infer the right approach from a high-level description.
 
-Orientation-only (fast path): if the mechanical findings contain "[Fast path — orientation only]",
-the agent ran only read-only commands and wrote no files — it did not begin the task. Do not
-analyze trend or bead_spec_fit further. Issue execute_revised immediately with trend=same,
-bead_spec_fit=execution_capability_problem, execution_budget doubled, and prepend exactly one
-sentence to the existing full_text:
+Orientation-only (fast path): ONLY apply this fast path when the mechanical findings contain
+the exact text "[Fast path — orientation only]". Do NOT infer this condition from the trace
+content or the number of orientation commands observed — if that text is absent, do not use
+this fast path even if the trace appears to show only ls or go build calls.
+
+When the text IS present: the agent ran only read-only commands and wrote no files — it did
+not begin the task. Do not analyze trend or bead_spec_fit further. Issue execute_revised
+immediately with trend=same, bead_spec_fit=execution_capability_problem, execution_budget
+doubled, and prepend exactly one sentence to the existing full_text:
 "Begin writing to output_files immediately; do not re-run ls or other orientation commands
 before starting implementation."
-Make no other changes to the spec — the content is not the problem. If the agent made any
-write_file calls (even failed ones), this note will be absent — do not use this fast path;
-use the repair guidance below if a compile error is present.
+Make no other changes to the spec — the content is not the problem.
 
 Compile error in previously-written file (repair guidance): when the mechanical findings
 include a compile error in a file that was written in a prior attempt (e.g.,

@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS bead_revisions (
   full_text        TEXT    NOT NULL,
   execution_budget INTEGER NOT NULL,
   monitor_override TEXT    NOT NULL CHECK (monitor_override IN ('honor', 'ignore')),
-  created_by_verb  TEXT    NOT NULL CHECK (created_by_verb IN ('DECOMPOSE_SPEC', 'RECONCILE_DECOMPOSITION', 'ADJUDICATE_NEXT_EXECUTION')),
+  created_by_verb  TEXT    NOT NULL CHECK (created_by_verb IN ('DECOMPOSE_SPEC', 'RECONCILE_DECOMPOSITION', 'ADJUDICATE_NEXT_EXECUTION', 'REVISE_PENDING')),
   created_at       TIMESTAMP NOT NULL
 );
 
@@ -109,6 +109,18 @@ CREATE TABLE IF NOT EXISTS adjudications (
   monitor_escalation_status INTEGER NOT NULL,  -- BOOLEAN: 0/1
   decision                  TEXT    NOT NULL CHECK (decision IN ('execute_as_is', 'execute_revised', 'full_stop', 'declare_success')),
   created_at                TIMESTAMP NOT NULL
+);
+
+-- Audit log for REVISE_PENDING: one row per (trigger_bead, pending_bead) pair per run.
+-- new_revision_id is NULL when action was no_change (no bead_revisions row was written).
+CREATE TABLE IF NOT EXISTS spec_revisions (
+  id              INTEGER PRIMARY KEY,
+  project_id      INTEGER NOT NULL REFERENCES projects(id),
+  trigger_bead_id INTEGER NOT NULL REFERENCES beads(id),
+  revised_bead_id INTEGER NOT NULL REFERENCES beads(id),
+  old_revision_id INTEGER NOT NULL REFERENCES bead_revisions(id),
+  new_revision_id INTEGER REFERENCES bead_revisions(id),
+  created_at      TIMESTAMP NOT NULL
 );
 
 -- AUDIT_DECOMPOSITION and RECONCILE_DECOMPOSITION share the round-cap counter

@@ -55,6 +55,10 @@ func Open(path string) (*DB, error) {
 		_ = raw.Close()
 		return nil, fmt.Errorf("apply migrations: %w", err)
 	}
+	if err := db.applyTableMigrations(); err != nil {
+		_ = raw.Close()
+		return nil, fmt.Errorf("apply table migrations: %w", err)
+	}
 	return db, nil
 }
 
@@ -100,6 +104,83 @@ func (db *DB) applyMigrations() error {
 				return fmt.Errorf("migrate %s.%s: %w", m.table, m.column, err)
 			}
 		}
+	}
+	return nil
+}
+
+// applyTableMigrations applies structural migrations that columnMigrations cannot
+// handle (e.g. CHECK constraint changes, new data seeding). Safe to call on both
+// new and existing databases.
+func (db *DB) applyTableMigrations() error {
+	if err := db.migrateBeadRevisionVerbs(); err != nil {
+		return err
+	}
+	if err := db.seedRevisePendingAssignments(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// migrateBeadRevisionVerbs updates bead_revisions' created_by_verb CHECK constraint
+// to include 'REVISE_PENDING'. SQLite does not support ALTER TABLE … ALTER COLUMN,
+// so we reconstruct the table with FK enforcement temporarily disabled.
+func (db *DB) migrateBeadRevisionVerbs() error {
+	var createSQL string
+	if err := db.QueryRow(
+		`SELECT COALESCE(sql, '') FROM sqlite_master WHERE type='table' AND name='bead_revisions'`,
+	).Scan(&createSQL); err != nil {
+		return fmt.Errorf("query bead_revisions schema: %w", err)
+	}
+	if strings.Contains(createSQL, "REVISE_PENDING") {
+		return nil
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		return fmt.Errorf("disable foreign_keys: %w", err)
+	}
+	stmts := []string{
+		`ALTER TABLE bead_revisions RENAME TO _bead_revisions_old`,
+		`CREATE TABLE bead_revisions (
+		  id               INTEGER PRIMARY KEY,
+		  project_id       INTEGER NOT NULL REFERENCES projects(id),
+		  bead_id          INTEGER NOT NULL REFERENCES beads(id),
+		  revision_number  INTEGER NOT NULL,
+		  full_text        TEXT    NOT NULL,
+		  execution_budget INTEGER NOT NULL,
+		  monitor_override TEXT    NOT NULL CHECK (monitor_override IN ('honor', 'ignore')),
+		  created_by_verb  TEXT    NOT NULL CHECK (created_by_verb IN ('DECOMPOSE_SPEC', 'RECONCILE_DECOMPOSITION', 'ADJUDICATE_NEXT_EXECUTION', 'REVISE_PENDING')),
+		  created_at       TIMESTAMP NOT NULL
+		)`,
+		`INSERT INTO bead_revisions SELECT * FROM _bead_revisions_old`,
+		`DROP TABLE _bead_revisions_old`,
+		`CREATE INDEX IF NOT EXISTS idx_bead_revisions_bead ON bead_revisions (bead_id, revision_number)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			_, _ = db.Exec(`PRAGMA foreign_keys = ON`)
+			return fmt.Errorf("migrate bead_revisions (%s): %w", truncate(stmt, 40), err)
+		}
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		return fmt.Errorf("re-enable foreign_keys: %w", err)
+	}
+	return nil
+}
+
+// seedRevisePendingAssignments inserts a REVISE_PENDING verb_model_assignments row
+// for any active project that has an AUDIT assignment but no REVISE_PENDING assignment.
+// This backfills projects created before REVISE_PENDING was added.
+func (db *DB) seedRevisePendingAssignments() error {
+	_, err := db.Exec(`
+		INSERT INTO verb_model_assignments (project_id, verb, model)
+		SELECT audit.project_id, 'REVISE_PENDING', audit.model
+		FROM verb_model_assignments audit
+		WHERE audit.verb = 'AUDIT_DECOMPOSITION'
+		  AND NOT EXISTS (
+		    SELECT 1 FROM verb_model_assignments rp
+		    WHERE rp.project_id = audit.project_id AND rp.verb = 'REVISE_PENDING'
+		  )`)
+	if err != nil {
+		return fmt.Errorf("seed REVISE_PENDING assignments: %w", err)
 	}
 	return nil
 }
