@@ -84,15 +84,15 @@ func TestCreateHappyPath(t *testing.T) {
 		t.Errorf("design_doc_path = %q, want %q", docPath, designDoc)
 	}
 
-	// Model fleet seeded: all 8 verbs.
+	// Model fleet seeded: all 10 verbs (AllVerbs excludes VERIFY_MANIFEST which is model-free).
 	var assignmentCount int
 	if err := d.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM verb_model_assignments WHERE project_id = ?`, projectID,
 	).Scan(&assignmentCount); err != nil {
 		t.Fatalf("count assignments: %v", err)
 	}
-	if assignmentCount != 8 {
-		t.Errorf("verb_model_assignments = %d, want 8", assignmentCount)
+	if assignmentCount != 10 {
+		t.Errorf("verb_model_assignments = %d, want 10", assignmentCount)
 	}
 
 	// DECOMPOSE_SPEC and RECONCILE_DECOMPOSITION share a model.
@@ -110,15 +110,15 @@ func TestCreateHappyPath(t *testing.T) {
 		t.Errorf("AUDIT model %q == DECOMPOSE model %q (must differ)", auditModel, decomposeModel)
 	}
 
-	// DECOMPOSE_SPEC job enqueued with status=pending.
+	// SURVEY_SPEC job enqueued with status=pending.
 	var verb, jobStatus string
 	if err := d.QueryRowContext(ctx,
 		`SELECT verb, status FROM handoff_jobs WHERE project_id = ?`, projectID,
 	).Scan(&verb, &jobStatus); err != nil {
 		t.Fatalf("read handoff_job: %v", err)
 	}
-	if verb != db.VerbDecomposeSpec {
-		t.Errorf("job verb = %q, want DECOMPOSE_SPEC", verb)
+	if verb != db.VerbSurveySpec {
+		t.Errorf("job verb = %q, want SURVEY_SPEC", verb)
 	}
 	if jobStatus != "pending" {
 		t.Errorf("job status = %q, want pending", jobStatus)

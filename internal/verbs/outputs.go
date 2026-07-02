@@ -1,5 +1,48 @@
 package verbs
 
+// --- SURVEY_SPEC ---
+
+// SurveyManifestFile is one file entry in the SURVEY_SPEC manifest.
+// Declarations holds raw Go declaration text (types, consts, vars, function
+// signatures with stub bodies) — no package statement and no import block.
+// The scaffolding step in VERIFY generates those mechanically.
+type SurveyManifestFile struct {
+	Path         string `json:"path"`
+	Declarations string `json:"declarations"`
+}
+
+// SurveySpecOutput is the structured output of SURVEY_SPEC.
+type SurveySpecOutput struct {
+	Module  string               `json:"module"`
+	Package string               `json:"package"`
+	Files   []SurveyManifestFile `json:"files"`
+}
+
+// --- VERIFY_MANIFEST ---
+
+// VerifyManifestOutput is the structured output of VERIFY_MANIFEST.
+// The five boolean fields mirror the verify_attempts table columns.
+type VerifyManifestOutput struct {
+	FilePresencePass       bool     `json:"file_presence_pass"`
+	NoBehavioralTestsPass  bool     `json:"no_behavioral_tests_pass"`
+	CompilePass            bool     `json:"compile_pass"`
+	APICheckPass           bool     `json:"api_check_pass"`
+	StubPurityPass         bool     `json:"stub_purity_pass"`
+	Violations             []string `json:"violations,omitempty"`
+	VerifierInterpretation string   `json:"verifier_interpretation,omitempty"`
+}
+
+// --- CERTIFY_MANIFEST ---
+
+// CertifyManifestOutput is the full output of CERTIFY_MANIFEST, combining
+// the mechanical preliminary decision with the model's final decision.
+type CertifyManifestOutput struct {
+	PreliminaryDecision string `json:"preliminary_decision"` // "approve" | "reject"
+	ModelReasoning      string `json:"model_reasoning,omitempty"`
+	FinalDecision       string `json:"final_decision"` // "approve" | "reject"
+	Feedback            string `json:"feedback,omitempty"`
+}
+
 // ParsedBead is a Bead as produced by DECOMPOSE_SPEC or the revise branch of
 // ADJUDICATE_NEXT_EXECUTION. Both verbs share this type because the required
 // fields (execution_budget, monitor_override) are identical in both contexts.

@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -35,10 +37,27 @@ func (h *DecomposeSpec) Run(ctx context.Context, d *db.DB, oc *ollama.Client, jo
 	}
 	h.budgetDefault = project.ExecutionBudgetDefault
 	h.folderPath = project.FolderPath
+
+	surveyDocPath := filepath.Join(project.FolderPath, "survey.md")
+	surveyDoc, err := os.ReadFile(surveyDocPath)
+	if err != nil {
+		return "", fmt.Errorf("read survey.md at %s: %w", surveyDocPath, err)
+	}
+
+	userMsg := buildDecomposeUserMsg(doc, string(surveyDoc))
 	return oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: guidance.Inject(decomposeSpecSystemPrompt(), project.FolderPath)},
-		{Role: "user", Content: doc},
+		{Role: "user", Content: userMsg},
 	}, nil)
+}
+
+func buildDecomposeUserMsg(designDoc, surveyDoc string) string {
+	var sb strings.Builder
+	sb.WriteString("## Survey Document\n\n")
+	sb.WriteString(surveyDoc)
+	sb.WriteString("\n\n## Design Document\n\n")
+	sb.WriteString(designDoc)
+	return sb.String()
 }
 
 func (h *DecomposeSpec) Validate(raw string) (string, any) {

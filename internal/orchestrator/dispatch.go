@@ -26,9 +26,6 @@ func dispatch(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[str
 	// EXECUTE_BEAD runs two subprocesses concurrently and manages its own
 	// lifecycle; it does not go through the one-shot Run/Validate/Commit path.
 	if job.Verb == db.VerbExecuteBead {
-		if err := markJobRunning(ctx, d, job.ID); err != nil {
-			return fmt.Errorf("mark running: %w", err)
-		}
 		if err := execution.RunExecutionWindow(ctx, d, oc.BaseURL, job); err != nil {
 			slog.Error("execution window failed",
 				"job_id", job.ID, "bead_id", job.BeadID, "error", err)
@@ -49,28 +46,27 @@ func dispatch(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[str
 		return nil
 	}
 
-	if err := markJobRunning(ctx, d, job.ID); err != nil {
-		return fmt.Errorf("mark running: %w", err)
-	}
-
 	// Warm up the model before the real Chat() call. A trivial "hello" request
 	// forces the model into VRAM so a cold swap costs at most 1 minute here
 	// instead of silently burning the full 30-minute job timeout.
-	var model string
-	if err := d.QueryRowContext(ctx,
-		`SELECT model FROM verb_model_assignments WHERE project_id = ? AND verb = ?`,
-		job.ProjectID, job.Verb,
-	).Scan(&model); err != nil {
-		slog.Error("warmup: model lookup failed, will retry", "verb", job.Verb, "job_id", job.ID, "error", err)
-		_, _ = d.ExecContext(ctx, `UPDATE handoff_jobs SET status = 'pending' WHERE id = ?`, job.ID)
-		return err
+	// Model-free verbs (VERIFY_MANIFEST) skip this step entirely.
+	if !verbSkipsModelWarmup(job.Verb) {
+		var model string
+		if err := d.QueryRowContext(ctx,
+			`SELECT model FROM verb_model_assignments WHERE project_id = ? AND verb = ?`,
+			job.ProjectID, job.Verb,
+		).Scan(&model); err != nil {
+			slog.Error("warmup: model lookup failed, will retry", "verb", job.Verb, "job_id", job.ID, "error", err)
+			_, _ = d.ExecContext(ctx, `UPDATE handoff_jobs SET status = 'pending' WHERE id = ?`, job.ID)
+			return err
+		}
+		if err := oc.Warmup(ctx, model); err != nil {
+			slog.Error("ollama warmup failed, will retry", "verb", job.Verb, "job_id", job.ID, "model", model, "error", err)
+			_, _ = d.ExecContext(ctx, `UPDATE handoff_jobs SET status = 'pending' WHERE id = ?`, job.ID)
+			return err
+		}
+		slog.Info("ollama warmup ok", "verb", job.Verb, "job_id", job.ID, "model", model)
 	}
-	if err := oc.Warmup(ctx, model); err != nil {
-		slog.Error("ollama warmup failed, will retry", "verb", job.Verb, "job_id", job.ID, "model", model, "error", err)
-		_, _ = d.ExecContext(ctx, `UPDATE handoff_jobs SET status = 'pending' WHERE id = ?`, job.ID)
-		return err
-	}
-	slog.Info("ollama warmup ok", "verb", job.Verb, "job_id", job.ID, "model", model)
 
 	// Run: infrastructure error → return without counting as a strike.
 	startedAt := time.Now().UTC()
@@ -147,6 +143,12 @@ func dispatch(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[str
 			"validation", validationResult, "next_status", nextStatus)
 	}
 	return nil
+}
+
+// verbSkipsModelWarmup returns true for verbs that are model-free and must not
+// have their model assignment looked up (VERIFY_MANIFEST has none).
+func verbSkipsModelWarmup(verb string) bool {
+	return verb == db.VerbVerifyManifest
 }
 
 // withTx executes fn within a new transaction, rolling back on error.

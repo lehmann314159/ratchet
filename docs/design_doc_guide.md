@@ -8,19 +8,29 @@ and where projects have gone wrong in the past.
 
 ## How the pipeline uses your design doc
 
-`DECOMPOSE_SPEC` reads the entire document and produces a bead list. It uses:
+The design doc passes through three pipeline stages, each of which reads it differently:
 
-- **Data Types and Function Signatures** to generate the `var _` assertions in the layout
-  bead's `api_check_test.go`
+**SURVEY_SPEC** reads the design doc to make structural decisions: which source files to
+create, what types and function signatures to declare, and how to name things. SURVEY
+outputs declaration text (types, stubs, signatures) — no package statements, no imports,
+no build files. A separate scaffolding step generates complete `.go` files, `go.mod`, and
+`api_check_test.go` mechanically from those declarations. Your design doc's Data Types and
+Behavioral Specification sections are SURVEY's primary input.
+
+**DECOMPOSE_SPEC** reads the design doc plus the `survey.md` document that SURVEY produced.
+It uses:
+- **Behavioral Specification** to understand what each function does and identify natural
+  decomposition boundaries
 - **Cross-Bead Contracts** to populate consumer bead specs with verbatim interface text and
   to set exit criteria (smoke tests, round-trip tests, integration tests)
 - **Decomposition Notes** as an authoritative override — anything written here supersedes
   the generic decomposition heuristics
 
-`AUDIT_DECOMPOSITION` cross-checks the resulting bead list against the design doc. It flags
-contract violations, missing test files, and handler beads with build-only exit criteria.
+**AUDIT_DECOMPOSITION** cross-checks the resulting bead list against the design doc. It
+flags contract violations, missing test files, and handler beads with build-only exit
+criteria.
 
-`RECONCILE_DECOMPOSITION` applies AUDIT's findings to produce a corrected bead list.
+**RECONCILE_DECOMPOSITION** applies AUDIT's findings to produce a corrected bead list.
 
 The quality of your design doc is the single largest factor in how many attempts each bead
 takes. A complete, precise doc produces a decomposition that AUDIT passes in one round with
@@ -53,44 +63,52 @@ load-bearing sentences.
 
 ## Architecture
 
-**What to write:** Directory layout with one-line descriptions of each file's responsibility.
+**What to write (optional):** A directory listing showing which file owns which concern.
 
-**Be explicit about file ownership.** The architecture section drives `output_files`
-assignments during decomposition. If `game.go` is listed as "core game logic," every bead
-that modifies game logic will list `game.go` in its `output_files`. If a file's purpose is
-ambiguous, two beads may fight over it.
+The Architecture section is informational context for DECOMPOSE — it helps the model
+understand the intended file organization. SURVEY makes the actual file decisions based on
+the design doc and its own structural judgment; DECOMPOSE reads the `survey.md` that SURVEY
+produces for the authoritative file list.
 
-**Note shared files.** If more than one bead writes to the same file (e.g., a `game.go`
-that accumulates functions across three beads), note the dependency explicitly here or in
-Decomposition Notes. The pipeline does not automatically sequence writes to shared files.
+If you omit this section, SURVEY will still produce a reasonable file layout. Include it
+when you have a strong opinion about file organization or when the project has a non-obvious
+structure (e.g., multiple packages, a cmd/ subdirectory).
 
-**Keep it high-level.** List files and concerns; don't explain implementation. The model
-will infer implementation from the signatures section.
+Note that `go.mod` and `api_check_test.go` are always generated automatically by the
+scaffolding step — do not list them as SURVEY outputs or include them in the manifest.
 
 ---
 
 ## Data Types and Function Signatures
 
-**What to write:** Complete Go signatures for every exported type, constant, and function.
-Followed by a subsection with the verbatim `var _` assertion lines.
+**What to write:** Complete signatures for every exported type, constant, and function.
+Followed by an "Export signatures" subsection with verbatim `var _` assertion lines.
 
-**This is the highest-precision section.** DECOMPOSE uses these signatures to generate the
-`api_check_test.go` compile-time assertions in the layout bead. Wrong parameter types or
-return types here propagate to every bead that touches those functions — the model will
-implement to the wrong signature and accumulate build failures.
+**This is SURVEY's primary precision input.** SURVEY reads these signatures to declare types
+and stubs correctly. Wrong parameter types or return types here propagate to every bead that
+touches those functions — the model will implement to the wrong signature and accumulate
+build failures.
 
 **Include every cross-bead symbol.** If a function or type is used by more than one bead,
 it must appear here. "Obvious" types are not exempt — write `type Color int` and its
 constants even if they seem self-evident.
 
 **Include package-level variables.** If a bead exports a package-level variable that other
-beads consume (e.g., `var Templates *template.Template`), include a `var _ Type = varName`
-assertion. This prevents name drift across beads.
+beads consume (e.g., `var Templates *template.Template`), include it. This prevents name
+drift across beads.
 
-**Write the assertions subsection.** After the signatures, copy the `var _` lines into a
-dedicated subsection labeled "Compile-time assertions for api_check_test.go." DECOMPOSE
-includes these verbatim in the layout bead's `full_text`. If you skip this step, the model
-may invent its own assertion format.
+**Omit `package` and `import` declarations.** SURVEY outputs declaration text only; the
+scaffolder adds the package statement and computes imports automatically. Including
+`package main` at the top of a code block may cause SURVEY to copy it verbatim into its
+declarations output, which will then appear twice in the generated file.
+
+**Write the Export signatures subsection.** After the signatures, write the `var _`
+assertion lines in a dedicated subsection. These give SURVEY a concise, unambiguous
+specification of exact return types, especially in cases where the prose might be
+ambiguous (e.g., `Score() (int, int)` vs `Score() (black, white int)`). The scaffolder
+generates `api_check_test.go` from the exported symbols SURVEY declares, so these
+assertions also serve as a correctness check: if SURVEY declares the wrong signature, the
+generated `api_check_test.go` will carry a wrong assertion and the compile check will fail.
 
 ```go
 // Signatures
@@ -98,11 +116,52 @@ func NewGame() *Game
 func (g *Game) PlaceStone(p Point) error
 var Templates *template.Template
 
-// Assertions subsection
+// Export signatures subsection
 var _ func() *Game = NewGame
 var _ func(*Game, Point) error = (*Game).PlaceStone
 var _ *template.Template = Templates
 ```
+
+---
+
+## Behavioral Specification
+
+**What to write:** One or two sentences per function explaining what it does — the
+behavioral contract, not the implementation.
+
+This section bridges the gap between type signatures (which SURVEY reads) and cross-bead
+contracts (which describe inter-bead dependencies). It captures domain logic that isn't
+visible from the signature alone:
+
+- `FindFlips` is pure read — it computes without modifying state
+- `PlaceStone` composes `FindFlips` and applies its result
+- `CheckWinner` depends on `ConsecutivePasses`, not just stone counts
+- `Pass` increments `ConsecutivePasses` and switches `Turn`
+
+**Why this matters for DECOMPOSE.** DECOMPOSE reads behavioral descriptions to identify
+natural decomposition boundaries. Functions that share a dependency or build on each other
+(e.g., `FindFlips` → `ValidMoves` and `PlaceStone`) are candidates for separate beads
+with an integration bead to verify the composition. If behavioral descriptions are absent,
+DECOMPOSE may collapse related functions into a single oversized bead.
+
+**Signal natural seams explicitly.** If a group of functions forms a dependency chain or
+represents a distinct independently-testable concern, say so:
+
+> "The game functions form a dependency chain: `FindFlips` is foundational to both
+> `ValidMoves` and `PlaceStone`. Each functional group — board initialization, flip
+> computation, move application, and game-state evaluation — is independently testable
+> and should be treated as a separate unit of work."
+
+This is a statement about the domain structure, not a decomposition plan. DECOMPOSE
+translates it into bead boundaries using its own judgment.
+
+**Also use this section to resolve implementation ambiguities.** If the design doc leaves
+something that SURVEY or DECOMPOSE would have to guess — template storage (inline strings
+vs external files), JSON field names, error return conventions — state it here as a WHAT,
+not a HOW:
+
+> "Templates are defined as Go string literals inside `InitTemplates()` — no external
+> `.html` files."
 
 ---
 
@@ -161,13 +220,9 @@ Example — an HTTP handler that auto-plays an AI move after a human placement:
 - consumer: http-handlers
 - interface: RandomAIMove(g *Game) (Point, bool, error)
 - notes: handlePlace must call RandomAIMove after a successful PlaceStone and before
-  responding. If RandomAIMove returns pass=true (AI has no legal moves), call g.Pass()
+  responding. If RandomAIMove returns passed=true (AI has no legal moves), call g.Pass()
   instead — omitting this leaves ConsecutivePasses stuck and the game never ends.
   If the game is already over (CheckWinner != Empty), skip the AI call.
-  TestHandlerSmoke must verify two branches:
-  (1) Happy path: after POST /place, the AI places a stone (white score increases).
-  (2) AI-pass branch: set up a game state where White has no valid moves; call the
-  handler; verify ConsecutivePasses incremented (not just that no stone was placed).
 ```
 
 Without this contract, the handler bead spec says nothing about calling `RandomAIMove`,
@@ -177,9 +232,9 @@ wired in. The app compiles and all tests pass; the feature is simply absent.
 **Protocol contract completeness:** A protocol contract is only complete if it specifies
 what to do for every return value of the called function — not just the success case.
 For any function that can return a "no action" result (pass, error, game over, empty
-result), the contract notes must state the handler-side obligation for that case, and
-the smoke test must exercise it. The AI-pass case (`passed=true`) is the canonical
-example: the handler must call `g.Pass()`, not just skip placing a stone.
+result), the contract notes must state the handler-side obligation for that case. The
+AI-pass case (`passed=true`) is the canonical example: the handler must call `g.Pass()`,
+not just skip placing a stone.
 
 Protocol contracts are also relevant outside web apps: a CLI command that formats output
 using a library function, or a background worker that calls a queue consumer, both require
@@ -201,12 +256,27 @@ interface text in a consumer bead spec is a finding.
 
 ## Decomposition Notes
 
-**What to write:** Authoritative overrides to the generic decomposition heuristics.
+**What to write:** Targeted overrides when DECOMPOSE's generic heuristics would produce
+wrong bead boundaries for this specific project.
 
-**"Too good" decomposition is a feature.** If you know exactly what the bead list should
-be, write it in the bead table. A design doc that fully specifies the bead structure will
-produce a DECOMPOSE output that AUDIT passes with no findings. This is not cheating — it is
-good specification.
+**Start without this section.** DECOMPOSE has strong built-in heuristics: 200-line cap,
+independence requirement, paired-behavior detection, integration bead generation, and
+httptest requirement for handler beads. It also reads the behavioral specification and
+cross-bead contracts to understand the project structure. For most projects, this is
+sufficient.
+
+**Add guidance only when you know something DECOMPOSE can't infer.** The right signal is
+a specific wrong choice you've seen or can predict — not a desire to control the output.
+Good uses:
+- Specifying one bounded scenario for an integration bead (DECOMPOSE may over-scope it)
+- Calling out a per-bead constraint that prevents a common mistake for this project type
+  (e.g., "handlers bead must not define HTML templates inline")
+- Sequencing two beads that share a file and have a non-obvious dependency order
+
+**Avoid pre-writing the full bead table.** A complete bead table makes DECOMPOSE redundant
+and removes its ability to apply judgment. If the table is wrong (even slightly), AUDIT
+will flag it and RECONCILE will need to fix it — at the cost of a full extra round. Let
+DECOMPOSE make structural decisions, then add guidance only where it guesses wrong.
 
 ### Integration bead scope
 
@@ -237,25 +307,6 @@ The smoke test must:
 2. Exercise at least one complete request/response cycle per handler
 3. Verify a structural property of the response (element count, status code, key string)
 4. Verify any downstream effects required by protocol contracts (e.g., AI stone in response)
-
-### Shared files
-
-If two beads write to the same file, the bead that writes first must be listed first in
-the bead table, and the second bead's spec must acknowledge the existing content. Add a
-note in Bead Boundaries:
-
-> "Bead 3 (scoring) writes `game.go`. Bead 4 (placement) also writes `game.go` and must
-> preserve all content from bead 3."
-
-### Per-bead constraints
-
-Use Bead Boundaries to prohibit behaviors the model would otherwise adopt:
-
-- "The http-handlers bead must not define any HTML templates inline. All template content
-  belongs in the templates bead." (Without this, handlers bead will create an inline
-  `templates.go` and the templates bead becomes redundant.)
-- "The encoding bead must not import the decoding bead's package." (Prevents accidental
-  circular dependency.)
 
 ---
 
@@ -288,6 +339,7 @@ A web application has handlers, view models, and templates. The dominant contrac
 - [ ] Notes on `$`-prefix scoping for any template that iterates and accesses root data
 - [ ] Every handler bead has an httptest smoke test exit criterion
 - [ ] HTMX swap target contains all dynamic state (score, turn, game-over message)
+- [ ] Template storage form stated explicitly (inline strings vs external files)
 - [ ] Integration bead tests one user flow end-to-end (not "all routes")
 
 **HTMX fragment scope:** For projects using HTMX fragment updates, all user-visible
@@ -295,8 +347,7 @@ state that changes after a move — score, turn indicator, game-over message —
 render inside the HTMX swap target. The fragment template must be self-contained.
 Never place dynamic state in elements outside the swap target. The failure mode is
 silent: the page loads correctly, but scores and turn indicators stop updating after
-the first move. Specify the swap target explicitly in the handler bead spec and require
-the smoke test to verify that the response fragment includes score and turn fields.
+the first move. Specify the swap target in the cross-bead contract notes.
 
 **Common pitfall:** Protocol contracts omitted. The handler and the logic function are both
 implemented correctly in isolation; the wiring between them is never specified; the feature
@@ -327,15 +378,15 @@ displayed in a specific way, write the exact format in the protocol contract.
 | Mistake | What fails | How to prevent |
 |---|---|---|
 | Domain parameters unstated | Model uses plausible defaults (wrong size, wrong limits, wrong constants) | State every parameter explicitly in Overview |
+| `package` declaration in Data Types code block | SURVEY copies it into declarations; scaffolder writes it twice, compile fails | Omit `package` and `import` from signatures — scaffolder adds them |
+| Behavioral structure omitted for functions with dependency chain | DECOMPOSE collapses all functions into one oversized bead | Add a sentence noting the dependency chain and that each group is independently testable |
+| Template storage form unstated | Model invents external `.html` files or inline strings — whichever wasn't intended | State "inline strings in InitTemplates()" or "external .html files" explicitly |
 | Protocol contract omitted | Handler doesn't call logic function; no test catches it | Ask "what functions from other beads does each handler call?" |
 | Integration bead over-scoped | Long test generation hits budget before write_file; missing-path error | One bounded scenario per integration bead; split if needed |
 | Handler bead with `go build` exit criterion | Model writes a stub that compiles; runtime behavior untested | Require httptest smoke test for every handler bead |
 | FuncMap helper used in template but not registered | Runtime panic; invisible to `go build` | List required helpers in data-shape contract notes |
 | `$.X` vs `.X` inside `{{range}}` | Wrong value rendered; invisible to `go build` | Note "$-prefix required inside {{range}}" in data-shape contract |
-| Shared file not sequenced in Decomposition Notes | Later bead overwrites earlier bead's content | List every shared file and which bead writes first |
+| Shared file not sequenced | Later bead overwrites earlier bead's content | Note sequential dependency explicitly in Decomposition Notes |
 | Behavioral wiring left implicit | Feature absent at runtime; all tests pass | Write a protocol contract for every cross-bead function call in a handler |
-| Protocol contract covers success only | "No action" branch (AI pass, game over) missing; state machine breaks silently | Contract notes must specify handler obligation for every return variant; smoke test must exercise each |
-| HTMX swap target too narrow | Score, turn, game-over outside swap target never update after moves | All dynamic state inside swap target; fragment template must be self-contained |
-| `package main` omitted from source files | `go build ./...` succeeds but produces ar archive (library), not executable | All `.go` files must declare `package main`; module name in `go.mod` does not determine package name |
-| `var _` assertions omitted | Layout bead invents its own assertions; signature drift across beads | Write assertions subsection; include package-level variables |
-| Per-bead constraints omitted | Handlers bead creates inline templates; templates bead becomes redundant | Add "must not embed HTML inline" to handler bead constraints |
+| Protocol contract covers success only | "No action" branch (AI pass, game over) missing; state machine breaks silently | Contract notes must specify handler obligation for every return variant |
+| HTMX swap target too narrow | Score, turn, game-over outside swap target never update after moves | All dynamic state inside swap target; state this in the data-shape contract notes |

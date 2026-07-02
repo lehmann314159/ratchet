@@ -39,6 +39,7 @@ func TestSchemaTablesExist(t *testing.T) {
 		"projects", "verb_model_assignments", "beads", "bead_revisions",
 		"audit_reconcile_rounds", "executions", "analyses",
 		"compressed_history", "adjudications", "handoff_jobs", "handoff_attempts",
+		"verify_attempts", "certifications",
 	} {
 		var n int
 		if err := d.QueryRowContext(ctx,

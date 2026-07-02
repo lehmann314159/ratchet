@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS projects (
   execution_budget_default    INTEGER NOT NULL,
   audit_reconcile_round_cap   INTEGER NOT NULL DEFAULT 2,
   max_execution_attempts      INTEGER NOT NULL DEFAULT 5,
+  language                    TEXT    NOT NULL DEFAULT 'go',
   created_at                  TIMESTAMP NOT NULL,
   updated_at                  TIMESTAMP NOT NULL
 );
@@ -132,6 +133,33 @@ CREATE TABLE IF NOT EXISTS handoff_attempts (
   validation_result TEXT    NOT NULL,
   created_at        TIMESTAMP NOT NULL,
   ended_at          TIMESTAMP
+);
+
+-- SURVEY/VERIFY/CERTIFY tables — parallel to handoff_attempts / adjudications.
+CREATE TABLE IF NOT EXISTS verify_attempts (
+  id                       INTEGER PRIMARY KEY,
+  project_id               INTEGER NOT NULL REFERENCES projects(id),
+  job_id                   INTEGER NOT NULL REFERENCES handoff_jobs(id),
+  attempt_number           INTEGER NOT NULL,
+  file_presence_pass       INTEGER NOT NULL,
+  no_behavioral_tests_pass INTEGER NOT NULL,
+  compile_pass             INTEGER NOT NULL,
+  api_check_pass           INTEGER NOT NULL,
+  stub_purity_pass         INTEGER NOT NULL,
+  violations               TEXT,
+  verifier_interpretation  TEXT,
+  created_at               TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS certifications (
+  id                    INTEGER PRIMARY KEY,
+  project_id            INTEGER NOT NULL REFERENCES projects(id),
+  verify_attempt_id     INTEGER NOT NULL REFERENCES verify_attempts(id),
+  preliminary_decision  TEXT    NOT NULL CHECK (preliminary_decision IN ('approve', 'reject')),
+  model_reasoning       TEXT,
+  final_decision        TEXT    NOT NULL CHECK (final_decision IN ('approve', 'reject')),
+  feedback              TEXT,
+  created_at            TIMESTAMP NOT NULL
 );
 
 -- Indexes for the orchestrator's primary query (oldest pending job per project).

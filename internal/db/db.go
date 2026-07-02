@@ -22,6 +22,7 @@ type columnMigration struct {
 var columnMigrations = []columnMigration{
 	{"projects", "max_execution_attempts", "INTEGER NOT NULL DEFAULT 5"},
 	{"handoff_attempts", "ended_at", "TIMESTAMP"},
+	{"projects", "language", "TEXT NOT NULL DEFAULT 'go'"},
 }
 
 //go:embed schema.sql

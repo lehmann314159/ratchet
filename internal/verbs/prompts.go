@@ -2,17 +2,70 @@ package verbs
 
 import "fmt"
 
+func surveySpecSystemPrompt() string {
+	return `You produce a file manifest — a structural blueprint of a software project. Your job is to make architectural decisions: which source files to create, what types and function signatures to define, and how to name things consistently. A separate scaffolding step turns your output into compilable source files, so you do not need to worry about package declarations, imports, build tooling files, or test harness files — those are generated automatically.
+
+**What you output per file:**
+- "path": the file path relative to the project root (source files only)
+- "declarations": the raw declaration text for that file — types, constants, variables, and function signatures with stub bodies. No package statement. No import block.
+
+**Stub bodies:** Every function must have a stub body — a zero-value return with no logic. See the language-specific guidance injected below for the correct form.
+
+**Files to include:** every source file the project needs. Omit build tooling files, test harnesses, and config files — those are generated automatically.
+
+**Files to exclude:** test files of any kind (the test harness is generated automatically).
+
+**Retry guidance:** If rejection feedback or a schema error appears before the design document, correct every issue before responding. When rewriting from a prior attempt, rewrite the declarations field completely — do not append to prior content.
+
+Respond with JSON only, no prose before or after:
+{
+  "module": "<module name>",
+  "package": "<package name>",
+  "files": [
+    { "path": "<file path relative to project root>", "declarations": "<declaration text — no package line, no import block>" }
+  ]
+}`
+}
+
+func certifyManifestSystemPrompt() string {
+	return `You receive the results of mechanical verification checks on a stub manifest and the SURVEY manifest itself. Make a final approve/reject decision.
+
+Checks performed:
+1. file_presence: every source file listed in the manifest exists on disk
+2. no_behavioral_tests: no *_test.go files other than api_check_test.go are present
+3. compile: go test -c -o /dev/null ./... exits 0 (imports, types, and stub signatures are valid)
+4. api_check: api_check_test.go was generated with at least one exported symbol assertion
+
+The mechanical layer has computed a preliminary decision: all four checks pass → approve; any failure → reject.
+
+Your role:
+1. Confirm the preliminary decision (or override only in clear edge cases)
+2. If all checks pass, review the SURVEY manifest for structural quality:
+   - Are the file boundaries sensible for this project?
+   - Are exported names consistent and idiomatic for the language?
+   - Does the API surface match what the design document calls for?
+   Override to reject if you find a clear structural defect that the mechanical checks cannot catch.
+3. If rejecting, write specific, actionable feedback for SURVEY. Name the file and what to change:
+   Bad:  "The manifest has issues."
+   Good: "game.go declares PlaceStone returning error, but the design doc specifies it returns ([]Point, error) — the flip list must be part of the return type."
+
+Respond with JSON only, no prose before or after:
+{
+  "preliminary_decision": "approve" | "reject",
+  "model_reasoning": "<your reasoning>",
+  "final_decision": "approve" | "reject",
+  "feedback": "<actionable revision guidance for SURVEY — omit or leave empty if approving>"
+}`
+}
+
 func decomposeSpecSystemPrompt() string {
 	return fmt.Sprintf(`You decompose a design document into a list of Beads — well-scoped, independently executable units of work, each with a clear done-condition.
 
-Your output is a decomposition plan, not an implementation. Each Bead's full_text is a
-natural-language specification that a separate execute model will read and implement. Do not
-write source code, file contents, or pseudocode in full_text fields. There are exactly two
-exceptions, both in the layout Bead only: (1) the complete api_check_test.go file (package
-declaration, imports, and all var _ assertion lines), which must be literal Go so the execute
-model copies it exactly; and (2) the complete Data
-Types block from the design document, copied verbatim so the execute model has the exact
-field names, constant values, and struct layouts without having to infer them.
+Your output is a decomposition plan, not an implementation. Each Bead's full_text is prose only — natural-language specification that a separate execute model will read and implement. Do not write source code, file contents, or pseudocode in full_text fields.
+
+**Stub files are already on disk.** The project's file and package structure has been established before DECOMPOSE runs — stub files exist in the project folder, types are declared, and api_check_test.go is already in place. Your Beads fill in the logic of existing stubs; they do not create new source files. The execute model will read existing stubs during its orient step.
+
+**Survey document is ground truth.** A survey document is provided alongside the design document. For every type declaration, function signature, package-level variable, and api_check assertion, the survey document is authoritative — not the design doc. If they differ, the survey doc wins. Do not re-derive types or signatures from the design doc when the survey doc provides them.
 
 **Decomposition Notes — authoritative override:** If the design document contains a
 ` + "`## Decomposition Notes`" + ` section, treat its bead structure guidance as authoritative.
@@ -21,88 +74,7 @@ exactly, overriding the generic rules below where they conflict. The design doc 
 full context of the project's pairing structure and intended test boundaries; their explicit
 guidance supersedes generic heuristics.
 
-**Layout Bead — always first:** The very first Bead must be a layout Bead. Its sole job
-is to establish the project's complete file and package structure: correct directory layout,
-module files, and stub implementations — every exported function, type, constant, and error
-variable declared with correct signatures but containing no logic (function bodies return zero
-values or a "not implemented" error). The layout Bead's exit criterion must verify that
-` + "`go build ./...`" + ` (or equivalent) passes with the stubs in place. All subsequent Beads
-fill in stubs from the layout Bead — they do not create new source files. File overlap between
-the layout Bead and any other Bead is expected and will not be flagged by AUDIT as an
-independence violation.
-
-The layout Bead must include a signature verification file in its output_files (e.g.
-` + "`api_check_test.go`" + `). This file contains compile-time type assertions — one per exported
-function — that lock the API before any logic Bead runs. If the stubs carry the wrong
-signature, ` + "`go build ./...`" + ` fails immediately, preventing signature drift across the project.
-
-The layout Bead's exit_criteria must be exactly:
-  ` + "`go test -c -o /dev/null ./... && grep -q '^var _' api_check_test.go`" + `
-` + "`go test -c -o /dev/null ./...`" + ` compiles all source files including test files
-(catching missing imports or type errors in api_check_test.go) and exits 0 on success
-with no output — it does not execute any tests and does not print "no tests to run".
-Do not use ` + "`go test ./...`" + ` (without ` + "`-c`" + `), which prints "no tests to run" and
-blocks adjudication.
-
-Your layout Bead's full_text must include the complete, ready-to-copy content of
-` + "`api_check_test.go`" + ` — not just the assertion lines, but the entire file: package
-declaration, all required imports, and every ` + "`var _`" + ` assertion. The execute model
-copies this block verbatim; it will not infer missing imports or add a package line.
-
-Search the entire design document for every exported function signature and every named
-package-level variable. For each one, write a ` + "`var _`" + ` assertion. Derive the required
-imports from the types used in the assertions (e.g. ` + "`*template.Template`" + ` requires
-` + "`\"html/template\"`" + `). Include only the imports actually needed.
-
-Example of the expected block in full_text:
-  api_check_test.go must contain exactly:
-  ` + "```" + `
-  package main
-
-  import "html/template"
-
-  var _ func(n int) (int, error) = Fib
-  var _ func(s string) ([]byte, error) = Encode
-  var _ *template.Template = Templates
-  ` + "```" + `
-
-Package-level variable assertions lock the identifier name and type before any logic Bead
-runs, preventing the name from drifting across Beads (e.g. one Bead writing initTemplates
-while another calls ParseTemplates). Include an assertion for every package-level variable
-that is declared in one Bead's output_files and consumed by another's.
-
-Also copy the complete Data Types block from the design document directly into the layout
-Bead's full_text right now, as you write this output. Do not instruct the execute model to
-look it up — EXECUTE will never see design_doc.md, only the bead spec you produce. Every
-type declaration, constant definition with its explicit value, and struct field list must
-appear as a literal block inside full_text, exactly as written in the design doc. Do not
-paraphrase or infer type internals from function signatures alone.
-
-Wrong (delegates to EXECUTE, does not work):
-  "Implement Color, Point, and Game types as defined in the design document."
-  "Include the Data Types block from the design document verbatim."
-
-Right (copies the types into the spec right now):
-  "Use exactly these type definitions, copied from the design doc:
-
-  type Color int
-  const (
-      Empty Color = 0
-      Black Color = 1
-      White Color = -1  // NOT iota
-  )
-  type Point struct { Row, Col int }  // NOT X, Y
-  type Game struct { Board [8][8]Color; Turn Color; ... }
-  "
-
-If you cannot determine the exact parameter or return types for any exported function from the
-design doc, state that explicitly in the layout Bead's full_text rather than guessing. AUDIT
-will flag ambiguous signatures as a finding so RECONCILE can surface the gap.
-
-Each assertion must be a package-level variable declaration (` + "`var _`" + ` outside any function).
-Assertions inside test functions or init functions do not constitute compile-time checks.
-
-**Single logical concern:** Each non-layout Bead must implement exactly one coherent unit of
+**Single logical concern:** Each Bead must implement exactly one coherent unit of
 functionality. Two algorithms that happen to be short are still two concerns if they can be
 independently tested and implemented. When in doubt, split.
 
@@ -203,7 +175,7 @@ Respond with JSON only, no prose before or after:
   "beads": [
     {
       "title": "<short identifier, unique within this decomposition>",
-      "full_text": "<natural-language specification — prose only; no source code except in the layout Bead: (1) complete api_check_test.go file and (2) complete Data Types block>",
+      "full_text": "<natural-language specification — prose only for all beads>",
       "monitor_override": "honor" | "ignore",
       "output_files": ["<file path>", ...],
       "exit_criteria": ["<runnable check>", ...]
@@ -229,13 +201,18 @@ func auditDecompositionSystemPrompt(lang string) string {
 1. Correctness drift: does each Bead accurately reflect the design document? For each finding,
    cite the specific Bead and the exact design-doc text it drifts from.
 
-2. Independence: compare the output_files lists across all non-layout Beads (Beads 2+). If two
-   or more non-layout Beads share a file in output_files, they are potentially non-independent.
-   Use judgment: if both Beads clearly document a sequential dependency, the overlap may be
-   acceptable. If undocumented or avoidable — flag it. Name all affected Beads and shared files,
-   and suggest whether a merge or clearer sequential dependency would resolve it.
-   File overlap between Bead 1 (the layout Bead) and any other Bead is expected and must NOT
-   be flagged — the layout Bead creates the stubs that all other Beads fill in.
+2. Independence: compare the output_files lists across all Beads. If two or more Beads share
+   a source file in output_files, they are potentially non-independent. A shared file is only
+   acceptable when BOTH of the following are true:
+   (a) The Beads have a documented ordering — one Bead clearly runs before the other.
+   (b) The later Bead's full_text explicitly instructs the executor to read the current file
+       content and preserve all existing functions before adding new code. A mention of
+       ordering alone is not sufficient; the preservation instruction must be explicit.
+   If either condition is missing, flag it — even if a dependency is mentioned. Name all
+   affected Beads and the shared file, and recommend either merging the Beads or adding
+   an explicit content-preservation instruction to the later Bead's full_text.
+   Exception: integration Beads whose output_files overlap with their paired Beads' files
+   are an expected sequential dependency — do not flag them.
    Use "N/A — structural" for design_doc_reference on independence findings.
 
 3. Exit criteria quality: check each Bead's exit_criteria list. Each entry must be a concrete,
@@ -244,19 +221,13 @@ func auditDecompositionSystemPrompt(lang string) string {
    what the Bead actually produces. A Bead with no runnable exit criterion is a structural problem:
    it likely cannot be executed independently and should be merged with a related Bead.` + goSection + `
 
-4. Layout Bead (Bead 1): the first Bead must be a layout Bead — its purpose is to establish file
-   structure and stub implementations only, with no logic. Flag if: (a) Bead 1 contains non-trivial
-   implementation logic rather than stubs; (b) any non-layout Bead creates new source files instead
-   of filling in stubs from Bead 1; (c) Bead 1's exit criteria do not include a build check.
-   Use "N/A — structural" for design_doc_reference on layout findings.
+4. Bead complexity: each Bead must implement a single logical concern and is expected to
+   require no more than 200 lines of new or modified code. Flag any Bead that: (a) bundles
+   two or more distinct algorithms or concerns that could be independently tested; (b) clearly
+   requires more than 200 lines to implement correctly. Use "N/A — structural" for
+   design_doc_reference on complexity findings.
 
-5. Bead complexity: each non-layout Bead must implement a single logical concern and is expected to
-   require no more than 200 lines of new or modified code. Flag any non-layout Bead that: (a) bundles
-   two or more distinct algorithms or concerns that could be independently tested; (b) clearly requires
-   more than 200 lines to implement correctly. Use "N/A — structural" for design_doc_reference on
-   complexity findings.
-
-6. Paired behaviors: scan the design document for functions whose correctness is defined jointly —
+5. Paired behaviors: scan the design document for functions whose correctness is defined jointly —
    where one function's output feeds another's input, or where a round-trip invariant (e.g.
    decode(encode(x)) == x) spans two Beads. Flag if: (a) paired Beads exist but no integration
    Bead is present to verify the joint invariant; (b) an individual paired Bead's exit criteria
@@ -265,7 +236,7 @@ func auditDecompositionSystemPrompt(lang string) string {
    own output_files is an expected sequential dependency — do not flag it as an independence
    violation. Use "N/A — structural" for design_doc_reference on paired-behavior findings.
 
-7. Cross-bead contracts: if the design document contains a ` + "`## Cross-Bead Contracts`" + ` section,
+6. Cross-bead contracts: if the design document contains a ` + "`## Cross-Bead Contracts`" + ` section,
    for each declared contract verify the following by contract type:
    (a) ` + "`data-shape`" + `: the consumer Bead's full_text includes the interface description verbatim
        (not paraphrased); the consumer Bead's exit_criteria contains a test that exercises the

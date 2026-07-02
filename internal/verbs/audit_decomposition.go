@@ -52,9 +52,6 @@ func buildAuditUserMsg(doc string, beads []beadState) string {
 	sb.WriteString("\n\n## Decomposition\n\n")
 	for i, b := range beads {
 		position := fmt.Sprintf("Bead %d", i+1)
-		if i == 0 {
-			position += " [Layout Bead]"
-		}
 		fmt.Fprintf(&sb, "### %s — %s\n\n%s\n\n", position, b.Title, b.FullText)
 		if len(b.OutputFiles) > 0 {
 			fmt.Fprintf(&sb, "**Output files:** %s\n\n", strings.Join(b.OutputFiles, ", "))

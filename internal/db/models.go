@@ -5,10 +5,11 @@ import (
 	"time"
 )
 
-// Verb constants — the 8 verbs from ratchet_architecture_v2.md.
-// These are the only valid values for verb_model_assignments.verb
-// and handoff_jobs.verb.
+// Verb constants.
 const (
+	VerbSurveySpec                 = "SURVEY_SPEC"
+	VerbVerifyManifest             = "VERIFY_MANIFEST"
+	VerbCertifyManifest            = "CERTIFY_MANIFEST"
 	VerbDecomposeSpec              = "DECOMPOSE_SPEC"
 	VerbAuditDecomposition         = "AUDIT_DECOMPOSITION"
 	VerbReconcileDecomposition     = "RECONCILE_DECOMPOSITION"
@@ -19,8 +20,11 @@ const (
 	VerbAdjudicateNextExecution    = "ADJUDICATE_NEXT_EXECUTION"
 )
 
-// AllVerbs lists every verb in FSM order.
+// AllVerbs lists every model-assigned verb in FSM order.
+// VERIFY_MANIFEST is excluded: it is model-free and has no verb_model_assignments row.
 var AllVerbs = []string{
+	VerbSurveySpec,
+	VerbCertifyManifest,
 	VerbDecomposeSpec,
 	VerbAuditDecomposition,
 	VerbReconcileDecomposition,
@@ -43,6 +47,7 @@ type Project struct {
 	ExecutionBudgetDefault   int
 	AuditReconcileRoundCap   int
 	MaxExecutionAttempts     int
+	Language                 string // 'go' | 'python' | ... (default 'go')
 	CreatedAt                time.Time
 	UpdatedAt                time.Time
 }

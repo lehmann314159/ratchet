@@ -35,9 +35,14 @@ type Handler interface {
 	Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJob, parsed any) error
 }
 
-// All returns the registry of all six one-shot verb handlers, keyed by verb name.
+// All returns the registry of all one-shot verb handlers, keyed by verb name.
+// VERIFY_MANIFEST is included despite being model-free — it satisfies the
+// Handler interface and is dispatched through the same path with warmup skipped.
 func All(ollamaBase string) map[string]Handler {
 	return map[string]Handler{
+		db.VerbSurveySpec:              &SurveySpec{},
+		db.VerbVerifyManifest:          &VerifyManifest{},
+		db.VerbCertifyManifest:         &CertifyManifest{},
 		db.VerbDecomposeSpec:           &DecomposeSpec{},
 		db.VerbAuditDecomposition:      &AuditDecomposition{},
 		db.VerbReconcileDecomposition:  &ReconcileDecomposition{},

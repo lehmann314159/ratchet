@@ -33,7 +33,7 @@ func loadProject(ctx context.Context, d *db.DB, projectID int64) (*db.Project, e
 		       recovered_from_project_id,
 		       monitor_override_default, execution_budget_default,
 		       audit_reconcile_round_cap, max_execution_attempts,
-		       created_at, updated_at
+		       language, created_at, updated_at
 		FROM projects WHERE id = ?`, projectID)
 	p := &db.Project{}
 	var createdAt, updatedAt string
@@ -42,7 +42,7 @@ func loadProject(ctx context.Context, d *db.DB, projectID int64) (*db.Project, e
 		&p.RecoveredFromProjectID,
 		&p.MonitorOverrideDefault, &p.ExecutionBudgetDefault,
 		&p.AuditReconcileRoundCap, &p.MaxExecutionAttempts,
-		&createdAt, &updatedAt,
+		&p.Language, &createdAt, &updatedAt,
 	); err != nil {
 		return nil, fmt.Errorf("load project %d: %w", projectID, err)
 	}
@@ -243,6 +243,75 @@ type revisionEntry struct {
 	ExecutionBudget int
 	MonitorOverride string
 	CreatedByVerb   string
+}
+
+// latestSurveyManifest returns the parsed output of the most recent completed
+// SURVEY_SPEC job for projectID. Used by VERIFY and CERTIFY.
+func latestSurveyManifest(ctx context.Context, d *db.DB, projectID int64) (*SurveySpecOutput, error) {
+	var raw string
+	if err := d.QueryRowContext(ctx, `
+		SELECT ha.raw_output
+		FROM handoff_jobs hj
+		JOIN handoff_attempts ha ON ha.job_id = hj.id
+		WHERE hj.project_id = ? AND hj.verb = ?
+		  AND hj.status = 'complete'
+		  AND ha.validation_result = 'valid'
+		ORDER BY hj.created_at DESC
+		LIMIT 1`,
+		projectID, db.VerbSurveySpec,
+	).Scan(&raw); err != nil {
+		return nil, fmt.Errorf("latest survey manifest for project %d: %w", projectID, err)
+	}
+	var out SurveySpecOutput
+	if err := json.Unmarshal([]byte(ollama.ExtractJSON(raw)), &out); err != nil {
+		return nil, fmt.Errorf("parse survey manifest: %w", err)
+	}
+	return &out, nil
+}
+
+// latestVerifyAttempt returns the parsed output of the most recent completed
+// VERIFY_MANIFEST job for projectID. Used by CERTIFY.
+func latestVerifyAttempt(ctx context.Context, d *db.DB, projectID int64) (*VerifyManifestOutput, error) {
+	var raw string
+	if err := d.QueryRowContext(ctx, `
+		SELECT ha.raw_output
+		FROM handoff_jobs hj
+		JOIN handoff_attempts ha ON ha.job_id = hj.id
+		WHERE hj.project_id = ? AND hj.verb = ?
+		  AND hj.status = 'complete'
+		  AND ha.validation_result = 'valid'
+		ORDER BY hj.created_at DESC
+		LIMIT 1`,
+		projectID, db.VerbVerifyManifest,
+	).Scan(&raw); err != nil {
+		return nil, fmt.Errorf("latest verify attempt for project %d: %w", projectID, err)
+	}
+	var out VerifyManifestOutput
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, fmt.Errorf("parse verify output: %w", err)
+	}
+	return &out, nil
+}
+
+// latestCertifyFeedback returns the feedback string from the most recent
+// CERTIFY_MANIFEST rejection for projectID, or "" if no rejection exists.
+// Used by SURVEY to include retry guidance.
+func latestCertifyFeedback(ctx context.Context, d *db.DB, projectID int64) (string, error) {
+	var feedback string
+	err := d.QueryRowContext(ctx, `
+		SELECT COALESCE(feedback, '') FROM certifications
+		WHERE project_id = ? AND final_decision = 'reject'
+		ORDER BY created_at DESC
+		LIMIT 1`,
+		projectID,
+	).Scan(&feedback)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("latest certify feedback for project %d: %w", projectID, err)
+	}
+	return feedback, nil
 }
 
 // loadBeadRevisionLog returns the full revision log for beadID.

@@ -8,7 +8,7 @@ import (
 )
 
 // SetVerbModelAssignment upserts a verb→model assignment for a project,
-// enforcing the three model-assignment constraints from the architecture:
+// enforcing the four model-assignment constraints from the architecture:
 //
 //  1. model(DECOMPOSE_SPEC) == model(RECONCILE_DECOMPOSITION)
 //     The reconciling model must be the decomposing model; otherwise a
@@ -21,6 +21,10 @@ import (
 //  3. model(EXECUTE_BEAD) != model(ANALYZE_EXECUTION)
 //     The executing model authors the work; the analyzing model reviews it.
 //     Using the same model for both removes the independent review.
+//
+//  4. model(CERTIFY_MANIFEST) != model(SURVEY_SPEC)
+//     The certifying model must differ from the surveying model; a model
+//     cannot provide independent review of its own output.
 func (db *DB) SetVerbModelAssignment(ctx context.Context, projectID int64, verb, model string) error {
 	existing, err := db.verbModelMap(ctx, projectID)
 	if err != nil {
@@ -46,11 +50,13 @@ func (db *DB) SetVerbModelAssignment(ctx context.Context, projectID int64, verb,
 	return err
 }
 
-// SeedVerbModelAssignments writes all 8 verb→model assignments for a new
-// project in a single transaction, enforcing all three model-assignment
+// SeedVerbModelAssignments writes all verb→model assignments for a new
+// project in a single transaction, enforcing all four model-assignment
 // constraints.
 func SeedVerbModelAssignments(ctx context.Context, tx *sql.Tx, projectID int64) error {
 	assignments := map[string]string{
+		VerbSurveySpec:              "mistral-small3.2:24b",
+		VerbCertifyManifest:         "gemma4:31b",
 		VerbDecomposeSpec:           "mistral-small3.2:24b",
 		VerbAuditDecomposition:      "gemma4:31b",
 		VerbReconcileDecomposition:  "mistral-small3.2:24b",
@@ -78,21 +84,40 @@ func SeedVerbModelAssignments(ctx context.Context, tx *sql.Tx, projectID int64) 
 }
 
 // SeedVerbModelAssignmentsFromFleet writes verb→model assignments from an
-// explicit fleet map, enforcing the same three constraints as the default seed.
-// Every verb in AllVerbs must be present; missing verbs are an error.
+// explicit fleet map, enforcing the same four constraints as the default seed.
+// Every verb in AllVerbs must be present. Fleet files that predate the addition
+// of SURVEY_SPEC and CERTIFY_MANIFEST automatically inherit fallback defaults:
+// SURVEY_SPEC → same model as DECOMPOSE_SPEC; CERTIFY_MANIFEST → same model
+// as AUDIT_DECOMPOSITION. Note: the fallback may violate constraint 4 if
+// DECOMPOSE_SPEC == AUDIT_DECOMPOSITION; prefer explicit fleet entries.
 func SeedVerbModelAssignmentsFromFleet(ctx context.Context, tx *sql.Tx, projectID int64, fleet map[string]string) error {
+	// Copy to avoid mutating the caller's map.
+	enriched := make(map[string]string, len(fleet)+2)
+	for k, v := range fleet {
+		enriched[k] = v
+	}
+	if _, ok := enriched[VerbSurveySpec]; !ok {
+		if m, ok := enriched[VerbDecomposeSpec]; ok {
+			enriched[VerbSurveySpec] = m
+		}
+	}
+	if _, ok := enriched[VerbCertifyManifest]; !ok {
+		if m, ok := enriched[VerbAuditDecomposition]; ok {
+			enriched[VerbCertifyManifest] = m
+		}
+	}
 	for _, v := range AllVerbs {
-		if _, ok := fleet[v]; !ok {
+		if _, ok := enriched[v]; !ok {
 			return fmt.Errorf("fleet missing verb %q", v)
 		}
 	}
-	if err := checkModelConstraints(fleet); err != nil {
+	if err := checkModelConstraints(enriched); err != nil {
 		return fmt.Errorf("fleet rejected: %w", err)
 	}
 	for _, v := range AllVerbs {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO verb_model_assignments (project_id, verb, model) VALUES (?, ?, ?)`,
-			projectID, v, fleet[v],
+			projectID, v, enriched[v],
 		); err != nil {
 			return fmt.Errorf("seed %s: %w", v, err)
 		}
@@ -122,15 +147,17 @@ func (db *DB) verbModelMap(ctx context.Context, projectID int64) (map[string]str
 	return m, rows.Err()
 }
 
-// checkModelConstraints validates the three model-assignment constraints.
-// A partial assignment (not all 8 verbs present) is allowed; constraints
-// are only violated if both verbs in a pair are present and mismatched.
+// checkModelConstraints validates the four model-assignment constraints.
+// A partial assignment (not all verbs present) is allowed; constraints
+// are only violated if both verbs in a pair are present and conflict.
 func checkModelConstraints(m map[string]string) error {
 	decompose, hasDecompose := m[VerbDecomposeSpec]
 	reconcile, hasReconcile := m[VerbReconcileDecomposition]
 	audit, hasAudit := m[VerbAuditDecomposition]
 	execute, hasExecute := m[VerbExecuteBead]
 	analyze, hasAnalyze := m[VerbAnalyzeExecution]
+	survey, hasSurvey := m[VerbSurveySpec]
+	certify, hasCertify := m[VerbCertifyManifest]
 
 	if hasDecompose && hasReconcile && decompose != reconcile {
 		return errors.New(
@@ -148,6 +175,12 @@ func checkModelConstraints(m map[string]string) error {
 		return errors.New(
 			"EXECUTE_BEAD and ANALYZE_EXECUTION must use different models " +
 				"(executing model authors the work; analyzing model reviews it independently)",
+		)
+	}
+	if hasSurvey && hasCertify && certify == survey {
+		return errors.New(
+			"CERTIFY_MANIFEST must use a different model from SURVEY_SPEC " +
+				"(a model cannot independently review its own manifest output)",
 		)
 	}
 	return nil

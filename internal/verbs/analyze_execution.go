@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"ratchet/internal/db"
-	"ratchet/internal/guidance"
 	"ratchet/internal/ollama"
 	"ratchet/internal/trace"
 )
@@ -59,20 +58,6 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		ExitCriteria []string `json:"exit_criteria"`
 	}
 	json.Unmarshal([]byte(beadFullTextJSON), &beadSpec) //nolint:errcheck — malformed JSON handled by empty slices
-
-	// Layout bead structural check: verify api_check_test.go (if owned by this
-	// bead) contains package-level blank-identifier assertions referencing exported
-	// identifiers. If the check fails, return a pre-built finding without calling
-	// the model — the structural violation is unambiguous and needs no interpretation.
-	lang := guidance.Detect(folderPath)
-	if finding := checkLayoutBeadOutput(lang, folderPath, beadSpec.OutputFiles); finding != "" {
-		out := AnalyzeExecutionOutput{
-			MechanicalFindings:     finding,
-			AnalyzerInterpretation: "Layout bead structural check failed before model analysis. The signature lock is absent or malformed; all other passing checks are unreliable until this is resolved.",
-		}
-		data, _ := json.Marshal(out)
-		return string(data), nil
-	}
 
 	// Generate mechanical_findings from structured trace data — no model call,
 	// no causal-language risk.

@@ -1,0 +1,289 @@
+package verbs
+
+import (
+	"fmt"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"unicode"
+)
+
+// stdlibPkgToImport maps unqualified package names to their standard library
+// import paths. Used by inferImports to resolve package-qualified identifiers
+// in declaration text (e.g. "http" → "net/http").
+var stdlibPkgToImport = map[string]string{
+	"atomic":   "sync/atomic",
+	"base64":   "encoding/base64",
+	"big":      "math/big",
+	"bufio":    "bufio",
+	"bytes":    "bytes",
+	"cipher":   "crypto/cipher",
+	"cmp":      "cmp",
+	"context":  "context",
+	"csv":      "encoding/csv",
+	"errors":   "errors",
+	"exec":     "os/exec",
+	"flag":     "flag",
+	"filepath": "path/filepath",
+	"fmt":      "fmt",
+	"gob":      "encoding/gob",
+	"gzip":     "compress/gzip",
+	"heap":     "container/heap",
+	"hex":      "encoding/hex",
+	"html":     "html",
+	"http":     "net/http",
+	"httptest": "net/http/httptest",
+	"io":       "io",
+	"iter":     "iter",
+	"json":     "encoding/json",
+	"list":     "container/list",
+	"log":      "log",
+	"maps":     "maps",
+	"math":     "math",
+	"mime":     "mime",
+	"net":      "net",
+	"netip":    "net/netip",
+	"os":       "os",
+	"path":     "path",
+	"rand":     "math/rand",
+	"regexp":   "regexp",
+	"ring":     "container/ring",
+	"runtime":  "runtime",
+	"sha256":   "crypto/sha256",
+	"signal":   "os/signal",
+	"slices":   "slices",
+	"slog":     "log/slog",
+	"sort":     "sort",
+	"strconv":  "strconv",
+	"strings":  "strings",
+	"sync":     "sync",
+	"tar":      "archive/tar",
+	"template": "html/template",
+	"testing":  "testing",
+	"time":     "time",
+	"tls":      "crypto/tls",
+	"unicode":  "unicode",
+	"url":      "net/url",
+	"utf8":     "unicode/utf8",
+	"xml":      "encoding/xml",
+	"zip":      "archive/zip",
+	"zlib":     "compress/zlib",
+}
+
+// scaffoldGoProject materializes a Go project from SURVEY_SPEC declaration-only
+// files. For each source file it computes required imports from the declaration
+// text and writes a complete syntactically valid .go file. It then generates
+// go.mod (using the host Go runtime version) and api_check_test.go (existence
+// checks for all exported symbols).
+func scaffoldGoProject(pkg, module, folderPath string, files []SurveyManifestFile) error {
+	goVer := goRuntimeVersion()
+
+	for _, f := range files {
+		if !strings.HasSuffix(f.Path, ".go") {
+			continue
+		}
+		content := buildGoFile(pkg, f.Declarations)
+		fullPath := filepath.Join(folderPath, f.Path)
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+			return fmt.Errorf("mkdir for %s: %w", f.Path, err)
+		}
+		if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+			return fmt.Errorf("write %s: %w", f.Path, err)
+		}
+	}
+
+	goMod := fmt.Sprintf("module %s\n\ngo %s\n", module, goVer)
+	if err := os.WriteFile(filepath.Join(folderPath, "go.mod"), []byte(goMod), 0644); err != nil {
+		return fmt.Errorf("write go.mod: %w", err)
+	}
+
+	if err := writeAPICheckTest(pkg, folderPath, files); err != nil {
+		return fmt.Errorf("write api_check_test.go: %w", err)
+	}
+
+	return nil
+}
+
+// buildGoFile prepends the package declaration, infers imports from the
+// declaration text, and formats the result. If gofmt fails (the model
+// produced a syntax error), the unformatted source is returned so the
+// compile check can surface a precise error message.
+func buildGoFile(pkg, declarations string) string {
+	imports := inferImports(declarations)
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "package %s\n", pkg)
+	if len(imports) > 0 {
+		sb.WriteString("\nimport (\n")
+		for _, imp := range imports {
+			fmt.Fprintf(&sb, "\t%q\n", imp)
+		}
+		sb.WriteString(")\n")
+	}
+	sb.WriteString("\n")
+	sb.WriteString(declarations)
+	src := sb.String()
+
+	formatted, err := format.Source([]byte(src))
+	if err != nil {
+		return src
+	}
+	return string(formatted)
+}
+
+// inferImports parses declaration text and returns sorted import paths for
+// every package-qualified identifier (pkg.Symbol) that maps to a known stdlib
+// package. Unknown qualifiers are silently skipped — the compile check will
+// surface them with a precise error.
+func inferImports(declarations string) []string {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "", "package p\n\n"+declarations, parser.ParseComments)
+	if err != nil {
+		return nil
+	}
+
+	seen := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		id, ok := sel.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		if imp, ok := stdlibPkgToImport[id.Name]; ok {
+			seen[imp] = true
+		}
+		return true
+	})
+
+	paths := make([]string, 0, len(seen))
+	for p := range seen {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+// writeAPICheckTest generates api_check_test.go containing one "var _ = X"
+// assertion per exported function and exported package-level variable across
+// all manifest files. For package main these reference symbols directly (no
+// import needed since we're in the same package).
+func writeAPICheckTest(pkg, folderPath string, files []SurveyManifestFile) error {
+	var assertions []string
+	for _, f := range files {
+		if !strings.HasSuffix(f.Path, ".go") || strings.HasSuffix(f.Path, "_test.go") {
+			continue
+		}
+		fset := token.NewFileSet()
+		astFile, err := parser.ParseFile(fset, "", "package p\n\n"+f.Declarations, 0)
+		if err != nil {
+			continue
+		}
+		assertions = append(assertions, exportedAssertions(astFile)...)
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "package %s\n\n", pkg)
+	if len(assertions) > 0 {
+		sb.WriteString("var (\n")
+		for _, a := range assertions {
+			fmt.Fprintf(&sb, "\t_ = %s\n", a)
+		}
+		sb.WriteString(")\n")
+	}
+
+	return os.WriteFile(filepath.Join(folderPath, "api_check_test.go"), []byte(sb.String()), 0644)
+}
+
+// exportedAssertions returns a right-hand side expression for "var _ = X" for
+// each exported function and each exported package-level variable in the file.
+func exportedAssertions(f *ast.File) []string {
+	var out []string
+	for _, decl := range f.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if !isExportedIdent(d.Name.Name) {
+				continue
+			}
+			if d.Recv != nil {
+				if typName := receiverTypeName(d.Recv); typName != "" {
+					out = append(out, fmt.Sprintf("(*%s).%s", typName, d.Name.Name))
+				}
+			} else {
+				out = append(out, d.Name.Name)
+			}
+
+		case *ast.GenDecl:
+			if d.Tok != token.VAR {
+				continue
+			}
+			for _, spec := range d.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for _, name := range vs.Names {
+					if isExportedIdent(name.Name) {
+						out = append(out, name.Name)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// receiverTypeName returns the base type name from a receiver field list,
+// stripping any pointer star.
+func receiverTypeName(recv *ast.FieldList) string {
+	if recv == nil || len(recv.List) == 0 {
+		return ""
+	}
+	switch t := recv.List[0].Type.(type) {
+	case *ast.StarExpr:
+		if id, ok := t.X.(*ast.Ident); ok {
+			return id.Name
+		}
+	case *ast.Ident:
+		return t.Name
+	}
+	return ""
+}
+
+// isExportedIdent reports whether name is an exported Go identifier.
+func isExportedIdent(name string) bool {
+	return name != "" && unicode.IsUpper(rune(name[0]))
+}
+
+// goRuntimeVersion returns the current Go version in "M.N" form (e.g. "1.24").
+func goRuntimeVersion() string {
+	v := strings.TrimPrefix(runtime.Version(), "go")
+	parts := strings.SplitN(v, ".", 3)
+	if len(parts) >= 2 {
+		return parts[0] + "." + parts[1]
+	}
+	return v
+}
+
+// wipeGoProject removes all .go files, go.mod, and go.sum from folderPath.
+// Errors are silently ignored — the next SURVEY attempt overwrites anyway.
+func wipeGoProject(folderPath string) {
+	_ = filepath.WalkDir(folderPath, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		base := filepath.Base(path)
+		if strings.HasSuffix(base, ".go") || base == "go.mod" || base == "go.sum" {
+			_ = os.Remove(path)
+		}
+		return nil
+	})
+}

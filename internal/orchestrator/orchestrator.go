@@ -61,7 +61,7 @@ func tick(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[string]
 		return err
 	}
 
-	job, err := nextPendingJob(ctx, d, project.ID)
+	job, err := claimNextJob(ctx, d, project.ID)
 	if err != nil {
 		return err
 	}

@@ -5,34 +5,23 @@
 One paragraph: what does this project do, who uses it, what is the runtime model
 (CLI, server, library, etc.), and what is explicitly out of scope.
 
-## Architecture
-
-Show the directory layout and file responsibilities. Be explicit about which file
-owns which concern — this drives output_files assignments during decomposition.
-
-```
-project/
-├── go.mod
-├── main.go     — entry point
-├── foo.go      — core logic
-├── foo_test.go — tests for foo.go
-└── ...
-```
+**Domain parameters:** list every parameter that a model could reasonably guess
+(board size, color depth, constants, limits) — state each one explicitly.
 
 ## Data Types and Function Signatures
 
-List every exported type, constant, and function with complete Go signatures.
-DECOMPOSE_SPEC uses this section to generate the compile-time assertions in
-`api_check_test.go`. Be precise — wrong parameter or return types here propagate
-through the whole project.
+List every exported type, constant, and function with complete signatures.
+SURVEY_SPEC uses this section to declare stubs correctly. Be precise — wrong
+parameter or return types here propagate through the whole project.
 
-All `.go` source files in this project must declare `package main`. The module
-name in `go.mod` (e.g. `module othello`) does not determine the package name —
-every file must still begin with `package main`.
+Do NOT include a `package` declaration or `import` block — the scaffolding step
+adds those automatically. Starting the code block with `package main` will cause
+the scaffolder to write it twice.
+
+All `.go` source files in this project use `package main`. The module name is
+`<modulename>`.
 
 ```go
-package main
-
 type Foo struct {
     Bar string
     Baz int
@@ -40,98 +29,99 @@ type Foo struct {
 
 func NewFoo(bar string) *Foo
 func (f *Foo) Process(input []byte) ([]byte, error)
+
+var State *Foo
 ```
 
-### Compile-time assertions for api_check_test.go
-
-Copy these exact lines into this section after writing the signatures above.
-DECOMPOSE_SPEC will include them verbatim in the layout Bead's full_text.
+### Export signatures
 
 ```go
 var _ func(bar string) *Foo = NewFoo
 var _ func(*Foo, []byte) ([]byte, error) = (*Foo).Process
+var _ *Foo = State
 ```
+
+## Behavioral Specification
+
+One or two sentences per function or functional group describing WHAT it does —
+the behavioral contract, not the implementation.
+
+Use this section to capture domain logic invisible to the type signatures:
+- Which functions are pure reads vs state mutators
+- How functions compose (e.g., "Foo uses Bar internally")
+- What conditions trigger state changes (e.g., "ConsecutivePasses resets on PlaceStone")
+- Which functions form a dependency chain, and that each group is independently testable
+
+Also use this section to resolve implementation ambiguities SURVEY would otherwise
+guess (e.g., "Templates are inline Go strings — no external .html files").
+
+**Example:**
+
+**`NewFoo(bar string) *Foo`** — initializes Foo with Bar set to bar and Baz set to 0.
+
+**`(*Foo).Process(input []byte) ([]byte, error)`** — pure read; does not modify
+receiver state. Returns an error if input is empty.
+
+**`State`** — package-level singleton initialized by `Init()`, called once from
+`main()` before the server starts.
 
 ## Cross-Bead Contracts
 
-List every interface that one Bead produces and another Bead consumes. DECOMPOSE_SPEC
-uses this section to set exit criteria and to populate consumer Bead specs with the
-exact interface text. AUDIT uses it to verify that every contract has adequate test
-coverage. Omit this section entirely if no such interfaces exist.
+List every interface produced by one bead and consumed by another. DECOMPOSE_SPEC
+uses this section to set exit criteria and populate consumer bead specs with the
+exact interface text. AUDIT uses it to verify adequate test coverage. Omit this
+section entirely if no cross-bead interfaces exist.
 
 Each entry must declare:
 - **type**: `data-shape` | `format` | `protocol` | `schema`
-- **producer**: title of the producing Bead (must match a Bead title exactly)
-- **consumer**: title of the consuming Bead (must match a Bead title exactly)
-- **interface**: the exact specification — struct definition, field list, named template
-  strings, function signatures, or schema excerpt
-- **notes** *(optional)*: scoping rules, required helper registrations, naming conventions,
-  version constraints, or anything the consumer Bead must know that isn't captured in the
-  interface field alone
+- **producer**: the producing concern (need not match a bead title exactly)
+- **consumer**: the consuming concern
+- **interface**: the exact specification — struct definition, function signature,
+  format description, or schema excerpt
+- **notes** *(optional)*: scoping rules, required helper registrations, handler
+  obligations for every return variant
 
-Contract types and what DECOMPOSE_SPEC does with each:
+### Example — handler → template (data-shape)
 
-| Type | What it is | What DECOMPOSE_SPEC does |
-|------|------------|--------------------------|
-| `data-shape` | A struct or field set passed from one Bead to another (e.g. handler → template view model) | Quotes interface verbatim in consumer Bead spec; requires a render/instantiation test in consumer exit criteria |
-| `format` | A serialization format shared by a writer and a reader (encode/decode, marshal/unmarshal) | Adds a round-trip integration Bead after the pair; round-trip tests excluded from individual Bead exit criteria |
-| `protocol` | A request/response exchange (HTTP, RPC, message queue) | Adds an integration Bead that sends a message through both sides |
-| `schema` | A validation schema (JSON Schema, protobuf, SQL DDL) | Requires tests against a valid and an invalid document in the producing Bead's exit criteria |
-
-### Example entries
-
-#### Handler → template view model
 - **type**: data-shape
 - **producer**: http-handlers
 - **consumer**: templates
 - **interface**: `GameView{Board [8][8]*Piece, Selected *Square, ValidDests map[[2]int]bool, Message string, GameOver bool}`
 - **notes**: Inside `{{range}}` loops, top-level GameView fields must use `$` prefix
   (e.g. `$.Selected`, `$.ValidDests`). Template must register FuncMap helpers
-  `add(a, b int) int` and `mod(a, b int) int` before parsing.
+  `add(a, b int) int` and `mod(a, b int) int` before parsing. All dynamic state
+  (score, turn, game-over) must render inside `#board-container` (the HTMX swap target).
 
-#### Encoder → decoder (round-trip)
+### Example — handler calls logic (protocol)
+
+- **type**: protocol
+- **producer**: ai
+- **consumer**: http-handlers
+- **interface**: `RandomAIMove(g *Game) (Point, bool, error)`
+- **notes**: Both place and pass handlers must call RandomAIMove after the human move,
+  provided the game is not already over. If passed=true, call g.Pass() — omitting this
+  leaves ConsecutivePasses stuck and the game unable to end. Return HTTP 500 on error.
+
+### Example — encode/decode pair (format)
+
 - **type**: format
 - **producer**: encoder
 - **consumer**: decoder
 - **interface**: Little-endian binary: `[4]byte magic | uint32 length | []byte payload`
 - **notes**: Zero-length payload is valid; magic must be exactly `\x89PNG`.
 
-#### Event producer → event consumer (protocol)
-- **type**: protocol
-- **producer**: publisher
-- **consumer**: subscriber
-- **interface**: JSON object `{"topic": string, "payload": any, "ts": RFC3339}`
-- **notes**: `ts` is always UTC. Consumer must tolerate unknown fields (forward compatibility).
-
 ## Decomposition Notes
 
-Use this section to override DECOMPOSE_SPEC's generic decomposition heuristics. Guidance
-here is authoritative — it supersedes the generic rules. Include it only when the generic
-rules would produce wrong bead boundaries for this project.
+*(Optional — include only when DECOMPOSE's generic heuristics would produce wrong
+bead boundaries for this specific project.)*
 
-Common uses:
-- Specify exact bead boundaries when multiple beads share a file (sequential dependency)
-- Designate which bead owns cross-function integration tests
-- Call out constraints on individual beads (e.g. "bead 8 must not embed HTML inline")
-- For integration beads, describe one specific, bounded scenario (fixed inputs, one asserted
-  output) rather than a coverage goal — a focused test that runs is more useful than an
-  exhaustive one that times out mid-generation
+DECOMPOSE has strong built-in heuristics (200-line cap, independence, paired-behavior
+detection, integration bead generation). It also reads the Behavioral Specification and
+Cross-Bead Contracts. For most projects, no Decomposition Notes are needed.
 
-### Bead list
+Add targeted guidance only for things DECOMPOSE cannot infer:
+- One bounded scenario for an integration bead (to prevent over-scoping)
+- A per-bead constraint that prevents a known mistake for this project type
+- Explicit sequencing for two beads that share a file
 
-| # | Title | Output files | Exit criterion |
-|---|-------|-------------|----------------|
-| 1 | layout | foo.go, main.go, go.mod, api_check_test.go | `go test -c -o /dev/null ./... && grep -q '^var _' api_check_test.go` |
-| 2 | ... | ... | ... |
-
-### Bead boundaries and rules
-
-Prose notes on sequential dependencies, shared files, and any per-bead constraints
-that DECOMPOSE_SPEC must follow exactly.
-
-For web app projects using HTMX fragment updates: all user-visible state that changes
-after a move (score, turn indicator, game-over message) must render inside the HTMX
-swap target. The fragment template must be self-contained — never split dynamic state
-between the swap target and elements outside it. Specify the swap target ID in the
-handler bead spec and require the smoke test to verify that score and turn appear in
-the fragment response.
+Do not pre-write the full bead table. Let DECOMPOSE make structural decisions.

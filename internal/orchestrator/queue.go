@@ -47,13 +47,23 @@ func activeProject(ctx context.Context, d *db.DB) (*db.Project, error) {
 // none. Both 'pending' (never attempted) and 'failed_retry' (failed validation
 // but within strike tolerance) are dispatched — 'failed_retry' jobs accumulate
 // strikes until they exceed verbTolerance and escalate.
-func nextPendingJob(ctx context.Context, d *db.DB, projectID int64) (*db.HandoffJob, error) {
+// claimNextJob atomically finds and marks the oldest pending/failed_retry job
+// as 'running'. The UPDATE subquery executes under SQLite's write lock, so two
+// concurrent processes cannot claim the same job: whichever process wins the
+// lock claims the row; the other finds no matching pending row and gets nil.
+func claimNextJob(ctx context.Context, d *db.DB, projectID int64) (*db.HandoffJob, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
 	row := d.QueryRowContext(ctx, `
-		SELECT id, project_id, verb, bead_id, status, created_at, updated_at
-		FROM handoff_jobs
-		WHERE project_id = ? AND status IN ('pending', 'failed_retry')
-		ORDER BY created_at ASC
-		LIMIT 1`, projectID)
+		UPDATE handoff_jobs
+		SET status = 'running', updated_at = ?
+		WHERE id = (
+			SELECT id FROM handoff_jobs
+			WHERE project_id = ? AND status IN ('pending', 'failed_retry')
+			ORDER BY created_at ASC
+			LIMIT 1
+		)
+		RETURNING id, project_id, verb, bead_id, status, created_at, updated_at`,
+		now, projectID)
 
 	j := &db.HandoffJob{}
 	var createdAt, updatedAt string
@@ -62,20 +72,11 @@ func nextPendingJob(ctx context.Context, d *db.DB, projectID int64) (*db.Handoff
 	); err == sql.ErrNoRows {
 		return nil, nil
 	} else if err != nil {
-		return nil, fmt.Errorf("next pending job: %w", err)
+		return nil, fmt.Errorf("claim next job: %w", err)
 	}
 	j.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 	j.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
 	return j, nil
-}
-
-// markJobRunning sets a job to 'running'. Called before the model HTTP call.
-func markJobRunning(ctx context.Context, d *db.DB, jobID int64) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := d.ExecContext(ctx,
-		`UPDATE handoff_jobs SET status = 'running', updated_at = ? WHERE id = ?`,
-		now, jobID)
-	return err
 }
 
 // resetStaleRunning resets jobs stuck in 'running' (from a crashed orchestrator)

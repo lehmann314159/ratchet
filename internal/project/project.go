@@ -1,5 +1,5 @@
 // Package project implements the new-project command: creates a projects row,
-// seeds the validated model fleet, and enqueues the first DECOMPOSE_SPEC job.
+// seeds the validated model fleet, and enqueues the first SURVEY_SPEC job.
 package project
 
 import (
@@ -18,16 +18,17 @@ import (
 // Params holds everything needed to create a new project.
 type Params struct {
 	Label                string
-	FolderPath           string         // must exist; stored as absolute path
-	DesignDocPath        string         // relative to FolderPath; file must exist
-	MonitorOverride      string         // 'honor' | 'ignore' — seed value for DECOMPOSE_SPEC
-	ExecutionBudget      int            // seconds — seed value for DECOMPOSE_SPEC
-	MaxExecutionAttempts int            // cap on execute→adjudicate retries per bead
+	FolderPath           string            // must exist; stored as absolute path
+	DesignDocPath        string            // relative to FolderPath; file must exist
+	MonitorOverride      string            // 'honor' | 'ignore' — seed value for DECOMPOSE_SPEC
+	ExecutionBudget      int               // seconds — seed value for DECOMPOSE_SPEC
+	MaxExecutionAttempts int               // cap on execute→adjudicate retries per bead
 	Fleet                map[string]string // verb→model overrides; nil uses compiled-in defaults
+	Language             string            // project language (default "go")
 }
 
 // Create inserts a projects row, seeds the validated model fleet, and enqueues
-// DECOMPOSE_SPEC. Everything is atomic: either the project is fully initialised
+// SURVEY_SPEC. Everything is atomic: either the project is fully initialised
 // or nothing is written. Returns the new project ID.
 //
 // Preconditions (checked before writing anything):
@@ -42,6 +43,9 @@ func Create(ctx context.Context, d *db.DB, p Params) (int64, error) {
 	}
 	if p.MaxExecutionAttempts <= 0 {
 		return 0, fmt.Errorf("max-attempts must be a positive integer, got %d", p.MaxExecutionAttempts)
+	}
+	if p.Language == "" {
+		p.Language = "go"
 	}
 
 	// Resolve to absolute path so traces and design-doc reads work regardless
@@ -71,11 +75,11 @@ func Create(ctx context.Context, d *db.DB, p Params) (int64, error) {
 		  (label, folder_path, design_doc_path, status,
 		   monitor_override_default, execution_budget_default,
 		   audit_reconcile_round_cap, max_execution_attempts,
-		   created_at, updated_at)
-		VALUES (?, ?, ?, 'active', ?, ?, 2, ?, ?, ?)`,
+		   language, created_at, updated_at)
+		VALUES (?, ?, ?, 'active', ?, ?, 2, ?, ?, ?, ?)`,
 		p.Label, folderAbs, p.DesignDocPath,
 		p.MonitorOverride, p.ExecutionBudget,
-		p.MaxExecutionAttempts, now, now)
+		p.MaxExecutionAttempts, p.Language, now, now)
 	if err != nil {
 		_ = tx.Rollback()
 		return 0, fmt.Errorf("insert project: %w", err)
@@ -95,10 +99,10 @@ func Create(ctx context.Context, d *db.DB, p Params) (int64, error) {
 
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
-		VALUES (?, 'DECOMPOSE_SPEC', NULL, 'pending', ?, ?)`,
-		projectID, now, now); err != nil {
+		VALUES (?, ?, NULL, 'pending', ?, ?)`,
+		projectID, db.VerbSurveySpec, now, now); err != nil {
 		_ = tx.Rollback()
-		return 0, fmt.Errorf("enqueue DECOMPOSE_SPEC: %w", err)
+		return 0, fmt.Errorf("enqueue %s: %w", db.VerbSurveySpec, err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -119,6 +123,7 @@ func RunNewProjectMain(args []string) {
 	budget := flags.Int("budget", 900, "seed value for execution_budget on each Bead, in seconds")
 	maxAttempts := flags.Int("max-attempts", 5, "maximum execute→adjudicate retries per Bead before escalation")
 	fleetFile := flags.String("fleet", "", "path to a JSON file mapping verb names to model names (optional; omit to use compiled-in defaults)")
+	language := flags.String("language", "go", "programming language for this project (default: go)")
 	_ = flags.Parse(args)
 
 	if *label == "" {
@@ -158,6 +163,7 @@ func RunNewProjectMain(args []string) {
 		ExecutionBudget:      *budget,
 		MaxExecutionAttempts: *maxAttempts,
 		Fleet:                fleet,
+		Language:             *language,
 	})
 	if err != nil {
 		slog.Error("new-project: create failed", "error", err)
@@ -170,7 +176,8 @@ func RunNewProjectMain(args []string) {
 	fmt.Printf("  label:      %s\n", *label)
 	fmt.Printf("  folder:     %s\n", folderAbs)
 	fmt.Printf("  design doc: %s\n", filepath.Join(folderAbs, *designDoc))
-	fmt.Printf("  DECOMPOSE_SPEC job enqueued (status: pending)\n")
+	fmt.Printf("  language:   %s\n", *language)
+	fmt.Printf("  SURVEY_SPEC job enqueued (status: pending)\n")
 	fmt.Printf("\nstart the orchestrator:\n")
 	fmt.Printf("  ratchet --db=%s\n", *dbPath)
 }
