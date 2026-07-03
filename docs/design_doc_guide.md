@@ -390,3 +390,4 @@ displayed in a specific way, write the exact format in the protocol contract.
 | Behavioral wiring left implicit | Feature absent at runtime; all tests pass | Write a protocol contract for every cross-bead function call in a handler |
 | Protocol contract covers success only | "No action" branch (AI pass, game over) missing; state machine breaks silently | Contract notes must specify handler obligation for every return variant |
 | HTMX swap target too narrow | Score, turn, game-over outside swap target never update after moves | All dynamic state inside swap target; state this in the data-shape contract notes |
+| Template bead after handler bead | Handler httptest assertions get stub template output; tests fail or produce vacuous passes | Order the template bead before the handler bead; a cycle in this ordering (each bead's tests require the other's real behavior) reveals a boundary problem — merge or narrow test scope |

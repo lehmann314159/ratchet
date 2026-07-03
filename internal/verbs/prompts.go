@@ -88,6 +88,15 @@ Bead is exempt from this cap.
 that code written by other non-layout Beads already exists. The only permitted sequential
 dependency is on the layout Bead.
 
+**Behavioral dependency ordering:** Stub files ensure every package compiles before any Bead
+runs. But test passage depends on real implementations, not stubs. If Bead A's exit criteria
+exercise behavior that Bead B implements (e.g., a handler test that asserts rendered HTML
+requires real template output), Bead B must precede Bead A. The most common case: a template
+Bead must run before the handler Bead whose httptest checks depend on real rendering. If
+behavioral dependency ordering would produce a cycle — A's tests require B's real behavior
+and B's tests require A's real behavior — the decomposition is wrong: either merge the Beads
+or scope one Bead's tests to exercise only its own behavior against stubs.
+
 **Paired behaviors and integration Beads:** Before finalizing your decomposition, scan the
 design document for paired behaviors — functions whose correctness is defined jointly rather
 than independently. The signal is any of: (a) one function's output is the direct input of
