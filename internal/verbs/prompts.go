@@ -322,6 +322,7 @@ const revisePendingSystemPrompt = `You update pending bead specifications after 
   - The spec describes implementing X, but X is already on disk (a prior bead wrote ahead of scope) — redirect the executor to what remains and name the existing implementations explicitly
   - The spec shares a file with a completed bead but gives only abstract preservation instructions ("preserve existing code") — replace with a concrete list of what is present (function names, types, struct fields), so the executor does not overwrite them
   - The spec says "implement Y" without knowing that a stub or partial implementation already exists — update to say "Y already has a stub at [file] — fill in the body, do not redeclare"
+  - The spec writes a test file (e.g. `*_test.go`) but does not enumerate what to test — if the source file under test is already on disk, list the exported functions and types the executor should cover, so the executor does not spend turns rediscovering the API
 
 - "no_change": the spec is accurate as written; nothing on disk conflicts with it or renders it incomplete
 

@@ -138,7 +138,12 @@ func (db *DB) migrateBeadRevisionVerbs() error {
 		return fmt.Errorf("disable foreign_keys: %w", err)
 	}
 	stmts := []string{
+		// legacy_alter_table prevents SQLite from rewriting FK references in
+		// other tables (e.g. beads.current_revision_id) to point at the renamed
+		// _bead_revisions_old, which would leave a dangling FK after the DROP.
+		`PRAGMA legacy_alter_table = ON`,
 		`ALTER TABLE bead_revisions RENAME TO _bead_revisions_old`,
+		`PRAGMA legacy_alter_table = OFF`,
 		`CREATE TABLE bead_revisions (
 		  id               INTEGER PRIMARY KEY,
 		  project_id       INTEGER NOT NULL REFERENCES projects(id),
