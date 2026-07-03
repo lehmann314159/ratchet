@@ -182,6 +182,18 @@ func (h *ReconcileDecomposition) Commit(ctx context.Context, tx *sql.Tx, job *db
 
 	switch outcome {
 	case "converged":
+		var pauseAfter bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT pause_after_reconcile FROM projects WHERE id = ?`, job.ProjectID,
+		).Scan(&pauseAfter); err != nil {
+			return fmt.Errorf("load pause_after_reconcile: %w", err)
+		}
+		if pauseAfter {
+			_, err := tx.ExecContext(ctx,
+				`UPDATE projects SET status = 'paused', updated_at = ? WHERE id = ?`,
+				now, job.ProjectID)
+			return err
+		}
 		return enqueueFirstBeadForExecution(ctx, tx, job.ProjectID, now)
 	case "disagreed_continuing":
 		_, err := tx.ExecContext(ctx, `

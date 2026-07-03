@@ -29,6 +29,9 @@ func main() {
 		case "new-project":
 			project.RunNewProjectMain(os.Args[2:])
 			return
+		case "resume-project":
+			project.RunResumeProjectMain(os.Args[2:])
+			return
 		case "start":
 			runStart(os.Args[2:])
 			return

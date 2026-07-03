@@ -25,6 +25,7 @@ type Params struct {
 	MaxExecutionAttempts int               // cap on execute→adjudicate retries per bead
 	Fleet                map[string]string // verb→model overrides; nil uses compiled-in defaults
 	Language             string            // project language (default "go")
+	PauseAfterReconcile  bool              // halt after RECONCILE converges; resume with resume-project
 }
 
 // Create inserts a projects row, seeds the validated model fleet, and enqueues
@@ -70,16 +71,20 @@ func Create(ctx context.Context, d *db.DB, p Params) (int64, error) {
 		return 0, fmt.Errorf("begin tx: %w", err)
 	}
 
+	pauseAfterReconcile := 0
+	if p.PauseAfterReconcile {
+		pauseAfterReconcile = 1
+	}
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO projects
 		  (label, folder_path, design_doc_path, status,
 		   monitor_override_default, execution_budget_default,
 		   audit_reconcile_round_cap, max_execution_attempts,
-		   language, created_at, updated_at)
-		VALUES (?, ?, ?, 'active', ?, ?, 2, ?, ?, ?, ?)`,
+		   language, pause_after_reconcile, created_at, updated_at)
+		VALUES (?, ?, ?, 'active', ?, ?, 2, ?, ?, ?, ?, ?)`,
 		p.Label, folderAbs, p.DesignDocPath,
 		p.MonitorOverride, p.ExecutionBudget,
-		p.MaxExecutionAttempts, p.Language, now, now)
+		p.MaxExecutionAttempts, p.Language, pauseAfterReconcile, now, now)
 	if err != nil {
 		_ = tx.Rollback()
 		return 0, fmt.Errorf("insert project: %w", err)
@@ -124,6 +129,7 @@ func RunNewProjectMain(args []string) {
 	maxAttempts := flags.Int("max-attempts", 5, "maximum execute→adjudicate retries per Bead before escalation")
 	fleetFile := flags.String("fleet", "", "path to a JSON file mapping verb names to model names (optional; omit to use compiled-in defaults)")
 	language := flags.String("language", "go", "programming language for this project (default: go)")
+	pauseAfterReconcile := flags.Bool("pause-after-reconcile", false, "halt after RECONCILE converges instead of starting bead execution; resume with resume-project")
 	_ = flags.Parse(args)
 
 	if *label == "" {
@@ -164,6 +170,7 @@ func RunNewProjectMain(args []string) {
 		MaxExecutionAttempts: *maxAttempts,
 		Fleet:                fleet,
 		Language:             *language,
+		PauseAfterReconcile:  *pauseAfterReconcile,
 	})
 	if err != nil {
 		slog.Error("new-project: create failed", "error", err)
@@ -177,7 +184,10 @@ func RunNewProjectMain(args []string) {
 	fmt.Printf("  folder:     %s\n", folderAbs)
 	fmt.Printf("  design doc: %s\n", filepath.Join(folderAbs, *designDoc))
 	fmt.Printf("  language:   %s\n", *language)
+	if *pauseAfterReconcile {
+		fmt.Printf("  pause:      after RECONCILE (resume with: ratchet resume-project --db=%s --project=%d)\n", *dbPath, projectID)
+	}
 	fmt.Printf("  SURVEY_SPEC job enqueued (status: pending)\n")
 	fmt.Printf("\nstart the orchestrator:\n")
-	fmt.Printf("  ratchet --db=%s\n", *dbPath)
+	fmt.Printf("  ratchet start --db=%s --ollama=... --addr=localhost:7474\n", *dbPath)
 }

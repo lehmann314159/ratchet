@@ -43,13 +43,14 @@ type Project struct {
 	Label                    string
 	FolderPath               string
 	DesignDocPath            string
-	Status                   string // 'active' | 'full_stopped' | 'complete'
+	Status                   string // 'active' | 'full_stopped' | 'complete' | 'paused'
 	RecoveredFromProjectID   sql.NullInt64
 	MonitorOverrideDefault   string // 'honor' | 'ignore'
 	ExecutionBudgetDefault   int
 	AuditReconcileRoundCap   int
 	MaxExecutionAttempts     int
 	Language                 string // 'go' | 'python' | ... (default 'go')
+	PauseAfterReconcile      bool
 	CreatedAt                time.Time
 	UpdatedAt                time.Time
 }

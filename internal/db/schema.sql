@@ -7,13 +7,14 @@ CREATE TABLE IF NOT EXISTS projects (
   label                       TEXT    NOT NULL,
   folder_path                 TEXT    NOT NULL,
   design_doc_path             TEXT    NOT NULL,
-  status                      TEXT    NOT NULL CHECK (status IN ('active', 'full_stopped', 'complete')),
+  status                      TEXT    NOT NULL CHECK (status IN ('active', 'full_stopped', 'complete', 'paused')),
   recovered_from_project_id   INTEGER REFERENCES projects(id),
   monitor_override_default    TEXT    NOT NULL CHECK (monitor_override_default IN ('honor', 'ignore')),
   execution_budget_default    INTEGER NOT NULL,
   audit_reconcile_round_cap   INTEGER NOT NULL DEFAULT 2,
   max_execution_attempts      INTEGER NOT NULL DEFAULT 5,
   language                    TEXT    NOT NULL DEFAULT 'go',
+  pause_after_reconcile       INTEGER NOT NULL DEFAULT 0,
   created_at                  TIMESTAMP NOT NULL,
   updated_at                  TIMESTAMP NOT NULL
 );

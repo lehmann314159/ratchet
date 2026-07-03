@@ -23,6 +23,7 @@ var columnMigrations = []columnMigration{
 	{"projects", "max_execution_attempts", "INTEGER NOT NULL DEFAULT 5"},
 	{"handoff_attempts", "ended_at", "TIMESTAMP"},
 	{"projects", "language", "TEXT NOT NULL DEFAULT 'go'"},
+	{"projects", "pause_after_reconcile", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 //go:embed schema.sql
@@ -118,6 +119,9 @@ func (db *DB) applyTableMigrations() error {
 	if err := db.seedRevisePendingAssignments(); err != nil {
 		return err
 	}
+	if err := db.migrateProjectsStatus(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -186,6 +190,65 @@ func (db *DB) seedRevisePendingAssignments() error {
 		  )`)
 	if err != nil {
 		return fmt.Errorf("seed REVISE_PENDING assignments: %w", err)
+	}
+	return nil
+}
+
+// migrateProjectsStatus updates the projects table's status CHECK constraint to
+// include 'paused'. columnMigrations has already added pause_after_reconcile by
+// the time this runs, so the INSERT from the old table can name that column.
+func (db *DB) migrateProjectsStatus() error {
+	var createSQL string
+	if err := db.QueryRow(
+		`SELECT COALESCE(sql, '') FROM sqlite_master WHERE type='table' AND name='projects'`,
+	).Scan(&createSQL); err != nil {
+		return fmt.Errorf("query projects schema: %w", err)
+	}
+	if strings.Contains(createSQL, "'paused'") {
+		return nil
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		return fmt.Errorf("disable foreign_keys: %w", err)
+	}
+	stmts := []string{
+		`PRAGMA legacy_alter_table = ON`,
+		`ALTER TABLE projects RENAME TO _projects_old`,
+		`PRAGMA legacy_alter_table = OFF`,
+		`CREATE TABLE projects (
+		  id                          INTEGER PRIMARY KEY,
+		  label                       TEXT    NOT NULL,
+		  folder_path                 TEXT    NOT NULL,
+		  design_doc_path             TEXT    NOT NULL,
+		  status                      TEXT    NOT NULL CHECK (status IN ('active', 'full_stopped', 'complete', 'paused')),
+		  recovered_from_project_id   INTEGER REFERENCES projects(id),
+		  monitor_override_default    TEXT    NOT NULL CHECK (monitor_override_default IN ('honor', 'ignore')),
+		  execution_budget_default    INTEGER NOT NULL,
+		  audit_reconcile_round_cap   INTEGER NOT NULL DEFAULT 2,
+		  max_execution_attempts      INTEGER NOT NULL DEFAULT 5,
+		  language                    TEXT    NOT NULL DEFAULT 'go',
+		  pause_after_reconcile       INTEGER NOT NULL DEFAULT 0,
+		  created_at                  TIMESTAMP NOT NULL,
+		  updated_at                  TIMESTAMP NOT NULL
+		)`,
+		`INSERT INTO projects
+		  (id, label, folder_path, design_doc_path, status, recovered_from_project_id,
+		   monitor_override_default, execution_budget_default, audit_reconcile_round_cap,
+		   max_execution_attempts, language, pause_after_reconcile, created_at, updated_at)
+		SELECT
+		  id, label, folder_path, design_doc_path, status, recovered_from_project_id,
+		  monitor_override_default, execution_budget_default, audit_reconcile_round_cap,
+		  max_execution_attempts, language, pause_after_reconcile, created_at, updated_at
+		FROM _projects_old`,
+		`DROP TABLE _projects_old`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			_, _ = db.Exec(`PRAGMA foreign_keys = ON`)
+			return fmt.Errorf("migrate projects status (%s): %w", truncate(stmt, 40), err)
+		}
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		return fmt.Errorf("re-enable foreign_keys: %w", err)
 	}
 	return nil
 }

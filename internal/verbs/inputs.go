@@ -33,7 +33,7 @@ func loadProject(ctx context.Context, d *db.DB, projectID int64) (*db.Project, e
 		       recovered_from_project_id,
 		       monitor_override_default, execution_budget_default,
 		       audit_reconcile_round_cap, max_execution_attempts,
-		       language, created_at, updated_at
+		       language, pause_after_reconcile, created_at, updated_at
 		FROM projects WHERE id = ?`, projectID)
 	p := &db.Project{}
 	var createdAt, updatedAt string
@@ -42,7 +42,7 @@ func loadProject(ctx context.Context, d *db.DB, projectID int64) (*db.Project, e
 		&p.RecoveredFromProjectID,
 		&p.MonitorOverrideDefault, &p.ExecutionBudgetDefault,
 		&p.AuditReconcileRoundCap, &p.MaxExecutionAttempts,
-		&p.Language, &createdAt, &updatedAt,
+		&p.Language, &p.PauseAfterReconcile, &createdAt, &updatedAt,
 	); err != nil {
 		return nil, fmt.Errorf("load project %d: %w", projectID, err)
 	}
