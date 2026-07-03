@@ -215,6 +215,13 @@ func goFixBeadSpec(bead *ParsedBead) bool {
 
 	// Bead owns .go files: add the derived test file instead of downgrading.
 	bead.OutputFiles = append(bead.OutputFiles, deriveTestFileName(bead.ExitCriteria, goFiles))
+	// Run guard pass now that the test file is in output_files.
+	for i, c := range bead.ExitCriteria {
+		if guarded, ok := addGrepGuard(c, bead.OutputFiles); ok {
+			bead.ExitCriteria[i] = guarded
+			fixed = true
+		}
+	}
 	return true
 }
 

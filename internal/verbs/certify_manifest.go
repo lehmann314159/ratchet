@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ratchet/internal/db"
+	"ratchet/internal/guidance"
 	"ratchet/internal/ollama"
 )
 
@@ -53,7 +54,7 @@ func (h *CertifyManifest) Run(ctx context.Context, d *db.DB, oc *ollama.Client, 
 	userMsg := buildCertifyUserMsg(verify, preliminary, manifest)
 
 	raw, err := oc.Chat(ctx, model, []ollama.Message{
-		{Role: "system", Content: certifyManifestSystemPrompt()},
+		{Role: "system", Content: guidance.Inject(certifyManifestSystemPrompt(), h.folderPath)},
 		{Role: "user", Content: userMsg},
 	}, nil)
 	if err != nil {

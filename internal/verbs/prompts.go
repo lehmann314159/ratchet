@@ -32,9 +32,11 @@ func certifyManifestSystemPrompt() string {
 
 Checks performed:
 1. file_presence: every source file listed in the manifest exists on disk
-2. no_behavioral_tests: no *_test.go files other than api_check_test.go are present
-3. compile: go test -c -o /dev/null ./... exits 0 (imports, types, and stub signatures are valid)
-4. api_check: api_check_test.go was generated with at least one exported symbol assertion
+2. no_behavioral_tests: no test files beyond the generated API check file are present
+3. compile: the stub project compiles — imports, types, and stub signatures are valid
+4. api_check: the generated API assertion file contains at least one exported symbol assertion
+
+See the language-specific guidance below for the exact commands and file conventions for checks 2–4.
 
 The mechanical layer has computed a preliminary decision: all four checks pass → approve; any failure → reject.
 
@@ -47,7 +49,7 @@ Your role:
    Override to reject if you find a clear structural defect that the mechanical checks cannot catch.
 3. If rejecting, write specific, actionable feedback for SURVEY. Name the file and what to change:
    Bad:  "The manifest has issues."
-   Good: "game.go declares PlaceStone returning error, but the design doc specifies it returns ([]Point, error) — the flip list must be part of the return type."
+   Good: "store.go declares Save returning error, but the design doc specifies it returns (int64, error) — the inserted row ID must be part of the return type."
 
 Respond with JSON only, no prose before or after:
 {
@@ -142,50 +144,10 @@ For every Bead you issue you must set:
   a non-independence violation. Be precise — list only files this Bead actually writes.
 - exit_criteria: a non-empty list of concrete, runnable checks that define when this Bead is done.
   Each entry must be a bare shell command — no prose, no expected-outcome description, no "should",
-  "must", "will", or explanatory clauses. Write ` + "`go test ./...`" + ` not ` + "`go test ./... should pass`" + `.
-  (The ` + "`go test ./...`" + ` form is correct for all non-layout Beads. The layout Bead uses a different
-  form — see the Layout Bead section above.)
+  "must", "will", or explanatory clauses. Write ` + "`make test`" + ` not ` + "`make test should pass`" + `.
   Vague statements ("review the code", "ensure correctness") are not acceptable. If you cannot write
   a runnable exit criterion for a Bead, that is a signal the Bead is scoped too narrowly to be
   independently verifiable — merge it with a related Bead that produces a testable artifact.
-
-  HTTP handler Beads require a runtime smoke test, not a build check. If a Bead's output_files
-  include files that register HTTP routes (e.g. handlers.go, routes.go, server.go), ` + "`go build ./...`" + `
-  is not a sufficient exit criterion — build success cannot catch template render errors, missing
-  FuncMap entries, or incorrect HTML structure. The exit criterion must be a ` + "`go test`" + ` invocation
-  whose test function uses ` + "`net/http/httptest.NewServer`" + ` to start the handler on a randomly
-  assigned free port, makes HTTP requests against it, and asserts structural properties of the
-  responses (e.g. expected element count, status code, required HTML attributes). Do not use a
-  fixed port (e.g. :8080) in the exit criterion — the execution environment may already have a
-  process bound to that port, causing the check to silently verify the wrong server.
-
-  Template and UI Beads that the design doc describes as having visual styling (colors, layout,
-  shaped elements) must include a grep check in the exit criterion verifying that CSS is present
-  in the output file. A go test exit criterion cannot detect a missing ` + "`<style>`" + ` block or absent
-  CSS rules. Add ` + "`grep -q '<style>' <output_file>`" + ` as the first criterion so an executor that
-  skips styling fails immediately rather than passing on structure alone.
-
-  Go testing conventions: always use the package invocation form — ` + "`go test -run TestFoo .`" + `
-  or ` + "`go test ./...`" + ` — never the file-based form ` + "`go test ./game_test.go -run TestFoo`" + `.
-  File-based invocations compile that file in isolation as command-line-arguments and cannot see
-  symbols from any other file in the package, producing undefined errors for every package-level
-  name. When a Bead writes to a *_test.go file, the full_text must explicitly name the test
-  functions to write (e.g. "Write TestFindFlips and TestValidMoves to game_test.go"). An executor
-  that writes the implementation without the test functions will see ` + "`go test -run TestFoo .`" + `
-  exit 0 with "no tests to run" and may not realize the test functions are still missing.
-
-  The -run flag takes a Go regex, not a space-separated list. To match multiple test functions
-  use the regex OR operator: ` + "`go test -run 'TestFoo|TestBar' .`" + `. Do NOT write
-  ` + "`go test -run 'TestFoo TestBar' .`" + ` — a space matches nothing and the run silently
-  selects zero tests.
-
-  Vacuous-pass guard: when a Bead's output_files include a *_test.go file and the exit criterion
-  uses ` + "`go test -run TestFoo`" + `, prefix it with a grep check so the criterion fails hard
-  when the test function has not been written yet:
-    ` + "`grep -q 'func TestFoo' foo_test.go && go test -run TestFoo .`" + `
-  Without the guard, an executor that writes only the implementation (not the test) will see
-  ` + "`go test -run TestFoo .`" + ` exit 0 with "no tests to run" and may stall for the full
-  budget believing the work is already done. Always include the filename in the grep invocation.
 
 Surface ambiguities in the design doc explicitly in the ambiguities field. Do not silently resolve them.
 
@@ -291,9 +253,9 @@ func reconcileDecompositionSystemPrompt(lang string) string {
 	goSection := ""
 	if lang == "go" {
 		goSection = "When the corrected Bead owns a *_test.go file, the updated full_text must explicitly name the\n" +
-			"test functions to write (e.g. \"Write TestFindFlips and TestValidMoves to game_test.go\"). An\n" +
+			"test functions to write (e.g. \"Write TestEncode and TestDecode to codec_test.go\"). An\n" +
 			"executor that writes the implementation without the test functions will see " +
-			"`go test -run TestFoo .`" +
+			"`go test -run TestEncode .`" +
 			"\nexit 0 with \"no tests to run\" and may not realize the test functions are still missing.\n\n"
 	}
 	return `You receive a specific critique of a decomposition you authored. For each finding, respond with one of:
@@ -450,7 +412,7 @@ Make no other changes to the spec — the content is not the problem.
 
 Compile error in previously-written file (repair guidance): when the mechanical findings
 include a compile error in a file that was written in a prior attempt (e.g.,
-"game_test.go:240: missing ','") and you are providing a verbatim fix in the revised
+"logic_test.go:42: missing ','") and you are providing a verbatim fix in the revised
 full_text, do NOT prepend "Begin writing to output_files immediately." That instruction
 causes the agent to skip reading the file and regenerate it from memory, risking new
 corruption. Instead, prepend: "Before rewriting <filename>, call read_file on <filename>
@@ -502,18 +464,12 @@ declare_success — no verification occurred. Does not apply to build-only beads
 apply when a "[Structural note: Type B vacuous pass]" appears in the mechanical findings —
 that note means the test file is outside this bead's output_files scope; follow the note's
 guidance and evaluate the non-test output files instead.
-When issuing execute_revised for a vacuous pass, the exit criterion itself needs a guard: update
-it to fail hard when the test function has not been written rather than silently exiting 0
-(e.g. ` + "`grep -q 'func TestFoo' foo_test.go && go test -run TestFoo .`" + `).
-The grep guard MUST include the filename as the last argument — ` + "`grep -q 'func TestFoo' foo_test.go`" + `.
-Never write ` + "`grep -q 'func TestFoo'`" + ` without a filename: grep then reads stdin, which is
-empty in a subprocess shell, so it always exits 1 and blocks the entire criterion from running.
-When guarding multiple test functions, use the regex OR form in the go test command:
-` + "`grep -q 'func TestFoo' f_test.go && grep -q 'func TestBar' f_test.go && go test -run 'TestFoo|TestBar' .`" + `
+When issuing execute_revised for a vacuous pass, update the exit criterion to fail hard when
+the test function has not been written rather than silently exiting 0.
 
 Workspace repair: if the trace shows writes to files outside output_files, name those files
-explicitly in the revised spec with a cleanup instruction (overwrite with package declaration
-only) — the execute model will not discover stray files on its own.
+explicitly in the revised spec with a cleanup instruction — the execute model will not discover
+stray files on its own.
 
 Respond with JSON only, no prose before or after:
 {
