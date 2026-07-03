@@ -57,12 +57,12 @@ func dispatch(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[str
 			job.ProjectID, job.Verb,
 		).Scan(&model); err != nil {
 			slog.Error("warmup: model lookup failed, will retry", "verb", job.Verb, "job_id", job.ID, "error", err)
-			_, _ = d.ExecContext(ctx, `UPDATE handoff_jobs SET status = 'pending' WHERE id = ?`, job.ID)
+			_, _ = d.ExecContext(ctx, `UPDATE handoff_jobs SET status = 'pending' WHERE id = ? AND status = 'running'`, job.ID)
 			return err
 		}
 		if err := oc.Warmup(ctx, model); err != nil {
 			slog.Error("ollama warmup failed, will retry", "verb", job.Verb, "job_id", job.ID, "model", model, "error", err)
-			_, _ = d.ExecContext(ctx, `UPDATE handoff_jobs SET status = 'pending' WHERE id = ?`, job.ID)
+			_, _ = d.ExecContext(ctx, `UPDATE handoff_jobs SET status = 'pending' WHERE id = ? AND status = 'running'`, job.ID)
 			return err
 		}
 		slog.Info("ollama warmup ok", "verb", job.Verb, "job_id", job.ID, "model", model)
@@ -74,9 +74,8 @@ func dispatch(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[str
 	if runErr != nil {
 		slog.Error("verb Run failed (infrastructure error, will retry)",
 			"verb", job.Verb, "job_id", job.ID, "error", runErr)
-		// Reset to pending so the next poll retries it.
 		_, _ = d.ExecContext(ctx,
-			`UPDATE handoff_jobs SET status = 'pending' WHERE id = ?`, job.ID)
+			`UPDATE handoff_jobs SET status = 'pending' WHERE id = ? AND status = 'running'`, job.ID)
 		return runErr
 	}
 

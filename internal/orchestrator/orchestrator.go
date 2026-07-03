@@ -13,7 +13,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"ratchet/internal/db"
@@ -26,6 +28,13 @@ const pollInterval = 2 * time.Second
 // Run drives the orchestrator loop until ctx is cancelled.
 func Run(ctx context.Context, d *db.DB, oc *ollama.Client) error {
 	handlers := verbs.All(oc.BaseURL)
+
+	owner := fmt.Sprintf("pid-%d", os.Getpid())
+	if err := acquireLock(ctx, d, owner); err != nil {
+		return err
+	}
+	go runHeartbeat(ctx, d, owner)
+	defer releaseLock(context.Background(), d, owner)
 
 	// Reset any jobs left in 'running' from a previous crash.
 	if err := resetStaleRunning(ctx, d); err != nil {

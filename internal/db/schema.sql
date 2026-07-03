@@ -175,6 +175,17 @@ CREATE TABLE IF NOT EXISTS certifications (
   created_at            TIMESTAMP NOT NULL
 );
 
+-- Single-row advisory lock that prevents two orchestrator instances from running
+-- against the same database simultaneously. The CHECK ensures only one row exists.
+-- A stale heartbeat (older than lockStaleAfter in orchestrator) allows a new
+-- instance to steal the lock from a crashed predecessor.
+CREATE TABLE IF NOT EXISTS orchestrator_lock (
+  id           INTEGER PRIMARY KEY CHECK (id = 1),
+  owner        TEXT      NOT NULL,
+  acquired_at  TIMESTAMP NOT NULL,
+  heartbeat_at TIMESTAMP NOT NULL
+);
+
 -- Indexes for the orchestrator's primary query (oldest pending job per project).
 CREATE INDEX IF NOT EXISTS idx_handoff_jobs_pending
   ON handoff_jobs (project_id, status, created_at);
