@@ -265,7 +265,7 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 	}
 	userMsg := buildAdjudicateUserMsg(currentBead, revLog, findings, compressedHistory, diffSignal)
 	return oc.Chat(ctx, model, []ollama.Message{
-		{Role: "system", Content: guidance.Inject(adjudicateNextExecutionSystemPrompt, project.FolderPath)},
+		{Role: "system", Content: guidance.InjectForVerbPath(adjudicateNextExecutionSystemPrompt, project.FolderPath, db.VerbAdjudicateNextExecution, "")},
 		{Role: "user", Content: userMsg},
 	}, nil)
 }

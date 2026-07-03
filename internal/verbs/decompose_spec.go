@@ -46,7 +46,7 @@ func (h *DecomposeSpec) Run(ctx context.Context, d *db.DB, oc *ollama.Client, jo
 
 	userMsg := buildDecomposeUserMsg(doc, string(surveyDoc))
 	return oc.Chat(ctx, model, []ollama.Message{
-		{Role: "system", Content: guidance.Inject(decomposeSpecSystemPrompt(), project.FolderPath)},
+		{Role: "system", Content: guidance.InjectForVerbPath(decomposeSpecSystemPrompt(), project.FolderPath, db.VerbDecomposeSpec, "")},
 		{Role: "user", Content: userMsg},
 	}, nil)
 }

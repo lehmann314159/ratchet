@@ -56,7 +56,7 @@ func (h *RevisePending) Run(ctx context.Context, d *db.DB, oc *ollama.Client, jo
 
 	userMsg := buildRevisePendingUserMsg(triggerBead, fileContents, pendingBeads)
 	return oc.Chat(ctx, model, []ollama.Message{
-		{Role: "system", Content: guidance.Inject(revisePendingSystemPrompt, project.FolderPath)},
+		{Role: "system", Content: guidance.InjectForVerbPath(revisePendingSystemPrompt, project.FolderPath, db.VerbRevisePending, "")},
 		{Role: "user", Content: userMsg},
 	}, nil)
 }

@@ -11,24 +11,23 @@ package guidance
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
-// Inject appends language-specific guidance to a system prompt and returns the
-// result. If no language can be detected from folderPath, or the guidance file
-// is missing, the prompt is returned unchanged.
-func Inject(systemPrompt, folderPath string) string {
-	g := load(folderPath)
-	if g == "" {
-		return systemPrompt
-	}
-	return systemPrompt + "\n\n## Language-Specific Guidance\n\n" + g
+// InjectForVerbPath appends verb-specific language guidance to a system prompt.
+// It detects the language from folderPath, then loads go-<verb-slug>.md (e.g.
+// go-execute-bead.md for EXECUTE_BEAD). If the file is absent or no language
+// is detected, the prompt is returned unchanged. guidanceDir overrides the
+// default directory (exe-dir/guidance/); pass "" to use the default.
+func InjectForVerbPath(systemPrompt, folderPath, verb, guidanceDir string) string {
+	lang := Detect(folderPath)
+	return InjectForVerb(systemPrompt, lang, verb, guidanceDir)
 }
 
-// InjectForVerb appends verb-specific and language-specific guidance to a
-// system prompt. For SURVEY_SPEC it loads <language>-survey.md; for all other
-// verbs it loads <language>.md. Falls back to the base language file when the
-// verb-specific file is absent. guidanceDir overrides the default directory
-// (exe-dir/guidance/); pass "" to use the default.
+// InjectForVerb appends verb-specific language guidance to a system prompt.
+// It loads <language>-<verb-slug>.md (e.g. go-survey-spec.md for SURVEY_SPEC).
+// If the file is absent, the prompt is returned unchanged. guidanceDir overrides
+// the default directory (exe-dir/guidance/); pass "" to use the default.
 func InjectForVerb(systemPrompt, language, verb, guidanceDir string) string {
 	if language == "" {
 		return systemPrompt
@@ -38,18 +37,6 @@ func InjectForVerb(systemPrompt, language, verb, guidanceDir string) string {
 		return systemPrompt
 	}
 	return systemPrompt + "\n\n## Language-Specific Guidance\n\n" + g
-}
-
-func load(folderPath string) string {
-	lang := Detect(folderPath)
-	if lang == "" {
-		return ""
-	}
-	content, err := os.ReadFile(guidanceFilePath(lang))
-	if err != nil {
-		return ""
-	}
-	return string(content)
 }
 
 func loadForVerb(language, verb, guidanceDir string) string {
@@ -62,30 +49,12 @@ func loadForVerb(language, verb, guidanceDir string) string {
 		dir = filepath.Join(filepath.Dir(exe), "guidance")
 	}
 
-	// For SURVEY_SPEC, try the verb-specific file first (e.g. go-survey.md).
-	if verb == "SURVEY_SPEC" {
-		verbFile := filepath.Join(dir, language+"-survey.md")
-		if data, err := os.ReadFile(verbFile); err == nil {
-			return string(data)
-		}
-	}
-
-	// Fall back to the base language file (e.g. go.md).
-	data, err := os.ReadFile(filepath.Join(dir, language+".md"))
+	verbSlug := strings.ToLower(strings.ReplaceAll(verb, "_", "-"))
+	data, err := os.ReadFile(filepath.Join(dir, language+"-"+verbSlug+".md"))
 	if err != nil {
 		return ""
 	}
 	return string(data)
-}
-
-// guidanceFilePath returns the path to the guidance file for the given language.
-// Files live in a "guidance/" directory alongside the running binary.
-func guidanceFilePath(lang string) string {
-	exe, err := os.Executable()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(filepath.Dir(exe), "guidance", lang+".md")
 }
 
 // Detect returns the programming language detected from folderPath by inspecting

@@ -125,7 +125,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	oc := ollama.NewUnbounded(ollamaURL)
 	tools := toolDefinitions()
 	messages := []ollama.Message{
-		{Role: "system", Content: guidance.Inject(executeBeadSystemPrompt, folderPath)},
+		{Role: "system", Content: guidance.InjectForVerbPath(executeBeadSystemPrompt, folderPath, db.VerbExecuteBead, "")},
 		{Role: "user", Content: buildBeadUserMsg(parsedBead.FullText, parsedBead.OutputFiles, parsedBead.ExitCriteria)},
 	}
 

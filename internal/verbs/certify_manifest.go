@@ -54,7 +54,7 @@ func (h *CertifyManifest) Run(ctx context.Context, d *db.DB, oc *ollama.Client, 
 	userMsg := buildCertifyUserMsg(verify, preliminary, manifest)
 
 	raw, err := oc.Chat(ctx, model, []ollama.Message{
-		{Role: "system", Content: guidance.Inject(certifyManifestSystemPrompt(), h.folderPath)},
+		{Role: "system", Content: guidance.InjectForVerbPath(certifyManifestSystemPrompt(), h.folderPath, db.VerbCertifyManifest, "")},
 		{Role: "user", Content: userMsg},
 	}, nil)
 	if err != nil {
