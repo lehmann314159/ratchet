@@ -39,7 +39,7 @@ type DB struct {
 // WAL mode and foreign-key enforcement are enabled on each connection via
 // the DSN pragma parameters.
 func Open(path string) (*DB, error) {
-	dsn := "file:" + path + "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
+	dsn := "file:" + path + "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)"
 	raw, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
