@@ -304,6 +304,70 @@ func (s *server) handleResumeProject(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+// --- Remove Project ---
+
+func (s *server) handleRemoveProject(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid project id", http.StatusBadRequest)
+		return
+	}
+	ctx := r.Context()
+
+	// Guard: only full_stopped projects may be removed.
+	var status string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT status FROM projects WHERE id = ?`, id,
+	).Scan(&status); err != nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	if status != "full_stopped" {
+		http.Error(w, "only full_stopped projects can be removed", http.StatusBadRequest)
+		return
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("begin tx: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Delete in topological order to satisfy FK constraints.
+	// beads ↔ bead_revisions have a circular FK; break it with a NULL-out first.
+	steps := []string{
+		`DELETE FROM certifications   WHERE project_id = ?`,
+		`DELETE FROM verify_attempts  WHERE project_id = ?`,
+		`DELETE FROM handoff_attempts WHERE job_id IN (SELECT id FROM handoff_jobs WHERE project_id = ?)`,
+		`DELETE FROM analyses         WHERE project_id = ?`,
+		`DELETE FROM adjudications    WHERE project_id = ?`,
+		`DELETE FROM executions       WHERE project_id = ?`,
+		`DELETE FROM spec_revisions   WHERE project_id = ?`,
+		`DELETE FROM compressed_history WHERE project_id = ?`,
+		`DELETE FROM handoff_jobs     WHERE project_id = ?`,
+		`DELETE FROM audit_reconcile_rounds WHERE project_id = ?`,
+		`DELETE FROM verb_model_assignments WHERE project_id = ?`,
+		`UPDATE beads SET current_revision_id = NULL WHERE project_id = ?`,
+		`DELETE FROM bead_revisions   WHERE project_id = ?`,
+		`DELETE FROM beads            WHERE project_id = ?`,
+		`UPDATE projects SET recovered_from_project_id = NULL WHERE recovered_from_project_id = ?`,
+		`DELETE FROM projects         WHERE id = ?`,
+	}
+	for _, q := range steps {
+		if _, err := tx.ExecContext(ctx, q, id); err != nil {
+			_ = tx.Rollback()
+			http.Error(w, fmt.Sprintf("remove project: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		http.Error(w, fmt.Sprintf("commit: %v", err), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
 // --- Bead detail ---
 
 func (s *server) handleBeadDetail(w http.ResponseWriter, r *http.Request) {
