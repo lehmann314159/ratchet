@@ -36,6 +36,10 @@ Process:
    test cases, or other declarations that were present before you started.
    Do not regenerate prior-bead sections from memory — copy them verbatim from
    the file you just read.
+   For any file likely to exceed ~150 lines, prefer two write_file calls over one:
+   first write the complete file with all type definitions and stub function bodies
+   (returning zero values), then overwrite with the full implementations. This ensures
+   partial progress survives if the bead runs out of time before the second write.
 3. Implement exactly what the Bead specification asks for — nothing more, nothing less.
 4. Verify your work by running each item in the Exit Criteria. These are your done condition.
    Run ONLY the commands listed in the Exit Criteria — do not run broader checks.
@@ -72,6 +76,14 @@ is still in preparation phase — do not fire.
 Exception: if the trace shows more than 10 [TURN N] markers and still no write_file
 call has appeared, orientation has run unusually long — apply the standard recurrence
 check from that point.
+
+Explicit loop patterns — FIRE immediately on either of these regardless of other conditions:
+1. Same run_command output twice with no intervening write_file: if the same command
+   produces identical stdout/stderr on two or more calls with no write_file between them,
+   the agent is in a pure loop and cannot self-correct without intervention.
+2. Repeated write_file missing-path error: if the text "write_file requires a 'path'
+   argument" appears two or more times in the trace, the agent has failed to self-correct
+   a mechanical error and will not do so without intervention.
 
 Respond with exactly two lines:
 DECISION: FIRE | NO_FIRE
