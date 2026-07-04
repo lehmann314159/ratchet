@@ -230,6 +230,19 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 	}
 	defer resp.Body.Close()
 
+	// Close the response body immediately when ctx is cancelled. This interrupts
+	// any blocking dec.Decode() call without waiting for the transport's async
+	// cancellation path to drain the kernel TCP receive buffer first.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			resp.Body.Close()
+		case <-done:
+		}
+	}()
+
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		return Message{}, fmt.Errorf("ollama %d: %s", resp.StatusCode, truncate(string(raw), 200))
