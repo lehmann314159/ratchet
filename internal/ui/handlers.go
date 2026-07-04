@@ -322,8 +322,8 @@ func (s *server) handleRemoveProject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "project not found", http.StatusNotFound)
 		return
 	}
-	if status != "full_stopped" {
-		http.Error(w, "only full_stopped projects can be removed", http.StatusBadRequest)
+	if status != "full_stopped" && status != "complete" {
+		http.Error(w, "only full_stopped or complete projects can be removed", http.StatusBadRequest)
 		return
 	}
 
