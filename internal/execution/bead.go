@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -68,9 +70,10 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	var beadFullTextJSON string
 	var model string
 	var folderPath string
+	var beadID int64
 
 	if err := d.QueryRowContext(ctx, `
-		SELECT e.trace_path, br.execution_budget, br.full_text, vma.model, p.folder_path
+		SELECT e.trace_path, br.execution_budget, br.full_text, vma.model, p.folder_path, e.bead_id
 		FROM executions e
 		JOIN bead_revisions br ON br.id = e.bead_revision_id
 		JOIN beads b ON b.id = e.bead_id
@@ -78,7 +81,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 		JOIN verb_model_assignments vma
 		  ON vma.project_id = e.project_id AND vma.verb = 'EXECUTE_BEAD'
 		WHERE e.id = ?`, execID,
-	).Scan(&tracePath, &budget, &beadFullTextJSON, &model, &folderPath); err != nil {
+	).Scan(&tracePath, &budget, &beadFullTextJSON, &model, &folderPath, &beadID); err != nil {
 		return fmt.Errorf("load execution %d: %w", execID, err)
 	}
 
@@ -122,11 +125,14 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 
 	slog.Info("execute-bead started", "execution_id", execID, "model", model, "budget_s", budget)
 
+	contextFiles := loadContextFiles(folderPath, parsedBead.OutputFiles)
+	priorHistory := loadPriorAttemptSummary(ctx, d, beadID)
+
 	oc := ollama.NewUnbounded(ollamaURL)
 	tools := toolDefinitions()
 	messages := []ollama.Message{
 		{Role: "system", Content: guidance.InjectForVerbPath(executeBeadSystemPrompt, folderPath, db.VerbExecuteBead, "")},
-		{Role: "user", Content: buildBeadUserMsg(parsedBead.FullText, parsedBead.OutputFiles, parsedBead.ExitCriteria)},
+		{Role: "user", Content: buildBeadUserMsg(parsedBead.FullText, parsedBead.OutputFiles, parsedBead.ExitCriteria, contextFiles, priorHistory)},
 	}
 
 	for turn := 1; ; turn++ {
@@ -252,7 +258,9 @@ func stubLine(mode string, step int) string {
 // Output files are presented as a hard write constraint before the spec so the
 // agent sees them before reading implementation details. Exit criteria are a
 // numbered checklist so the agent has an unambiguous done condition.
-func buildBeadUserMsg(specText string, outputFiles []string, exitCriteria []string) string {
+// contextFiles and priorHistory are injected after the task so the model has
+// all necessary context without spending turns on orientation reads.
+func buildBeadUserMsg(specText string, outputFiles []string, exitCriteria []string, contextFiles, priorHistory string) string {
 	var msg string
 
 	if len(outputFiles) > 0 {
@@ -272,7 +280,56 @@ func buildBeadUserMsg(specText string, outputFiles []string, exitCriteria []stri
 		}
 	}
 
+	if priorHistory != "" {
+		msg += "\n\n## Prior Attempt History\n\n" + priorHistory
+	}
+
+	if contextFiles != "" {
+		msg += "\n\n## Current Project Files\n\nThe following files currently exist in the project. Use them as context — do not re-read them with read_file unless you need to verify your own writes.\n\n" + contextFiles
+	}
+
 	return msg
+}
+
+// loadContextFiles reads all Go source files and go.mod from folderPath
+// (non-recursive) and returns them formatted for prompt injection.
+// Files listed in outputFiles are included — the model needs to see their
+// current state (stubs on attempt 1, partial work on retries).
+func loadContextFiles(folderPath string, _ []string) string {
+	entries, err := os.ReadDir(folderPath)
+	if err != nil {
+		return ""
+	}
+
+	var sb strings.Builder
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, ".go") && name != "go.mod" && name != "go.sum" {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(folderPath, name))
+		if err != nil {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("### %s\n\n```\n%s\n```\n\n", name, string(content)))
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+// loadPriorAttemptSummary returns the compressed_history text for beadID,
+// or "" if none exists yet (first attempt).
+func loadPriorAttemptSummary(ctx context.Context, d *db.DB, beadID int64) string {
+	var text string
+	err := d.QueryRowContext(ctx,
+		`SELECT compressed_text FROM compressed_history WHERE bead_id = ?`, beadID,
+	).Scan(&text)
+	if err != nil {
+		return ""
+	}
+	return text
 }
 
 func writeLine(f *os.File, line string) {
