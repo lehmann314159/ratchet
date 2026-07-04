@@ -33,7 +33,7 @@
       <td class="meta">{{.ID}}</td>
       <td><a href="/beads/{{.ID}}">{{.Title}}</a></td>
       <td><span class="status {{.Status}}">{{.Status}}</span></td>
-      <td class="meta">{{if .Attempts}}{{.Attempts}}{{else}}—{{end}}</td>
+      <td class="meta">{{if .Attempts}}{{.Attempts}}/{{.MaxAttempts}}{{else}}—{{end}}</td>
       <td class="meta">{{if .Budget}}{{if eq .Status "executing"}}{{.ElapsedSeconds}}s / {{.Budget}}s{{else}}{{.Budget}}s{{end}}{{else}}—{{end}}</td>
     </tr>
     {{end}}
@@ -45,21 +45,24 @@
 </div>
 
 <div class="section">
-  <h2>Recent Jobs</h2>
+  <h2>Jobs</h2>
   {{if .Jobs}}
-  <table>
-    <thead><tr><th>Verb</th><th>Bead</th><th>Status</th><th>Updated</th></tr></thead>
+  <div style="max-height:290px;overflow-y:auto;border:1px solid #e5e5e5;border-radius:3px">
+  <table class="sticky-header">
+    <thead><tr><th>Verb</th><th>Bead</th><th>Status</th><th>Elapsed</th><th>Updated</th></tr></thead>
     <tbody>
     {{range .Jobs}}
     <tr>
       <td>{{.Verb}}</td>
       <td>{{if .BeadID.Valid}}{{if .BeadTitle}}{{.BeadTitle}}{{else}}bead-{{.BeadID.Int64}}{{end}}{{else}}<span class="meta">—</span>{{end}}</td>
       <td><span class="status {{.Status}}">{{.Status}}</span></td>
+      <td class="meta">{{if .ElapsedFormatted}}{{.ElapsedFormatted}}{{else}}—{{end}}</td>
       <td class="meta">{{.UpdatedAt}}</td>
     </tr>
     {{end}}
     </tbody>
   </table>
+  </div>
   {{else}}
   <p class="empty">No jobs yet.</p>
   {{end}}

@@ -36,6 +36,12 @@ func Run(ctx context.Context, d *db.DB, oc *ollama.Client) error {
 	go runHeartbeat(ctx, d, owner)
 	defer releaseLock(context.Background(), d, owner)
 
+	// Recover executions orphaned by a previous crash before resetting jobs,
+	// so their EXECUTE_BEAD jobs are marked pending (not failed_retry).
+	if err := recoverOrphanedExecutions(ctx, d); err != nil {
+		return err
+	}
+
 	// Reset any jobs left in 'running' from a previous crash.
 	if err := resetStaleRunning(ctx, d); err != nil {
 		return err

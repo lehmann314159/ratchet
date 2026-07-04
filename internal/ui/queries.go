@@ -23,17 +23,19 @@ type BeadRow struct {
 	Status         string
 	Title          string
 	Attempts       int
+	MaxAttempts    int
 	Budget         int    // execution_budget from current revision
 	ElapsedSeconds int    // seconds since execution started; 0 if not executing
 }
 
 type JobRow struct {
-	ID        int64
-	Verb      string
-	BeadID    sql.NullInt64
-	BeadTitle string
-	Status    string
-	UpdatedAt string
+	ID              int64
+	Verb            string
+	BeadID          sql.NullInt64
+	BeadTitle       string
+	Status          string
+	UpdatedAt       string
+	ElapsedFormatted string
 }
 
 type EscalatedRow struct {
@@ -87,7 +89,8 @@ func queryBeads(ctx context.Context, d *db.DB, projectID int64) ([]BeadRow, erro
 	rows, err := d.QueryContext(ctx, `
 		SELECT b.id, b.status, COALESCE(br.full_text, '{}'),
 		       COALESCE(br.execution_budget, 0),
-		       (SELECT COUNT(*) FROM executions e WHERE e.bead_id = b.id AND e.termination_cause IS NOT NULL),
+		       (SELECT COUNT(*) FROM executions e WHERE e.bead_id = b.id AND e.infra_failure = 0),
+		       p.max_execution_attempts,
 		       COALESCE((
 		         SELECT CAST((julianday('now') - julianday(e2.started_at)) * 86400 AS INTEGER)
 		         FROM executions e2
@@ -95,6 +98,7 @@ func queryBeads(ctx context.Context, d *db.DB, projectID int64) ([]BeadRow, erro
 		         ORDER BY e2.started_at DESC LIMIT 1
 		       ), 0)
 		FROM beads b
+		JOIN projects p ON p.id = b.project_id
 		LEFT JOIN bead_revisions br ON br.id = b.current_revision_id
 		WHERE b.project_id = ?
 		ORDER BY b.id`, projectID)
@@ -107,7 +111,7 @@ func queryBeads(ctx context.Context, d *db.DB, projectID int64) ([]BeadRow, erro
 	for rows.Next() {
 		var r BeadRow
 		var fullText string
-		if err := rows.Scan(&r.ID, &r.Status, &fullText, &r.Budget, &r.Attempts, &r.ElapsedSeconds); err != nil {
+		if err := rows.Scan(&r.ID, &r.Status, &fullText, &r.Budget, &r.Attempts, &r.MaxAttempts, &r.ElapsedSeconds); err != nil {
 			return nil, err
 		}
 		var parsed struct {
@@ -123,17 +127,21 @@ func queryBeads(ctx context.Context, d *db.DB, projectID int64) ([]BeadRow, erro
 	return out, rows.Err()
 }
 
-func queryRecentJobs(ctx context.Context, d *db.DB, projectID int64, limit int) ([]JobRow, error) {
+func queryRecentJobs(ctx context.Context, d *db.DB, projectID int64) ([]JobRow, error) {
 	rows, err := d.QueryContext(ctx, `
 		SELECT hj.id, hj.verb, hj.bead_id,
 		       COALESCE(json_extract(br.full_text, '$.title'), ''),
-		       hj.status, hj.updated_at
+		       hj.status, hj.updated_at,
+		       CAST((julianday(CASE
+		           WHEN hj.status IN ('complete','escalated') THEN hj.updated_at
+		           WHEN hj.status = 'running' THEN datetime('now')
+		           ELSE NULL
+		       END) - julianday(hj.created_at)) * 86400 AS INTEGER)
 		FROM handoff_jobs hj
 		LEFT JOIN beads b ON b.id = hj.bead_id
 		LEFT JOIN bead_revisions br ON br.id = b.current_revision_id
 		WHERE hj.project_id = ?
-		ORDER BY hj.updated_at DESC
-		LIMIT ?`, projectID, limit)
+		ORDER BY hj.id DESC`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("recent jobs: %w", err)
 	}
@@ -142,12 +150,23 @@ func queryRecentJobs(ctx context.Context, d *db.DB, projectID int64, limit int) 
 	var out []JobRow
 	for rows.Next() {
 		var r JobRow
-		if err := rows.Scan(&r.ID, &r.Verb, &r.BeadID, &r.BeadTitle, &r.Status, &r.UpdatedAt); err != nil {
+		var elapsedSecs *int
+		if err := rows.Scan(&r.ID, &r.Verb, &r.BeadID, &r.BeadTitle, &r.Status, &r.UpdatedAt, &elapsedSecs); err != nil {
 			return nil, err
+		}
+		if elapsedSecs != nil && *elapsedSecs > 0 {
+			r.ElapsedFormatted = formatElapsed(*elapsedSecs)
 		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+func formatElapsed(s int) string {
+	if s < 60 {
+		return fmt.Sprintf("%ds", s)
+	}
+	return fmt.Sprintf("%dm%ds", s/60, s%60)
 }
 
 func queryEscalatedJobs(ctx context.Context, d *db.DB) ([]EscalatedRow, error) {

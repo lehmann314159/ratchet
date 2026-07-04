@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"ratchet/internal/db"
@@ -77,6 +78,78 @@ func claimNextJob(ctx context.Context, d *db.DB, projectID int64) (*db.HandoffJo
 	j.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 	j.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
 	return j, nil
+}
+
+// recoverOrphanedExecutions handles executions left open by a previous
+// orchestrator crash (termination_cause IS NULL AND ended_at IS NULL).
+// Marks them as infrastructure failures so they don't count against the
+// model's attempt budget, resets their beads to pending, and resets the
+// corresponding EXECUTE_BEAD jobs to pending (not failed_retry; the model
+// was never at fault). Must be called before resetStaleRunning.
+func recoverOrphanedExecutions(ctx context.Context, d *db.DB) error {
+	rows, err := d.QueryContext(ctx,
+		`SELECT id, bead_id FROM executions
+		 WHERE termination_cause IS NULL AND ended_at IS NULL`)
+	if err != nil {
+		return fmt.Errorf("query orphaned executions: %w", err)
+	}
+	defer rows.Close()
+
+	type orphan struct{ execID, beadID int64 }
+	var orphans []orphan
+	for rows.Next() {
+		var o orphan
+		if err := rows.Scan(&o.execID, &o.beadID); err != nil {
+			return err
+		}
+		orphans = append(orphans, o)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, o := range orphans {
+		slog.Warn("startup: recovering orphaned execution (orchestrator was restarted mid-run)",
+			"execution_id", o.execID, "bead_id", o.beadID)
+
+		tx, err := d.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin recovery tx: %w", err)
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE executions
+			SET infra_failure = 1, termination_cause = 'success', ended_at = ?
+			WHERE id = ?`, now, o.execID,
+		); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("mark orphaned execution %d: %w", o.execID, err)
+		}
+
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE beads SET status = 'pending' WHERE id = ? AND status = 'executing'`,
+			o.beadID,
+		); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("reset bead %d: %w", o.beadID, err)
+		}
+
+		// Reset to pending, not failed_retry — model was not at fault.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE handoff_jobs SET status = 'pending', updated_at = ?
+			WHERE bead_id = ? AND verb = ? AND status = 'running'`,
+			now, o.beadID, db.VerbExecuteBead,
+		); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("reset execute job for bead %d: %w", o.beadID, err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit recovery for execution %d: %w", o.execID, err)
+		}
+	}
+	return nil
 }
 
 // resetStaleRunning resets jobs stuck in 'running' (from a crashed orchestrator)

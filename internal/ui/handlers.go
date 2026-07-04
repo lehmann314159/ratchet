@@ -50,7 +50,7 @@ func (s *server) dashboardData(r *http.Request) dashboardData {
 	d.Project = project
 	if project != nil {
 		d.Beads, _ = queryBeads(ctx, s.db, project.ID)
-		d.Jobs, _ = queryRecentJobs(ctx, s.db, project.ID, 20)
+		d.Jobs, _ = queryRecentJobs(ctx, s.db, project.ID)
 	}
 	d.AllProjects, _ = queryAllProjects(ctx, s.db)
 	return d
