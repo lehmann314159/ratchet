@@ -25,6 +25,7 @@ var columnMigrations = []columnMigration{
 	{"projects", "language", "TEXT NOT NULL DEFAULT 'go'"},
 	{"projects", "pause_after_reconcile", "INTEGER NOT NULL DEFAULT 0"},
 	{"executions", "infra_failure", "INTEGER NOT NULL DEFAULT 0"},
+	{"beads", "execution_attempts_override", "INTEGER"},
 }
 
 //go:embed schema.sql

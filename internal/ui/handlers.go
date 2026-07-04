@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"database/sql"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -219,17 +220,23 @@ func (s *server) handleGrantAttempts(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	var projectID int64
+	var beadID sql.NullInt64
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT project_id FROM handoff_jobs WHERE id = ?`, id,
-	).Scan(&projectID); err != nil {
-		http.Error(w, "job not found", http.StatusNotFound)
+		`SELECT bead_id FROM handoff_jobs WHERE id = ?`, id,
+	).Scan(&beadID); err != nil || !beadID.Valid {
+		http.Error(w, "job not found or not bead-scoped", http.StatusNotFound)
 		return
 	}
 
-	if _, err := s.db.ExecContext(ctx,
-		`UPDATE projects SET max_execution_attempts = max_execution_attempts + ?, updated_at = ? WHERE id = ?`,
-		extra, now, projectID,
+	// Increment the per-bead override (seeding from the project default if not yet set),
+	// so only this bead gets extra attempts rather than raising the cap project-wide.
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE beads
+		SET execution_attempts_override = COALESCE(
+			execution_attempts_override,
+			(SELECT max_execution_attempts FROM projects WHERE id = (SELECT project_id FROM beads WHERE id = ?))
+		) + ?
+		WHERE id = ?`, beadID.Int64, extra, beadID.Int64,
 	); err != nil {
 		http.Error(w, fmt.Sprintf("grant attempts: %v", err), http.StatusInternalServerError)
 		return

@@ -592,8 +592,10 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 // escalated so Mike can review rather than looping indefinitely.
 func (h *AdjudicateNextExecution) atExecutionCap(ctx context.Context, tx *sql.Tx, projectID, beadID int64, now string, jobID int64) (bool, error) {
 	var cap, count int
-	if err := tx.QueryRowContext(ctx,
-		`SELECT max_execution_attempts FROM projects WHERE id = ?`, projectID,
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(b.execution_attempts_override, p.max_execution_attempts)
+		FROM beads b JOIN projects p ON p.id = b.project_id
+		WHERE b.id = ?`, beadID,
 	).Scan(&cap); err != nil {
 		return false, fmt.Errorf("load max_execution_attempts: %w", err)
 	}
