@@ -598,7 +598,7 @@ func (h *AdjudicateNextExecution) atExecutionCap(ctx context.Context, tx *sql.Tx
 		return false, fmt.Errorf("load max_execution_attempts: %w", err)
 	}
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM executions WHERE bead_id = ?`, beadID,
+		`SELECT COUNT(*) FROM executions WHERE bead_id = ? AND infra_failure = 0`, beadID,
 	).Scan(&count); err != nil {
 		return false, fmt.Errorf("count executions for bead %d: %w", beadID, err)
 	}

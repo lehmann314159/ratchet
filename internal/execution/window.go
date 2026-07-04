@@ -263,18 +263,80 @@ loop:
 		}
 	}
 
-	// Safety net: if execute-bead exited without writing termination_cause (crash),
-	// write 'success' so ANALYZE_EXECUTION can proceed rather than getting stuck.
+	// If execute-bead exited without writing termination_cause it crashed before
+	// doing any work (e.g. SQLITE_BUSY during db.Open). Treat as an infrastructure
+	// failure: don't route through ANALYZE/ADJUDICATE, don't count against the
+	// model's attempt budget. Reset the job so the orchestrator retries cleanly.
 	var tc *string
 	_ = d.QueryRowContext(ctx, `SELECT termination_cause FROM executions WHERE id = ?`, execID).Scan(&tc)
 	if tc == nil {
-		slog.Warn("execute-bead exited without termination_cause; defaulting to success",
-			"execution_id", execID)
-		_, _ = d.ExecContext(ctx,
-			`UPDATE executions SET termination_cause = 'success' WHERE id = ?`, execID)
+		slog.Warn("execute-bead exited without termination_cause — infrastructure failure, will retry",
+			"execution_id", execID, "bead_id", beadID)
+		return handleInfraFailure(ctx, d, execID, beadID, job)
 	}
 
 	return finalizeExecution(ctx, d, execID, beadID, job.ProjectID)
+}
+
+const infraFailureCap = 3
+
+// handleInfraFailure handles an execution where execute-bead crashed before
+// writing any termination_cause. It marks the execution as an infrastructure
+// failure, resets the bead to pending, and either re-queues the job (if under
+// the cap) or escalates it (if the bead has crashed infraFailureCap times in a
+// row without a real model attempt in between).
+func handleInfraFailure(ctx context.Context, d *db.DB, execID, beadID int64, job *db.HandoffJob) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Mark the execution: infra_failure=1, termination_cause='success' (for
+	// schema compatibility), ended_at now.
+	if _, err := d.ExecContext(ctx, `
+		UPDATE executions
+		SET infra_failure = 1, termination_cause = 'success', ended_at = ?
+		WHERE id = ?`, now, execID,
+	); err != nil {
+		return fmt.Errorf("mark infra_failure: %w", err)
+	}
+
+	// Reset bead to pending (it was marked 'executing' at window start).
+	if _, err := d.ExecContext(ctx,
+		`UPDATE beads SET status = 'pending' WHERE id = ?`, beadID,
+	); err != nil {
+		return fmt.Errorf("reset bead to pending: %w", err)
+	}
+
+	// Count consecutive infra failures since the last real model attempt.
+	var consecFails int
+	if err := d.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM executions
+		WHERE bead_id = ?
+		  AND infra_failure = 1
+		  AND started_at > COALESCE(
+		      (SELECT MAX(started_at) FROM executions
+		       WHERE bead_id = ? AND infra_failure = 0),
+		      '1970-01-01')`, beadID, beadID,
+	).Scan(&consecFails); err != nil {
+		return fmt.Errorf("count infra failures: %w", err)
+	}
+
+	if consecFails >= infraFailureCap {
+		slog.Error("ESCALATION — execute-bead crashed at startup too many times",
+			"execution_id", execID, "bead_id", beadID,
+			"consecutive_infra_failures", consecFails, "cap", infraFailureCap)
+		_, err := d.ExecContext(ctx,
+			`UPDATE handoff_jobs SET status = 'escalated', updated_at = ? WHERE id = ?`,
+			now, job.ID)
+		return err
+	}
+
+	// Under the cap: reset job to pending so the orchestrator retries.
+	slog.Info("infra failure — resetting job for retry",
+		"execution_id", execID, "bead_id", beadID,
+		"consecutive_infra_failures", consecFails, "cap", infraFailureCap)
+	_, err := d.ExecContext(ctx,
+		`UPDATE handoff_jobs SET status = 'pending', updated_at = ? WHERE id = ?`,
+		now, job.ID)
+	return err
 }
 
 // finalizeExecution writes ended_at and enqueues ANALYZE_EXECUTION atomically.
