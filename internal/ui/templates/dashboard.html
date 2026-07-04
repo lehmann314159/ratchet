@@ -33,7 +33,7 @@
       <td class="meta">{{.ID}}</td>
       <td><a href="/beads/{{.ID}}">{{.Title}}</a></td>
       <td><span class="status {{.Status}}">{{.Status}}</span></td>
-      <td class="meta">{{if .Attempts}}{{.Attempts}}/{{.MaxAttempts}}{{else}}—{{end}}</td>
+      <td class="meta">{{if .Attempts}}{{.Attempts}}/{{.MaxAttempts}}{{if .InfraFailures}} <span class="infra-fail">(+ {{.InfraFailures}} infra)</span>{{end}}{{else}}—{{end}}</td>
       <td class="meta">{{if .Budget}}{{if eq .Status "executing"}}{{.ElapsedSeconds}}s / {{.Budget}}s{{else}}{{.Budget}}s{{end}}{{else}}—{{end}}</td>
     </tr>
     {{end}}

@@ -24,6 +24,7 @@ type BeadRow struct {
 	Title          string
 	Attempts       int
 	MaxAttempts    int
+	InfraFailures  int    // executions with infra_failure=1 (orphans, SQLITE_BUSY crashes)
 	Budget         int    // execution_budget from current revision
 	ElapsedSeconds int    // seconds since execution started; 0 if not executing
 }
@@ -91,6 +92,7 @@ func queryBeads(ctx context.Context, d *db.DB, projectID int64) ([]BeadRow, erro
 		       COALESCE(br.execution_budget, 0),
 		       (SELECT COUNT(*) FROM executions e WHERE e.bead_id = b.id AND e.infra_failure = 0),
 		       COALESCE(b.execution_attempts_override, p.max_execution_attempts),
+		       (SELECT COUNT(*) FROM executions e WHERE e.bead_id = b.id AND e.infra_failure = 1),
 		       COALESCE((
 		         SELECT CAST((julianday('now') - julianday(e2.started_at)) * 86400 AS INTEGER)
 		         FROM executions e2
@@ -111,7 +113,7 @@ func queryBeads(ctx context.Context, d *db.DB, projectID int64) ([]BeadRow, erro
 	for rows.Next() {
 		var r BeadRow
 		var fullText string
-		if err := rows.Scan(&r.ID, &r.Status, &fullText, &r.Budget, &r.Attempts, &r.MaxAttempts, &r.ElapsedSeconds); err != nil {
+		if err := rows.Scan(&r.ID, &r.Status, &fullText, &r.Budget, &r.Attempts, &r.MaxAttempts, &r.InfraFailures, &r.ElapsedSeconds); err != nil {
 			return nil, err
 		}
 		var parsed struct {
