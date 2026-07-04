@@ -18,6 +18,12 @@ import (
 	"ratchet/internal/ollama"
 )
 
+// writeGracePeriod is the extra time given to a model response to complete after
+// the execution budget fires. The budget stop is "soft": we let the current
+// ChatWithTools call finish so any in-flight write_file arguments can fully
+// stream in before we exit. A hard cancel fires after this window regardless.
+const writeGracePeriod = 2 * time.Minute
+
 // RunExecuteBeadMain is the entry point for the "ratchet execute-bead" subcommand.
 //
 // --mode is available for smoke tests only:
@@ -105,6 +111,11 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	defer cancel()
 
 	terminationCh := make(chan string, 1)
+	// softStopCh is closed when the budget fires, signalling the turn loop to
+	// exit cleanly after the current ChatWithTools call finishes. This lets an
+	// in-flight write_file argument complete before we stop. A hard cancel fires
+	// writeGracePeriod later as a backstop so we never hang indefinitely.
+	softStopCh := make(chan struct{})
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM)
@@ -117,8 +128,11 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 			terminationCh <- "monitor_terminated"
 			cancel()
 		case <-budgetTimer.C:
-			terminationCh <- "timeout"
-			cancel()
+			close(softStopCh)
+			time.AfterFunc(writeGracePeriod, func() {
+				terminationCh <- "timeout"
+				cancel()
+			})
 		case <-ctx.Done():
 		}
 	}()
@@ -152,6 +166,15 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 		// Content was already streamed to traceFile token-by-token during the call.
 		messages = append(messages, msg)
 
+		// Budget fired while we were streaming — now that the response is complete,
+		// stop cleanly rather than starting another turn.
+		select {
+		case <-softStopCh:
+			writeLine(traceFile, "[terminated: timeout]")
+			return writeTerminationCause(d, execID, "timeout")
+		default:
+		}
+
 		if len(msg.ToolCalls) == 0 {
 			writeLine(traceFile, "[done — no further tool calls]")
 			return writeTerminationCause(d, execID, "success")
@@ -171,6 +194,12 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 		case cause := <-terminationCh:
 			writeLine(traceFile, fmt.Sprintf("[terminated: %s]", cause))
 			return writeTerminationCause(d, execID, cause)
+		default:
+		}
+		select {
+		case <-softStopCh:
+			writeLine(traceFile, "[terminated: timeout]")
+			return writeTerminationCause(d, execID, "timeout")
 		default:
 		}
 	}

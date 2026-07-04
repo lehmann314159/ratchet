@@ -81,6 +81,9 @@ func runMonitor(d *db.DB, oc *ollama.Client, execID int64) error {
 
 	slog.Info("monitor started", "execution_id", execID, "model", model)
 
+	var lastSize int64
+	var staleCount int
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -88,12 +91,35 @@ func runMonitor(d *db.DB, oc *ollama.Client, execID int64) error {
 			return nil
 
 		case <-ticker.C:
-			trace, err := os.ReadFile(tracePath)
-			if err != nil || len(trace) == 0 {
+			traceBytes, err := os.ReadFile(tracePath)
+			if err != nil || len(traceBytes) == 0 {
 				continue // trace not yet written; wait for next tick
 			}
+			traceStr := string(traceBytes)
 
-			decision, err := callMonitorModel(ctx, oc, model, string(trace))
+			// Mechanical stall check: if the trace hasn't grown for 3 consecutive
+			// ticks (~90s) and the last event is a TURN marker, the model is likely
+			// stuck generating a tool-call argument (write_file content doesn't
+			// stream to the trace). Fire without calling the model.
+			currentSize := int64(len(traceBytes))
+			if currentSize == lastSize {
+				staleCount++
+			} else {
+				staleCount = 0
+			}
+			lastSize = currentSize
+
+			if staleCount >= 3 && isWriteFileStall(traceStr) {
+				fired = true
+				if err := writeMonitorFired(d, execID, true); err != nil {
+					return fmt.Errorf("write monitor_fired (stall): %w", err)
+				}
+				slog.Info("monitor fired — write-file stall detected",
+					"execution_id", execID, "stale_ticks", staleCount)
+				return nil
+			}
+
+			decision, err := callMonitorModel(ctx, oc, model, traceStr)
 			if err != nil {
 				slog.Warn("monitor model call failed; skipping this tick",
 					"execution_id", execID, "error", err)
@@ -112,6 +138,27 @@ func runMonitor(d *db.DB, oc *ollama.Client, execID int64) error {
 			}
 		}
 	}
+}
+
+// isWriteFileStall returns true when the trace suggests the model is stuck
+// generating a tool-call argument. This happens when the model goes directly
+// into a write_file (or other) tool call without emitting content tokens —
+// the tool-call JSON doesn't stream to the trace, so the file appears frozen
+// at the TURN marker. We check that the last non-empty trace line is a TURN
+// marker (not a [tool:] or [result] line, which would mean a command is running).
+func isWriteFileStall(trace string) bool {
+	if !strings.Contains(trace, "[TURN ") {
+		return false // model hasn't started yet
+	}
+	lines := strings.Split(strings.TrimRight(trace, "\n "), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		return strings.HasPrefix(line, "[TURN ")
+	}
+	return false
 }
 
 // callMonitorModel calls the model and returns "FIRE" or "NO_FIRE".
