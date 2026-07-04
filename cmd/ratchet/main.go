@@ -32,6 +32,9 @@ func main() {
 		case "resume-project":
 			project.RunResumeProjectMain(os.Args[2:])
 			return
+		case "full-stop-project":
+			project.RunFullStopProjectMain(os.Args[2:])
+			return
 		case "start":
 			runStart(os.Args[2:])
 			return
