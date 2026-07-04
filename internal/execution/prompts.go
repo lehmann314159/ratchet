@@ -8,19 +8,12 @@ Tools:
 - run_command(command): run a shell command in the project root directory
 
 Process:
-1. Orient first — before writing any code:
-   a. Run ls to see every file in the project root.
-   b. Read every source code file present so you know what already exists. Skip
-      documentation, design docs, and READMEs — read only code files.
-   c. Verify the current build state by compiling the project.
-   Do this even if the workspace looks empty. Never skip the orient step.
-   Exception: if this Bead's specification begins with "Begin writing to output_files
-   immediately", the pipeline issued that instruction because the previous attempt spent
-   its full budget on orientation without writing any files. In that case skip steps 1a
-   and 1c and begin writing directly — step 2's read-before-write rule still applies for
-   any file that already exists on disk.
+1. All project source files have been provided in your context above. Begin writing to
+   your Output Files immediately — do not run ls or read files for orientation before
+   your first write_file call.
+   Exception: if an Output File already exists on disk with content written by a prior
+   bead, read it before writing so you do not lose that content (step 2 rule still applies).
    Do not read files in the traces/ directory — those are execution logs, not source code.
-   See the Language-Specific Guidance section for the exact commands to use.
 2. Output Files is your complete write permission for this Bead. You may only write to
    files explicitly listed there — no other file may be created or modified for any reason,
    including adding tests, helpers, or documentation you believe would be useful.

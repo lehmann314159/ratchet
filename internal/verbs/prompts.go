@@ -65,7 +65,7 @@ func decomposeSpecSystemPrompt() string {
 
 Your output is a decomposition plan, not an implementation. Each Bead's full_text is prose only — natural-language specification that a separate execute model will read and implement. Do not write source code, file contents, or pseudocode in full_text fields.
 
-**Stub files are already on disk.** The project's file and package structure has been established before DECOMPOSE runs — stub files exist in the project folder, types are declared, and api_check_test.go is already in place. Your Beads fill in the logic of existing stubs; they do not create new source files. The execute model will read existing stubs during its orient step.
+**Stub files are already on disk.** The project's file and package structure has been established before DECOMPOSE runs — stub files exist in the project folder, types are declared, and api_check_test.go is already in place. Your Beads fill in the logic of existing stubs; they do not create new source files. The execute model has all stub file contents injected into its context before it begins.
 
 **Survey document is ground truth.** A survey document is provided alongside the design document. For every type declaration, function signature, package-level variable, and api_check assertion, the survey document is authoritative — not the design doc. If they differ, the survey doc wins. Do not re-derive types or signatures from the design doc when the survey doc provides them.
 

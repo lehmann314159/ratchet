@@ -5,7 +5,6 @@ package execution
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -69,45 +68,6 @@ func RunExecutionWindow(ctx context.Context, d *db.DB, ollamaURL string, job *db
 		`SELECT COUNT(*)+1 FROM executions WHERE bead_id = ?`, beadID,
 	).Scan(&attemptN); err != nil {
 		return fmt.Errorf("count executions: %w", err)
-	}
-
-	// On retry attempts, conditionally clean output_files from the prior attempt.
-	// If the existing files build successfully (go build ./...), preserve them so
-	// the agent can build on correct prior work rather than regenerating from
-	// scratch. If the build fails, delete all output_files and start clean to
-	// avoid anchoring on broken code.
-	//
-	// go build excludes _test.go files, so this effectively checks non-test
-	// source files only. Per-file isolation (checking each file independently)
-	// is not straightforward in Go since the package is the compilation unit;
-	// a future refinement could temporarily remove sibling files to check each
-	// one individually, which matters when a bead has multiple non-test outputs
-	// and only some are broken.
-	//
-	// Cross-bead risk: if two beads list the same output_file (sequential
-	// dependency), a failing build on bead 2's retry could delete bead 1's
-	// output. AUDIT's independence check is the primary guard against this;
-	// it is not fully closed here.
-	if attemptN > 1 {
-		var spec struct {
-			OutputFiles []string `json:"output_files"`
-		}
-		if err := json.Unmarshal([]byte(fullText), &spec); err == nil && len(spec.OutputFiles) > 0 {
-			buildCmd := exec.Command("go", "build", "./...")
-			buildCmd.Dir = folderPath
-			if buildCmd.Run() == nil {
-				slog.Info("cleanup: prior output files build successfully — preserving",
-					"bead_id", beadID, "attempt", attemptN)
-			} else {
-				for _, rel := range spec.OutputFiles {
-					target := filepath.Join(folderPath, rel)
-					if err := os.Remove(target); err == nil {
-						slog.Info("cleanup: removed prior output file (build failed)",
-							"path", target, "bead_id", beadID, "attempt", attemptN)
-					}
-				}
-			}
-		}
 	}
 
 	// Create the traces directory and an empty trace file.
