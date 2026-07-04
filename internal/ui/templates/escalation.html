@@ -34,6 +34,13 @@
     <button type="submit">Requeue with new budget</button>
   </form>
   {{end}}
+  {{if .Job.BeadID.Valid}}
+  <form method="POST" action="/escalations/{{.Job.ID}}/grant-attempts" style="display:flex;gap:6px;align-items:center">
+    <input type="number" name="attempts" value="3" min="1" max="10" style="width:60px;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-family:inherit;font-size:0.9em">
+    <span class="meta">more attempts</span>
+    <button type="submit" class="action-ok">Grant &amp; Requeue</button>
+  </form>
+  {{end}}
   <form method="POST" action="/escalations/{{.Job.ID}}/close">
     <button type="submit" class="danger">Close (mark complete, skip)</button>
   </form>

@@ -202,6 +202,52 @@ func (s *server) handleRequeuWithBudget(w http.ResponseWriter, r *http.Request) 
 	http.Redirect(w, r, "/escalations", http.StatusSeeOther)
 }
 
+// --- Grant Additional Attempts ---
+
+func (s *server) handleGrantAttempts(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid job id", http.StatusBadRequest)
+		return
+	}
+	extra, err := strconv.Atoi(r.FormValue("attempts"))
+	if err != nil || extra < 1 || extra > 10 {
+		http.Error(w, "attempts must be an integer between 1 and 10", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	var projectID int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT project_id FROM handoff_jobs WHERE id = ?`, id,
+	).Scan(&projectID); err != nil {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	}
+
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE projects SET max_execution_attempts = max_execution_attempts + ?, updated_at = ? WHERE id = ?`,
+		extra, now, projectID,
+	); err != nil {
+		http.Error(w, fmt.Sprintf("grant attempts: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Reset job and clear invalid attempts so ADJUDICATE retries cleanly.
+	_, _ = s.db.ExecContext(ctx,
+		`DELETE FROM handoff_attempts WHERE job_id = ? AND validation_result != 'valid'`, id)
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE handoff_jobs SET status = 'pending', updated_at = ? WHERE id = ?`, now, id,
+	); err != nil {
+		http.Error(w, fmt.Sprintf("requeue: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, "/escalations", http.StatusSeeOther)
+}
+
 // --- Full-Stop Project ---
 
 func (s *server) handleCloseProject(w http.ResponseWriter, r *http.Request) {
