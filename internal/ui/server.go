@@ -83,6 +83,7 @@ func (s *server) routes() {
 	s.mux.HandleFunc("POST /escalations/{id}/requeue-with-budget", s.handleRequeuWithBudget)
 	s.mux.HandleFunc("POST /escalations/{id}/close", s.handleClose)
 	s.mux.HandleFunc("POST /projects/{id}/close", s.handleCloseProject)
+	s.mux.HandleFunc("POST /projects/{id}/resume", s.handleResumeProject)
 	s.mux.HandleFunc("GET /beads/{id}", s.handleBeadDetail)
 	s.mux.HandleFunc("GET /trace", s.handleTrace)
 }

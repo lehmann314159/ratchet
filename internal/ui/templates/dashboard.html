@@ -9,9 +9,14 @@
 <div hx-get="/hx/status" hx-trigger="every 5s" hx-swap="outerHTML">
 {{if .Project}}
 <h1>{{.Project.Label}} <span class="status {{.Project.Status}}">{{.Project.Status}}</span>
-{{if eq .Project.Status "active"}}
-<form method="post" action="/projects/{{.Project.ID}}/close" style="display:inline;margin-left:1rem">
-  <button type="submit" class="action-close">Close Project</button>
+{{if eq .Project.Status "paused"}}
+<form method="post" action="/projects/{{.Project.ID}}/resume" style="display:inline;margin-left:1rem">
+  <button type="submit" class="action-ok">Resume</button>
+</form>
+{{end}}
+{{if or (eq .Project.Status "active") (eq .Project.Status "paused")}}
+<form method="post" action="/projects/{{.Project.ID}}/close" style="display:inline;margin-left:0.5rem">
+  <button type="submit" class="action-close">Full Stop</button>
 </form>
 {{end}}
 </h1>
@@ -73,7 +78,7 @@
 <div class="section" style="margin-top:40px">
   <h2>All Projects</h2>
   <table>
-    <thead><tr><th>ID</th><th>Label</th><th>Status</th><th>Created</th></tr></thead>
+    <thead><tr><th>ID</th><th>Label</th><th>Status</th><th>Created</th><th></th></tr></thead>
     <tbody>
     {{range .AllProjects}}
     <tr>
@@ -81,6 +86,18 @@
       <td>{{.Label}}</td>
       <td><span class="status {{.Status}}">{{.Status}}</span></td>
       <td class="meta">{{.CreatedAt}}</td>
+      <td>
+        {{if eq .Status "paused"}}
+        <form method="post" action="/projects/{{.ID}}/resume" style="display:inline">
+          <button type="submit" class="action-ok">Resume</button>
+        </form>
+        {{end}}
+        {{if or (eq .Status "active") (eq .Status "paused")}}
+        <form method="post" action="/projects/{{.ID}}/close" style="display:inline;margin-left:0.25rem">
+          <button type="submit" class="action-close">Full Stop</button>
+        </form>
+        {{end}}
+      </td>
     </tr>
     {{end}}
     </tbody>

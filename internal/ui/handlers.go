@@ -202,7 +202,7 @@ func (s *server) handleRequeuWithBudget(w http.ResponseWriter, r *http.Request) 
 	http.Redirect(w, r, "/escalations", http.StatusSeeOther)
 }
 
-// --- Close Project ---
+// --- Full-Stop Project ---
 
 func (s *server) handleCloseProject(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -210,16 +210,97 @@ func (s *server) handleCloseProject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid project id", http.StatusBadRequest)
 		return
 	}
+	ctx := r.Context()
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = s.db.ExecContext(r.Context(),
-		`UPDATE projects SET status = 'full_stopped', updated_at = ? WHERE id = ? AND status = 'active'`,
-		now, id)
+
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("close project failed: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("begin tx: %v", err), http.StatusInternalServerError)
 		return
 	}
-	_, _ = s.db.ExecContext(r.Context(),
-		`UPDATE beads SET status = 'full_stopped' WHERE project_id = ? AND status = 'executing'`, id)
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE projects SET status = 'full_stopped', updated_at = ?
+		 WHERE id = ? AND status IN ('active', 'paused')`,
+		now, id,
+	); err != nil {
+		_ = tx.Rollback()
+		http.Error(w, fmt.Sprintf("full-stop project: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE beads SET status = 'full_stopped' WHERE project_id = ? AND status = 'pending'`, id,
+	); err != nil {
+		_ = tx.Rollback()
+		http.Error(w, fmt.Sprintf("stop beads: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE handoff_jobs SET status = 'complete', updated_at = ?
+		 WHERE project_id = ? AND status IN ('pending', 'running', 'failed_retry')`,
+		now, id,
+	); err != nil {
+		_ = tx.Rollback()
+		http.Error(w, fmt.Sprintf("cancel jobs: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		http.Error(w, fmt.Sprintf("commit: %v", err), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// --- Resume Project ---
+
+func (s *server) handleResumeProject(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid project id", http.StatusBadRequest)
+		return
+	}
+	ctx := r.Context()
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("begin tx: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE projects SET status = 'active', updated_at = ? WHERE id = ? AND status = 'paused'`,
+		now, id,
+	); err != nil {
+		_ = tx.Rollback()
+		http.Error(w, fmt.Sprintf("resume project: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	var beadID int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT id FROM beads WHERE project_id = ? AND status = 'pending' ORDER BY id LIMIT 1`, id,
+	).Scan(&beadID); err != nil {
+		_ = tx.Rollback()
+		http.Error(w, fmt.Sprintf("find first pending bead: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
+		VALUES (?, 'EXECUTE_BEAD', ?, 'pending', ?, ?)`,
+		id, beadID, now, now,
+	); err != nil {
+		_ = tx.Rollback()
+		http.Error(w, fmt.Sprintf("enqueue first bead: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		http.Error(w, fmt.Sprintf("commit: %v", err), http.StatusInternalServerError)
+		return
+	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 

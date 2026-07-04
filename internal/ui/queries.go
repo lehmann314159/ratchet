@@ -52,7 +52,7 @@ type EscalatedRow struct {
 func queryActiveProject(ctx context.Context, d *db.DB) (*ProjectRow, error) {
 	row := d.QueryRowContext(ctx, `
 		SELECT id, label, status, folder_path, design_doc_path, created_at
-		FROM projects WHERE status = 'active'
+		FROM projects WHERE status IN ('active', 'paused')
 		ORDER BY id LIMIT 1`)
 	p := &ProjectRow{}
 	if err := row.Scan(&p.ID, &p.Label, &p.Status, &p.FolderPath, &p.DesignDoc, &p.CreatedAt); err != nil {
