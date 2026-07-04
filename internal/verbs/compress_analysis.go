@@ -13,13 +13,6 @@ import (
 	"ratchet/internal/ollama"
 )
 
-// compressPassthroughThreshold is the minimum number of completed executions
-// before COMPRESS_ANALYSIS makes a model call. Below this threshold the raw
-// mechanical findings are written through directly, saving a model round-trip
-// on early attempts where there is little history to compress and the staleness
-// risk (baking wrong conclusions into a summary) outweighs the compression gain.
-const compressPassthroughThreshold = 3
-
 type CompressAnalysis struct{}
 
 func (h *CompressAnalysis) Verb() string { return db.VerbCompressAnalysis }
@@ -33,35 +26,6 @@ func (h *CompressAnalysis) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	analysis, err := loadLatestAnalysis(ctx, d, beadID)
 	if err != nil {
 		return "", err
-	}
-
-	// Count completed executions for this bead. Below the threshold, write
-	// raw findings through without a model call. This avoids baking early
-	// wrong conclusions into a summary that ADJUDICATE then inherits.
-	var execCount int
-	if err := d.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM executions WHERE bead_id = ? AND termination_cause IS NOT NULL`,
-		beadID,
-	).Scan(&execCount); err != nil {
-		return "", fmt.Errorf("count executions for bead %d: %w", beadID, err)
-	}
-	if execCount < compressPassthroughThreshold {
-		// Accumulate raw findings rather than replace, so the model at attempt 3
-		// receives the full history of attempts 1 and 2 as context.
-		existing, err := loadCompressedHistory(ctx, d, beadID)
-		if err != nil {
-			return "", err
-		}
-		entry := fmt.Sprintf("Attempt %d (raw — compression starts at attempt %d):\n\n%s",
-			execCount, compressPassthroughThreshold, analysis.MechanicalFindings)
-		var combined string
-		if existing != "" {
-			combined = existing + "\n\n" + entry
-		} else {
-			combined = entry
-		}
-		out, _ := json.Marshal(CompressAnalysisOutput{CompressedText: combined})
-		return string(out), nil
 	}
 
 	history, err := loadCompressedHistory(ctx, d, beadID)

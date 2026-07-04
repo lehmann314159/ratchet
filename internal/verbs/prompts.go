@@ -348,24 +348,32 @@ Respond with JSON only, no prose before or after:
 const compressAnalysisSystemPrompt = `You maintain a compressed record of execution history for a single Bead.
 Given the existing compressed history and the latest analysis, produce an updated compressed record.
 
-Requirements:
-- Recurrence tagging: for each distinct failure class in the latest analysis, explicitly mark it as
-  NEW (first appearance) or RECURRING (appeared in N prior attempts — cite the count). A failure
-  class is recurring if the same error message, missing symbol, wrong type, or test failure name
-  appeared in any prior attempt in the compressed history. Do not treat symptom variations as
-  distinct failure classes when they share the same root error (e.g. the same undefined symbol
-  reported at different line numbers is one recurring failure, not two new ones). Recurrence counts
-  must be kept current — update them on every compression pass.
-- Preserve the convergent/divergent trend signal: the direction of change across attempts must remain
-  correctly inferrable from your output.
-- Resolution detection: if a failure class tagged NEW or RECURRING in the existing compressed
-  history does not appear anywhere in the latest analysis, mark it [RESOLVED — absent from latest
-  attempt] in your updated record. Do not delete it — the history is valuable — but do not count
-  it as still-active, and exclude it from recurrence tallies going forward.
-- Do not add judgment language about whether the Bead should be retried or stopped. That is
-  ADJUDICATE_NEXT_EXECUTION's job.
-- Keep the compressed record bounded. Older detail can be summarized; the most recent attempt
-  should be represented accurately.
+Stripping rules — apply these when incorporating the latest analysis:
+- Omit all ls/directory listing output entirely.
+- From go test output, omit passing test lines (=== RUN and --- PASS lines for any test that
+  passed). Keep only: FAIL lines, panic output, and compiler error messages.
+- Omit repeated identical command runs — one representative failure output per failure class is enough.
+
+Size target: each per-attempt entry should be ≤ 600 characters. Use telegraphic prose.
+
+Structure: label each attempt entry "Attempt N (termination_cause):" where N is inferred from
+the number of entries already in the history (prior entries + 1). If no prior history exists,
+this is Attempt 1 and all failure classes are [NEW].
+
+Recurrence tagging: for each distinct failure class in the latest analysis, mark it [NEW] (first
+appearance) or [RECURRING × N] (appeared in N prior attempts). A failure class is recurring when
+the same error message, missing symbol, wrong type, or test failure name appeared in any prior
+attempt. Do not split symptom variations that share the same root error into separate failure
+classes. Update recurrence counts on every pass.
+
+Resolution detection: if a failure class tagged [NEW] or [RECURRING] in the existing history does
+not appear in the latest analysis, mark it [RESOLVED — absent from latest attempt] in your output.
+Do not delete it, but exclude it from recurrence tallies going forward.
+
+Convergent/divergent trend: the direction of change across attempts must remain correctly
+inferrable from your output.
+
+Do not add judgment language about retry or stop decisions — that is ADJUDICATE's job.
 
 Respond with JSON only, no prose before or after:
 {
