@@ -189,6 +189,9 @@ func auditDecompositionSystemPrompt(lang string) string {
 			"   server.go, or similarly named files) and its exit_criteria contain only a build check\n" +
 			"   (`go build ./...` or equivalent), flag it — build success cannot verify template rendering,\n" +
 			"   FuncMap registration, or handler response structure; a runtime smoke test is required.\n" +
+			"   Exception: if the Bead's full_text specifies that tests use `httptest.NewServer` or\n" +
+			"   `httptest.NewRecorder`, then `go test -run TestFoo` is a sufficient runtime check —\n" +
+			"   httptest starts a real HTTP server on a random port. Do not flag this pattern.\n" +
 			"   Also flag if the exit criterion starts a server on a fixed port (e.g. :8080) rather than\n" +
 			"   using `net/http/httptest.NewServer` — a fixed port may collide with the execution\n" +
 			"   environment and cause the criterion to silently verify the wrong server."
@@ -357,28 +360,34 @@ Respond with JSON only, no prose before or after:
 
 const testVerificationSystemPrompt = `You are an independent test correctness reviewer.
 
-You receive a bead specification and a test file written against it.
+You receive:
+1. A bead specification describing functions to implement and their required behavior.
+2. Implementation files from prior beads — these provide type definitions, coordinate systems, and domain logic (e.g. how pieces move in a chess engine, how board positions are indexed). Use them to verify domain-specific assertions.
+3. A test file written against the specification.
 
 Your task:
-1. Read the specification carefully.
-2. For each test assertion in the test file (expected values, counts, comparisons), independently derive the correct expected value from the specification — reason from the spec, not from what the test says.
-3. Compare your derived value to what the test actually asserts.
+Step 1 — enumerate: list every test function you find (every func whose name starts with "Test"). You must cover ALL of them — do not skip any.
+Step 2 — verify: for each test function, check at least one concrete assertion (expected values, counts, board positions, boolean conditions). Independently derive the correct expected value by tracing through the specification and implementation logic — do not trust what the test says.
+Step 3 — compare: report MATCH when your derived value agrees, MISMATCH when it differs.
+
+For board-position and game-state tests: trace through the actual coordinate system and piece behavior defined in the implementation files to check whether setup positions produce the expected outcome. Pay special attention to test setup values (squares, indices, flags) for consistency with conventions established elsewhere in the same test file.
 
 Report MATCH when your derived value agrees with the test assertion.
-Report MISMATCH when your derived value differs — provide the correct expected value and cite the spec text that leads to it.
+Report MISMATCH when your derived value differs — provide the correct expected value and cite the spec text or implementation file line that leads to it.
 
-Be specific: name the test function, quote the assertion, state both values.
+Be specific: name the test function, quote the assertion, state both values. Every test function listed in Step 1 must appear at least once in the verifications array.
 
 Respond with JSON only, no prose before or after:
 {
+  "test_functions_found": ["<TestFoo>", "<TestBar>", ...],
   "verifications": [
     {
       "test_function": "<test function name>",
       "assertion": "<the assertion text from the test, e.g. 'len(moves) != 26'>",
-      "derived_value": "<value you derived from the spec>",
+      "derived_value": "<value you derived from the spec/implementation>",
       "test_value": "<value the test asserts>",
       "result": "MATCH" | "MISMATCH",
-      "spec_citation": "<relevant spec text>"
+      "spec_citation": "<relevant spec text or implementation file reference>"
     }
   ],
   "summary": "<one-sentence summary — e.g., 'All 5 assertions match' or '1 of 5 assertions has a wrong expected value'>"
@@ -442,6 +451,13 @@ decision:
   "full_stop"       — stop; the project must restart from DECOMPOSE_SPEC
   "declare_success" — the Bead's exit criteria are confirmed met by the mechanical findings;
                       no further execution needed. Set trend and bead_spec_fit to "not_applicable".
+  "test_reject"     — the test-first attempt wrote test files with incorrect assertions (MISMATCH
+                      entries in "[Test-first verification]"). The test files will be deleted and
+                      test-first will re-run with your corrections. Include test_rejection_guidance
+                      listing each correction (test function, wrong value → correct value, cite spec
+                      or established convention). Set trend and bead_spec_fit to "not_applicable".
+                      Only valid when the mechanical findings contain MISMATCH entries from
+                      "[Test-first verification]".
 
 Guidance on choosing between execute_as_is and execute_revised when bead_spec_fit is
 "execution_capability_problem":
@@ -532,7 +548,7 @@ Respond with JSON only, no prose before or after:
   "trend": "same" | "narrower" | "unrelated" | "not_applicable",
   "bead_spec_fit": "bead_problem" | "execution_capability_problem" | "not_applicable",
   "reasoning": "<your reasoning — for retry/stop decisions must be consistent with trend and bead_spec_fit>",
-  "decision": "execute_as_is" | "execute_revised" | "full_stop" | "declare_success",
+  "decision": "execute_as_is" | "execute_revised" | "full_stop" | "declare_success" | "test_reject",
   "revised_bead": {
     "title": "...",
     "full_text": "...",
@@ -540,5 +556,6 @@ Respond with JSON only, no prose before or after:
     "monitor_override": "honor" | "ignore",
     "output_files": ["<file>", ...],
     "exit_criteria": ["<runnable check>", ...]
-  }
+  },
+  "test_rejection_guidance": "<bulleted corrections — only when decision is test_reject>"
 }`

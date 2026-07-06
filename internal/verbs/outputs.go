@@ -128,7 +128,10 @@ type AdjudicateNextExecutionOutput struct {
 	Trend       string `json:"trend"`        // "same" | "narrower" | "unrelated"
 	BeadSpecFit string `json:"bead_spec_fit"` // "bead_problem" | "execution_capability_problem"
 	Reasoning   string `json:"reasoning"`
-	Decision    string `json:"decision"` // "execute_as_is" | "execute_revised" | "full_stop"
+	Decision    string `json:"decision"` // "execute_as_is" | "execute_revised" | "full_stop" | "declare_success" | "test_reject"
 	// RevisedBead is present only when Decision == "execute_revised".
 	RevisedBead *ParsedBead `json:"revised_bead,omitempty"`
+	// TestRejectionGuidance is present only when Decision == "test_reject".
+	// Lists corrections to apply when rewriting the test files.
+	TestRejectionGuidance string `json:"test_rejection_guidance,omitempty"`
 }

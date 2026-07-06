@@ -210,7 +210,7 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		Messages: msgs,
 		Tools:    tools,
 		Stream:   true,
-		Options:  map[string]any{"temperature": temp, "num_ctx": executeNumCtx},
+		Options:  map[string]any{"temperature": temp, "num_ctx": executeNumCtx, "think": false},
 	}
 
 	body, err := json.Marshal(req)

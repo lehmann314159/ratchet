@@ -211,16 +211,27 @@ func (h *CompressAnalysis) Commit(ctx context.Context, tx *sql.Tx, job *db.Hando
 	now := time.Now().UTC().Format(time.RFC3339)
 	beadID := job.BeadID.Int64
 
-	// Upsert: one evolving row per Bead.
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO compressed_history (bead_id, project_id, compressed_text, updated_at)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT (bead_id) DO UPDATE SET
-		  compressed_text = excluded.compressed_text,
-		  updated_at      = excluded.updated_at`,
-		beadID, job.ProjectID, out.CompressedText, now,
-	); err != nil {
-		return fmt.Errorf("upsert compressed_history: %w", err)
+	// Test-first attempts contain only test scaffolding work, not implementation
+	// progress. Injecting them into later implementation attempts adds irrelevant
+	// context noise and makes the input heavier without helping the model. Skip
+	// the compressed_history upsert for those attempts; ADJUDICATE still runs.
+	var testFirstAttempt int
+	_ = tx.QueryRowContext(ctx,
+		`SELECT test_first_attempt FROM executions WHERE bead_id = ? ORDER BY id DESC LIMIT 1`,
+		beadID,
+	).Scan(&testFirstAttempt)
+
+	if testFirstAttempt == 0 {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO compressed_history (bead_id, project_id, compressed_text, updated_at)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT (bead_id) DO UPDATE SET
+			  compressed_text = excluded.compressed_text,
+			  updated_at      = excluded.updated_at`,
+			beadID, job.ProjectID, out.CompressedText, now,
+		); err != nil {
+			return fmt.Errorf("upsert compressed_history: %w", err)
+		}
 	}
 
 	// Enqueue ADJUDICATE_NEXT_EXECUTION for this bead.

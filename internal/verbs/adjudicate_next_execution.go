@@ -302,12 +302,14 @@ func testFirstCompleteNote(folderPath string, outputFiles []string) string {
 		"[Test-first complete] Test files were written in the previous (test-first) attempt: %s. "+
 			"Implementation files are absent: %s.\n\n"+
 			"ADJUDICATE INSTRUCTIONS — this note requires specific handling:\n"+
-			"1. Decision MUST be execute_revised — tests written but implementation absent; never execute_as_is or declare_success.\n"+
-			"2. If the mechanical findings above contain \"[Test-first verification]\" MISMATCH entries: "+
-			"incorporate the exact corrections into the revised full_text (specific file, line context, old value → new value). "+
-			"Instruct the executor to apply each correction before writing any implementation file.\n"+
-			"3. The revised full_text MUST state: \"The test file(s) %s are LOCKED — do NOT modify them "+
-			"(except for the corrections specified above). Write ONLY the implementation file(s): %s.\"",
+			"1. If the mechanical findings above contain \"[Test-first verification]\" MISMATCH entries: "+
+			"Decision MUST be test_reject. Set test_rejection_guidance to a bulleted list of corrections "+
+			"(test function name, wrong value → correct value, cite the spec or convention that proves it). "+
+			"Do NOT issue execute_revised when MISMATCH entries are present.\n"+
+			"2. If there are NO MISMATCH entries (all MATCH or no verification output): "+
+			"Decision MUST be execute_revised — tests written but implementation absent; never execute_as_is or declare_success. "+
+			"The revised full_text MUST state: \"The test file(s) %s are LOCKED — do NOT modify them. "+
+			"Write ONLY the implementation file(s): %s.\"",
 		strings.Join(testFiles, ", "), strings.Join(implFiles, ", "),
 		strings.Join(testFiles, ", "), strings.Join(implFiles, ", "),
 	)
@@ -537,9 +539,9 @@ func (h *AdjudicateNextExecution) Validate(raw string) (string, any) {
 		return "malformed: reasoning is empty", nil
 	}
 
-	validDecisions := map[string]bool{"execute_as_is": true, "execute_revised": true, "full_stop": true, "declare_success": true}
+	validDecisions := map[string]bool{"execute_as_is": true, "execute_revised": true, "full_stop": true, "declare_success": true, "test_reject": true}
 	if !validDecisions[out.Decision] {
-		return fmt.Sprintf("malformed: decision must be \"execute_as_is\", \"execute_revised\", \"full_stop\", or \"declare_success\", got %q", out.Decision), nil
+		return fmt.Sprintf("malformed: decision must be \"execute_as_is\", \"execute_revised\", \"full_stop\", \"declare_success\", or \"test_reject\", got %q", out.Decision), nil
 	}
 
 	if out.Decision == "execute_revised" {
@@ -557,23 +559,28 @@ func (h *AdjudicateNextExecution) Validate(raw string) (string, any) {
 		}
 	}
 
-	if out.Decision == "declare_success" {
-		// declare_success requires both classification fields to be "not_applicable" —
-		// there is no failure to attribute when the bead succeeded.
+	if out.Decision == "test_reject" {
+		if strings.TrimSpace(out.TestRejectionGuidance) == "" {
+			return "malformed: decision is test_reject but test_rejection_guidance is absent or empty", nil
+		}
+	}
+
+	if out.Decision == "declare_success" || out.Decision == "test_reject" {
+		// declare_success and test_reject require both classification fields to be "not_applicable".
 		if out.Trend != "not_applicable" {
-			return fmt.Sprintf("malformed: decision is declare_success but trend is %q — must be \"not_applicable\"", out.Trend), nil
+			return fmt.Sprintf("malformed: decision is %q but trend is %q — must be \"not_applicable\"", out.Decision, out.Trend), nil
 		}
 		if out.BeadSpecFit != "not_applicable" {
-			return fmt.Sprintf("malformed: decision is declare_success but bead_spec_fit is %q — must be \"not_applicable\"", out.BeadSpecFit), nil
+			return fmt.Sprintf("malformed: decision is %q but bead_spec_fit is %q — must be \"not_applicable\"", out.Decision, out.BeadSpecFit), nil
 		}
 	} else {
 		// For retry/stop decisions, "not_applicable" is forbidden and the consistency
 		// check applies (zero-strike tolerance — a mismatch is a validation failure).
 		if out.Trend == "not_applicable" {
-			return "malformed: trend \"not_applicable\" is only valid when decision is \"declare_success\"", nil
+			return "malformed: trend \"not_applicable\" is only valid when decision is \"declare_success\" or \"test_reject\"", nil
 		}
 		if out.BeadSpecFit == "not_applicable" {
-			return "malformed: bead_spec_fit \"not_applicable\" is only valid when decision is \"declare_success\"", nil
+			return "malformed: bead_spec_fit \"not_applicable\" is only valid when decision is \"declare_success\" or \"test_reject\"", nil
 		}
 		if ok, reason := checkConsistency(out.BeadSpecFit, out.Reasoning); !ok {
 			return "malformed: consistency check failed: " + reason, nil
@@ -688,6 +695,61 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 			return err
 		}
 
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
+			VALUES (?, ?, ?, 'pending', ?, ?)`,
+			job.ProjectID, db.VerbExecuteBead, beadID, now, now)
+		return err
+
+	case "test_reject":
+		if atCap, err := h.atExecutionCap(ctx, tx, job.ProjectID, beadID, now, job.ID); err != nil || atCap {
+			return err
+		}
+		// Load the current bead revision so we can copy its spec and delete its test files.
+		var currentFullText string
+		var currentRevNum int
+		var currentBudget int
+		var currentMonitor string
+		if err := tx.QueryRowContext(ctx, `
+			SELECT br.full_text, br.revision_number, br.execution_budget, br.monitor_override
+			FROM beads b JOIN bead_revisions br ON br.id = b.current_revision_id
+			WHERE b.id = ?`, beadID,
+		).Scan(&currentFullText, &currentRevNum, &currentBudget, &currentMonitor); err != nil {
+			return fmt.Errorf("load current bead for test_reject: %w", err)
+		}
+		var currentSpec ParsedBead
+		if err := json.Unmarshal([]byte(currentFullText), &currentSpec); err != nil {
+			return fmt.Errorf("parse current bead spec for test_reject: %w", err)
+		}
+		// Delete test files from disk so the next EXECUTE re-enters test-first mode.
+		for _, f := range currentSpec.OutputFiles {
+			if strings.HasSuffix(f, "_test.go") {
+				_ = os.Remove(filepath.Join(h.folderPath, f))
+			}
+		}
+		// Build revised spec: prepend the rejection guidance so the model sees
+		// what was wrong and can correct it when rewriting the test files.
+		revisedSpec := currentSpec
+		revisedSpec.FullText = "[Test-first rejection] The previous test-first attempt wrote test files " +
+			"with incorrect assertions. The test files have been deleted. Rewrite them with the " +
+			"following corrections applied:\n\n" + out.TestRejectionGuidance + "\n\n" +
+			currentSpec.FullText
+		fullText, _ := json.Marshal(revisedSpec)
+		res, err := tx.ExecContext(ctx, `
+			INSERT INTO bead_revisions
+			  (project_id, bead_id, revision_number, full_text,
+			   execution_budget, monitor_override, created_by_verb, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			job.ProjectID, beadID, currentRevNum+1, string(fullText),
+			currentBudget, currentMonitor, db.VerbAdjudicateNextExecution, now)
+		if err != nil {
+			return fmt.Errorf("insert test_reject bead_revision: %w", err)
+		}
+		revID, _ := res.LastInsertId()
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE beads SET status = 'pending', current_revision_id = ? WHERE id = ?`, revID, beadID); err != nil {
+			return err
+		}
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
 			VALUES (?, ?, ?, 'pending', ?, ?)`,

@@ -142,12 +142,29 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	contextFiles := loadContextFiles(folderPath, parsedBead.OutputFiles)
 	priorHistory := loadPriorAttemptSummary(ctx, d, beadID)
 
+	// Compute the files the model was instructed to write this attempt.
+	// In test-first mode the prompt only lists test files; in normal mode all output files.
+	testFirst := isTestFirstMode(folderPath, parsedBead.OutputFiles)
+	var expectedFiles []string
+	if testFirst {
+		for _, f := range parsedBead.OutputFiles {
+			if strings.HasSuffix(f, "_test.go") {
+				expectedFiles = append(expectedFiles, f)
+			}
+		}
+	} else {
+		expectedFiles = parsedBead.OutputFiles
+	}
+
 	oc := ollama.NewUnbounded(ollamaURL)
 	tools := toolDefinitions()
 	messages := []ollama.Message{
 		{Role: "system", Content: guidance.InjectForVerbPath(executeBeadSystemPrompt, folderPath, db.VerbExecuteBead, "")},
 		{Role: "user", Content: buildBeadUserMsg(parsedBead.FullText, parsedBead.OutputFiles, parsedBead.ExitCriteria, contextFiles, priorHistory, folderPath)},
 	}
+
+	var writeFileCount int
+	var stubWarningInjected bool
 
 	for turn := 1; ; turn++ {
 		writeLine(traceFile, fmt.Sprintf("[TURN %d]", turn))
@@ -176,11 +193,27 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 		}
 
 		if len(msg.ToolCalls) == 0 {
+			// If the model declared done without calling write_file at all, it
+			// likely output code as prose instead of as a tool call. Inject a
+			// one-time warning and force another turn so it can correct itself
+			// without burning a whole attempt slot.
+			if !stubWarningInjected && writeFileCount == 0 && len(expectedFiles) > 0 {
+				stubWarningInjected = true
+				writeLine(traceFile, "[injected: no-write warning — model produced prose instead of calling write_file]")
+				messages = append(messages, ollama.Message{
+					Role:    "user",
+					Content: buildNoWriteWarning(expectedFiles),
+				})
+				continue
+			}
 			writeLine(traceFile, "[done — no further tool calls]")
 			return writeTerminationCause(d, execID, "success")
 		}
 
 		for _, tc := range msg.ToolCalls {
+			if tc.Function.Name == "write_file" {
+				writeFileCount++
+			}
 			writeLine(traceFile, fmt.Sprintf("[tool: %s %v]", tc.Function.Name, tc.Function.Arguments))
 			result := executeTool(ctx, tc, folderPath)
 			writeLine(traceFile, fmt.Sprintf("[result]\n%s", result))
@@ -423,6 +456,22 @@ func loadPriorAttemptSummary(ctx context.Context, d *db.DB, beadID int64) string
 		return ""
 	}
 	return text
+}
+
+// buildNoWriteWarning returns a user-turn message injected when the model
+// declares done without having called write_file at all. This catches the
+// "code as prose" failure mode where the model outputs its implementation as
+// response text instead of as a write_file tool call.
+func buildNoWriteWarning(expectedFiles []string) string {
+	fileList := strings.Join(expectedFiles, ", ")
+	return fmt.Sprintf(
+		"You have not called write_file during this execution. "+
+			"Your output file(s) (%s) have not been written to disk.\n\n"+
+			"Outputting code as response text does not save it — you MUST call "+
+			"write_file with the correct path and your complete implementation as content. "+
+			"Call write_file now.",
+		fileList,
+	)
 }
 
 func writeLine(f *os.File, line string) {

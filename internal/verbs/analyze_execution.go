@@ -360,6 +360,8 @@ func isPostTestFirstState(folderPath string, outputFiles []string) bool {
 		} else if strings.HasSuffix(f, ".go") {
 			if err != nil {
 				implMissing = true
+			} else if stubs := detectStubFuncs(filepath.Join(folderPath, f), f); len(stubs) > 0 {
+				implMissing = true // scaffold stub present — treat as absent
 			}
 		}
 	}
@@ -386,8 +388,30 @@ func verifyTestExpectations(ctx context.Context, oc *ollama.Client, model, folde
 		return ""
 	}
 
-	userMsg := "## Bead Specification\n\n" + beadFullText +
-		"\n\n## Test File\n\n" + strings.TrimSpace(testContent.String())
+	// Inject all non-test .go files from the project folder so the verifier has
+	// the same implementation context the test author had: type definitions,
+	// coordinate systems, and domain logic (e.g. piece movement rules in moves.go).
+	var implContext strings.Builder
+	if entries, rdErr := os.ReadDir(folderPath); rdErr == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			if content, rerr := os.ReadFile(filepath.Join(folderPath, name)); rerr == nil {
+				fmt.Fprintf(&implContext, "### %s\n\n```go\n%s\n```\n\n", name, string(content))
+			}
+		}
+	}
+
+	userMsg := "## Bead Specification\n\n" + beadFullText
+	if implContext.Len() > 0 {
+		userMsg += "\n\n## Implementation Files (prior beads — use for domain-specific verification)\n\n" + strings.TrimSpace(implContext.String())
+	}
+	userMsg += "\n\n## Test File\n\n" + strings.TrimSpace(testContent.String())
 
 	raw, err := oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: testVerificationSystemPrompt},
@@ -398,7 +422,8 @@ func verifyTestExpectations(ctx context.Context, oc *ollama.Client, model, folde
 	}
 
 	var out struct {
-		Verifications []struct {
+		TestFunctionsFound []string `json:"test_functions_found"`
+		Verifications      []struct {
 			TestFunction string `json:"test_function"`
 			Assertion    string `json:"assertion"`
 			DerivedValue string `json:"derived_value"`
@@ -414,6 +439,9 @@ func verifyTestExpectations(ctx context.Context, oc *ollama.Client, model, folde
 
 	var sb strings.Builder
 	sb.WriteString("[Test-first verification] Independent review of test expectations against spec:\n")
+	if len(out.TestFunctionsFound) > 0 {
+		fmt.Fprintf(&sb, "  Functions found: %s\n", strings.Join(out.TestFunctionsFound, ", "))
+	}
 	hasMismatch := false
 	for _, v := range out.Verifications {
 		if v.Result == "MISMATCH" {

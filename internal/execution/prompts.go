@@ -72,6 +72,10 @@ is still in preparation phase — do not fire.
 Exception: if the trace shows more than 10 [TURN N] markers and still no write_file
 call has appeared, orientation has run unusually long — apply the standard recurrence
 check from that point.
+A turn in which the model produced no tool calls does not by itself indicate a problem —
+the execution framework may have detected this and re-prompted the model to call
+write_file. Treat the turn after a 0-tool-call turn as a fresh start; do not fire
+solely because the prior turn had no tool calls.
 
 Explicit loop patterns — FIRE immediately on either of these regardless of other conditions:
 1. Same run_command output twice with no intervening write_file: if the same command
