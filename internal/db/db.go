@@ -26,6 +26,7 @@ var columnMigrations = []columnMigration{
 	{"projects", "pause_after_reconcile", "INTEGER NOT NULL DEFAULT 0"},
 	{"executions", "infra_failure", "INTEGER NOT NULL DEFAULT 0"},
 	{"beads", "execution_attempts_override", "INTEGER"},
+	{"executions", "test_first_attempt", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 //go:embed schema.sql
@@ -103,7 +104,7 @@ func (db *DB) applyMigrations() error {
 		}
 		if !found {
 			stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", m.table, m.column, m.def)
-			if _, err := db.Exec(stmt); err != nil {
+			if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 				return fmt.Errorf("migrate %s.%s: %w", m.table, m.column, err)
 			}
 		}

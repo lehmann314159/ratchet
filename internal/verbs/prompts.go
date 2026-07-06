@@ -60,7 +60,14 @@ Respond with JSON only, no prose before or after:
 }`
 }
 
-func decomposeSpecSystemPrompt() string {
+func decomposeSpecSystemPrompt(lang string) string {
+	goExitCriteriaRule := ""
+	if lang == "go" {
+		goExitCriteriaRule = "\n  For Go beads: when output_files includes a *_test.go file, exit_criteria must use" +
+			"\n  `-run TestFoo` naming the primary test function (e.g. `go test -v -run TestHandleIndex ./...`)." +
+			"\n  A bare `go test ./...` without `-run` will silently exit 0 with \"no tests to run\" if the" +
+			"\n  test function was not written — the named `-run` flag is the only way to detect this."
+	}
 	return fmt.Sprintf(`You decompose a design document into a list of Beads — well-scoped, independently executable units of work, each with a clear done-condition.
 
 Your output is a decomposition plan, not an implementation. Each Bead's full_text is prose only — natural-language specification that a separate execute model will read and implement. Do not write source code, file contents, or pseudocode in full_text fields.
@@ -156,7 +163,7 @@ For every Bead you issue you must set:
   "must", "will", or explanatory clauses. Write ` + "`make test`" + ` not ` + "`make test should pass`" + `.
   Vague statements ("review the code", "ensure correctness") are not acceptable. If you cannot write
   a runnable exit criterion for a Bead, that is a signal the Bead is scoped too narrowly to be
-  independently verifiable — merge it with a related Bead that produces a testable artifact.
+  independently verifiable — merge it with a related Bead that produces a testable artifact.` + goExitCriteriaRule + `
 
 Surface ambiguities in the design doc explicitly in the ambiguities field. Do not silently resolve them.
 
@@ -273,6 +280,9 @@ func reconcileDecompositionSystemPrompt(lang string) string {
 
 Vague or blanket defenses ("this is by design", "not applicable") are not acceptable for a disagree.
 updated_bead must be the complete corrected Bead spec — all fields, not just the changed ones.
+When the finding concerns exit_criteria (e.g. "build-only check", "no runtime test", "missing
+smoke test"), the exit_criteria field in updated_bead must be different from the original —
+updating full_text alone is not sufficient.
 
 When fixing an exit criterion that uses an unsupported invocation pattern (e.g. stdin when the
 tool only accepts file paths), replace it with an equivalent check using a supported pattern —
@@ -343,6 +353,35 @@ Do not state causes — state what the evidence is consistent with.
 Respond with JSON only, no prose before or after:
 {
   "analyzer_interpretation": "<hedged interpretation of the mechanical findings>"
+}`
+
+const testVerificationSystemPrompt = `You are an independent test correctness reviewer.
+
+You receive a bead specification and a test file written against it.
+
+Your task:
+1. Read the specification carefully.
+2. For each test assertion in the test file (expected values, counts, comparisons), independently derive the correct expected value from the specification — reason from the spec, not from what the test says.
+3. Compare your derived value to what the test actually asserts.
+
+Report MATCH when your derived value agrees with the test assertion.
+Report MISMATCH when your derived value differs — provide the correct expected value and cite the spec text that leads to it.
+
+Be specific: name the test function, quote the assertion, state both values.
+
+Respond with JSON only, no prose before or after:
+{
+  "verifications": [
+    {
+      "test_function": "<test function name>",
+      "assertion": "<the assertion text from the test, e.g. 'len(moves) != 26'>",
+      "derived_value": "<value you derived from the spec>",
+      "test_value": "<value the test asserts>",
+      "result": "MATCH" | "MISMATCH",
+      "spec_citation": "<relevant spec text>"
+    }
+  ],
+  "summary": "<one-sentence summary — e.g., 'All 5 assertions match' or '1 of 5 assertions has a wrong expected value'>"
 }`
 
 const compressAnalysisSystemPrompt = `You maintain a compressed record of execution history for a single Bead.

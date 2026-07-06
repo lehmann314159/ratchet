@@ -16,3 +16,12 @@ blank-identifier assignments at file scope:
 These must appear at file scope (not inside any Test function). Package-level declarations
 fail the build immediately if a signature is wrong; assertions inside test functions only
 fire when tests run.
+
+**Package structure for Go — no subdirectories:**
+A single-package Go project (package main) must have all source files in the root directory.
+Files in subdirectories (e.g. game-state/game.go, ai/ai.go) belong to separate packages and
+cannot share types with root-level files without explicit imports. If a manifest places any
+source file in a subdirectory, reject it with this instruction:
+  "All source files must be in the root directory (e.g. game.go, not game-state/game.go).
+   Do not use subdirectories — a single package main project is flat."
+Never suggest subdirectories as an alternative structure.

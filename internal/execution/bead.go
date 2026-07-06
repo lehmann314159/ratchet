@@ -146,7 +146,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	tools := toolDefinitions()
 	messages := []ollama.Message{
 		{Role: "system", Content: guidance.InjectForVerbPath(executeBeadSystemPrompt, folderPath, db.VerbExecuteBead, "")},
-		{Role: "user", Content: buildBeadUserMsg(parsedBead.FullText, parsedBead.OutputFiles, parsedBead.ExitCriteria, contextFiles, priorHistory)},
+		{Role: "user", Content: buildBeadUserMsg(parsedBead.FullText, parsedBead.OutputFiles, parsedBead.ExitCriteria, contextFiles, priorHistory, folderPath)},
 	}
 
 	for turn := 1; ; turn++ {
@@ -289,20 +289,57 @@ func stubLine(mode string, step int) string {
 // numbered checklist so the agent has an unambiguous done condition.
 // contextFiles and priorHistory are injected after the task so the model has
 // all necessary context without spending turns on orientation reads.
-func buildBeadUserMsg(specText string, outputFiles []string, exitCriteria []string, contextFiles, priorHistory string) string {
+//
+// When the bead is in test-first mode (test files absent, impl files also present
+// in output_files), the message is narrowed: only test files are listed in Output
+// Files, and the exit criterion is replaced with a compile-only check. This causes
+// the model to write tests first so they can be independently verified before
+// implementation begins.
+func buildBeadUserMsg(specText string, outputFiles []string, exitCriteria []string, contextFiles, priorHistory, folderPath string) string {
 	var msg string
 
-	if len(outputFiles) > 0 {
-		msg += "## Output Files\n\nYou may ONLY write to these files. Do not create any other files.\n\n"
+	testFirst := isTestFirstMode(folderPath, outputFiles)
+
+	// In test-first mode, show only the test files as the write target.
+	displayFiles := outputFiles
+	if testFirst {
+		var tf []string
 		for _, f := range outputFiles {
+			if strings.HasSuffix(f, "_test.go") {
+				tf = append(tf, f)
+			}
+		}
+		displayFiles = tf
+	}
+
+	if len(displayFiles) > 0 {
+		msg += "## Output Files\n\nYou may ONLY write to these files. Do not create any other files.\n\n"
+		for _, f := range displayFiles {
 			msg += fmt.Sprintf("- %s\n", f)
 		}
 		msg += "\n"
 	}
 
+	if testFirst {
+		msg += "## Test-First Mode\n\n" +
+			"This bead delivers both test files and implementation files. On this first attempt, " +
+			"write ONLY the test files listed above. Do NOT write any implementation files — " +
+			"those will be written in the next attempt after your tests are independently reviewed.\n\n" +
+			"The stub implementations already compile. Your tests WILL FAIL against the stubs — " +
+			"this is expected. Do not try to make the tests pass on this attempt.\n\n" +
+			"Write test cases that correctly verify what the specification says the implementation " +
+			"should do. Be precise about expected values — derive them from the specification.\n\n"
+	}
+
 	msg += specText
 
-	if len(exitCriteria) > 0 {
+	if testFirst {
+		msg += "\n\n## Exit Criteria (Test-First Mode)\n\n" +
+			"Your only exit criterion for this attempt is:\n\n" +
+			"1. go test -c -o /dev/null ./...\n\n" +
+			"This compiles all source and test files without running any tests. " +
+			"A clean compile is your only goal. Do not run the tests."
+	} else if len(exitCriteria) > 0 {
 		msg += "\n\n## Exit Criteria\n\nYour done condition is exactly: each of the following checks passes AND every Output File above exists on disk. Run only these checks — no other test commands. Stop immediately once all pass.\n\n"
 		for i, c := range exitCriteria {
 			msg += fmt.Sprintf("%d. %s\n", i+1, c)
@@ -318,6 +355,33 @@ func buildBeadUserMsg(specText string, outputFiles []string, exitCriteria []stri
 	}
 
 	return msg
+}
+
+// isTestFirstMode returns true when the bead has both *_test.go files and
+// non-test .go files in output_files, and ALL *_test.go output files are
+// absent from disk. In this state, attempt 1 should write only the test files
+// so they can be independently verified before implementation begins.
+func isTestFirstMode(folderPath string, outputFiles []string) bool {
+	hasTest, hasImpl := false, false
+	for _, f := range outputFiles {
+		if strings.HasSuffix(f, "_test.go") {
+			hasTest = true
+		} else if strings.HasSuffix(f, ".go") {
+			hasImpl = true
+		}
+	}
+	if !hasTest || !hasImpl {
+		return false
+	}
+	// All test files must be absent from disk.
+	for _, f := range outputFiles {
+		if strings.HasSuffix(f, "_test.go") {
+			if _, err := os.Stat(filepath.Join(folderPath, f)); err == nil {
+				return false // test file already exists — not a first attempt
+			}
+		}
+	}
+	return true
 }
 
 // loadContextFiles reads all Go source files and go.mod from folderPath

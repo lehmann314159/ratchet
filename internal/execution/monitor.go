@@ -97,8 +97,8 @@ func runMonitor(d *db.DB, oc *ollama.Client, execID int64) error {
 			}
 			traceStr := string(traceBytes)
 
-			// Mechanical stall check: if the trace hasn't grown for 3 consecutive
-			// ticks (~90s) and the last event is a TURN marker, the model is likely
+			// Mechanical stall check: if the trace hasn't grown for 24 consecutive
+			// ticks (~12min) and the last event is a TURN marker, the model is likely
 			// stuck generating a tool-call argument (write_file content doesn't
 			// stream to the trace). Fire without calling the model.
 			currentSize := int64(len(traceBytes))
@@ -109,7 +109,7 @@ func runMonitor(d *db.DB, oc *ollama.Client, execID int64) error {
 			}
 			lastSize = currentSize
 
-			if staleCount >= 3 && isWriteFileStall(traceStr) {
+			if staleCount >= 24 && isWriteFileStall(traceStr) {
 				fired = true
 				if err := writeMonitorFired(d, execID, true); err != nil {
 					return fmt.Errorf("write monitor_fired (stall): %w", err)
@@ -146,9 +146,15 @@ func runMonitor(d *db.DB, oc *ollama.Client, execID int64) error {
 // the tool-call JSON doesn't stream to the trace, so the file appears frozen
 // at the TURN marker. We check that the last non-empty trace line is a TURN
 // marker (not a [tool:] or [result] line, which would mean a command is running).
+//
+// We require at least two TURN markers before firing. A trace with only [TURN 1]
+// means the model is still on its first response — it may be streaming a large
+// write_file argument and simply hasn't finished yet. Firing here (the project 64
+// pattern) kills the model mid-generation. Two markers means the model completed
+// at least one turn and is now stalling on a subsequent one (the project 62 pattern).
 func isWriteFileStall(trace string) bool {
-	if !strings.Contains(trace, "[TURN ") {
-		return false // model hasn't started yet
+	if strings.Count(trace, "[TURN ") < 2 {
+		return false // first turn not yet complete; model may still be generating
 	}
 	lines := strings.Split(strings.TrimRight(trace, "\n "), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {

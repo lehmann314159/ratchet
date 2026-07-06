@@ -54,6 +54,7 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	outputFileStatus := checkOutputFiles(beadFullTextJSON, folderPath)
 
 	var beadSpec struct {
+		FullText     string   `json:"full_text"`
 		OutputFiles  []string `json:"output_files"`
 		ExitCriteria []string `json:"exit_criteria"`
 	}
@@ -85,6 +86,13 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	model, err := loadVerbModel(ctx, d, job.ProjectID, db.VerbAnalyzeExecution)
 	if err != nil {
 		return "", err
+	}
+
+	// Independent test verification after a test-first attempt.
+	if isPostTestFirstState(folderPath, beadSpec.OutputFiles) {
+		if verif := verifyTestExpectations(ctx, oc, model, folderPath, beadSpec.FullText, beadSpec.OutputFiles); verif != "" {
+			mechanicalFindings += "\n\n" + verif
+		}
 	}
 
 	lastFailure, err := loadLastValidationFailure(ctx, d, job.ID)
@@ -336,4 +344,89 @@ func checkGoTestCompilation(ctx context.Context, folderPath string) string {
 		return ""
 	}
 	return "go test -c -o /dev/null ./... (compile-only check) failed:\n" + strings.TrimSpace(string(out))
+}
+
+// isPostTestFirstState returns true when the bead has *_test.go files that
+// exist on disk but non-test .go implementation files are absent. This indicates
+// the previous execution was a test-first attempt: tests written, implementation not yet.
+func isPostTestFirstState(folderPath string, outputFiles []string) bool {
+	testExists, implMissing := false, false
+	for _, f := range outputFiles {
+		_, err := os.Stat(filepath.Join(folderPath, f))
+		if strings.HasSuffix(f, "_test.go") {
+			if err == nil {
+				testExists = true
+			}
+		} else if strings.HasSuffix(f, ".go") {
+			if err != nil {
+				implMissing = true
+			}
+		}
+	}
+	return testExists && implMissing
+}
+
+// verifyTestExpectations calls the ANALYZE model to independently verify test
+// assertions against the bead specification. Returns a findings string for
+// inclusion in mechanicalFindings; returns "" if verification is not possible
+// or produces no useful signal.
+func verifyTestExpectations(ctx context.Context, oc *ollama.Client, model, folderPath, beadFullText string, outputFiles []string) string {
+	var testContent strings.Builder
+	for _, f := range outputFiles {
+		if !strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(folderPath, f))
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(&testContent, "### %s\n\n```go\n%s\n```\n\n", f, string(content))
+	}
+	if testContent.Len() == 0 {
+		return ""
+	}
+
+	userMsg := "## Bead Specification\n\n" + beadFullText +
+		"\n\n## Test File\n\n" + strings.TrimSpace(testContent.String())
+
+	raw, err := oc.Chat(ctx, model, []ollama.Message{
+		{Role: "system", Content: testVerificationSystemPrompt},
+		{Role: "user", Content: userMsg},
+	}, nil)
+	if err != nil {
+		return ""
+	}
+
+	var out struct {
+		Verifications []struct {
+			TestFunction string `json:"test_function"`
+			Assertion    string `json:"assertion"`
+			DerivedValue string `json:"derived_value"`
+			TestValue    string `json:"test_value"`
+			Result       string `json:"result"`
+			SpecCitation string `json:"spec_citation"`
+		} `json:"verifications"`
+		Summary string `json:"summary"`
+	}
+	if err := json.Unmarshal([]byte(ollama.ExtractJSON(raw)), &out); err != nil || len(out.Verifications) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("[Test-first verification] Independent review of test expectations against spec:\n")
+	hasMismatch := false
+	for _, v := range out.Verifications {
+		if v.Result == "MISMATCH" {
+			hasMismatch = true
+			fmt.Fprintf(&sb, "  MISMATCH %s — assertion %q: test says %q, spec implies %q (spec: %q)\n",
+				v.TestFunction, v.Assertion, v.TestValue, v.DerivedValue, v.SpecCitation)
+		} else {
+			fmt.Fprintf(&sb, "  MATCH %s — %q\n", v.TestFunction, v.Assertion)
+		}
+	}
+	if !hasMismatch {
+		sb.WriteString("  All assertions match the specification.")
+	}
+	sb.WriteString("\nSummary: " + out.Summary)
+	return sb.String()
 }

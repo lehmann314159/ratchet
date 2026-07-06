@@ -172,6 +172,15 @@ func goFixBeadSpec(bead *ParsedBead) bool {
 		}
 	}
 
+	// Add filename arguments to bare `grep -q 'func Foo'` calls that lack one.
+	// Must run before addGrepGuard, which skips criteria already starting with grep.
+	for i, c := range bead.ExitCriteria {
+		if result, ok := fixBareGrepFile(c, bead.OutputFiles); ok {
+			bead.ExitCriteria[i] = result
+			fixed = true
+		}
+	}
+
 	// Add grep guard for specific -run TestFoo criteria when the bead owns a
 	// test file. This makes the criterion exit 1 when the test function has not
 	// been written, instead of silently exiting 0 ("no tests to run").
@@ -181,6 +190,27 @@ func goFixBeadSpec(bead *ParsedBead) bool {
 				bead.ExitCriteria[i] = guarded
 				fixed = true
 			}
+		}
+		// Second pass: for go test criteria still lacking a -run flag after the
+		// first pass (addGrepGuard was a no-op because there was no test name to
+		// extract), add a broad vacuous-pass guard. This catches the case where
+		// DECOMPOSE emits "go test -v ." without naming a specific test function —
+		// the guard ensures the criterion exits 1 when no tests were written rather
+		// than silently passing with "no tests to run". The DECOMPOSE prompt now
+		// requires -run TestFoo for Go beads; this is defense-in-depth.
+		for i, c := range bead.ExitCriteria {
+			if !strings.Contains(c, "go test") || strings.HasPrefix(c, "grep -q") {
+				continue
+			}
+			if extractRunTestName(c) != "" {
+				continue // already has -run; guard applied in first pass
+			}
+			tf := testFileForName("Test", bead.OutputFiles)
+			if tf == "" {
+				continue
+			}
+			bead.ExitCriteria[i] = fmt.Sprintf("grep -q 'func Test' %s && %s", tf, c)
+			fixed = true
 		}
 		return fixed // owns a test file — no further structural fix needed
 	}
@@ -402,3 +432,60 @@ func hasNamedFile(files []string, name string) bool {
 	return false
 }
 
+// fixBareGrepFile adds a filename argument to each `grep -q 'func Foo'`
+// subcommand in criterion that is missing one. The criterion is split on " && "
+// to process each subcommand independently; results are rejoined. Function
+// names beginning with "Test" are directed to the appropriate *_test.go via
+// testFileForName; other function names go to the first non-test .go file.
+// Returns the fixed criterion and true if any change was made.
+func fixBareGrepFile(criterion string, outputFiles []string) (string, bool) {
+	const grepPrefix = "grep -q '"
+	parts := strings.Split(criterion, " && ")
+	fixed := false
+	for i, part := range parts {
+		if !strings.HasPrefix(part, grepPrefix) {
+			continue
+		}
+		after := part[len(grepPrefix):]
+		closeIdx := strings.Index(after, "'")
+		if closeIdx < 0 {
+			continue
+		}
+		pattern := after[:closeIdx]
+		afterClose := strings.TrimLeft(after[closeIdx+1:], " \t")
+		// A filename is absent when nothing follows the closing quote, or when
+		// only a shell connective (&&, ||, |) follows.
+		if afterClose != "" &&
+			!strings.HasPrefix(afterClose, "&&") &&
+			!strings.HasPrefix(afterClose, "||") &&
+			!strings.HasPrefix(afterClose, "|") {
+			continue // already has a filename argument
+		}
+		funcName := strings.TrimPrefix(pattern, "func ")
+		var file string
+		if strings.HasPrefix(funcName, "Test") {
+			file = testFileForName(funcName, outputFiles)
+		} else {
+			file = firstSourceGoFile(outputFiles)
+		}
+		if file == "" {
+			continue
+		}
+		parts[i] = grepPrefix + pattern + "' " + file
+		fixed = true
+	}
+	if !fixed {
+		return criterion, false
+	}
+	return strings.Join(parts, " && "), true
+}
+
+// firstSourceGoFile returns the first non-test .go file in outputFiles.
+func firstSourceGoFile(outputFiles []string) string {
+	for _, f := range outputFiles {
+		if strings.HasSuffix(f, ".go") && !strings.HasSuffix(f, "_test.go") {
+			return f
+		}
+	}
+	return ""
+}

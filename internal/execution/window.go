@@ -5,6 +5,7 @@ package execution
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -87,14 +88,24 @@ func RunExecutionWindow(ctx context.Context, d *db.DB, ollamaURL string, job *db
 		monitorHonored = 1
 	}
 
+	testFirstAttempt := 0
+	var beadSpec struct {
+		OutputFiles []string `json:"output_files"`
+	}
+	if err := json.Unmarshal([]byte(fullText), &beadSpec); err == nil {
+		if isTestFirstMode(folderPath, beadSpec.OutputFiles) {
+			testFirstAttempt = 1
+		}
+	}
+
 	// Insert the executions row. termination_cause, monitor_fired, ended_at are
 	// written later by their respective owners.
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := d.ExecContext(ctx, `
 		INSERT INTO executions
-		  (project_id, bead_id, bead_revision_id, trace_path, monitor_honored, started_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		job.ProjectID, beadID, revID, tracePath, monitorHonored, now)
+		  (project_id, bead_id, bead_revision_id, trace_path, monitor_honored, started_at, test_first_attempt)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		job.ProjectID, beadID, revID, tracePath, monitorHonored, now, testFirstAttempt)
 	if err != nil {
 		return fmt.Errorf("insert execution: %w", err)
 	}

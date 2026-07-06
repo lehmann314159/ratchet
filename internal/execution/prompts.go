@@ -29,10 +29,13 @@ Process:
    test cases, or other declarations that were present before you started.
    Do not regenerate prior-bead sections from memory — copy them verbatim from
    the file you just read.
-   For any file likely to exceed ~150 lines, prefer two write_file calls over one:
-   first write the complete file with all type definitions and stub function bodies
-   (returning zero values), then overwrite with the full implementations. This ensures
-   partial progress survives if the bead runs out of time before the second write.
+   For any file you are writing for the first time (no existing content on disk) that
+   is likely to exceed ~250 lines, prefer two write_file calls: first write the complete
+   file with all type definitions and stub function bodies (returning zero values), then
+   overwrite with the full implementations. This ensures partial progress survives a
+   timeout. If the file already exists on disk (you read it above), overwrite it in a
+   single write_file call with the complete updated contents — do not split writes for
+   an existing file.
 3. Implement exactly what the Bead specification asks for — nothing more, nothing less.
 4. Verify your work by running each item in the Exit Criteria. These are your done condition.
    Run ONLY the commands listed in the Exit Criteria — do not run broader checks.

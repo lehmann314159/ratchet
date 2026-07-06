@@ -5,8 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -152,6 +156,163 @@ func orientationOnlyNote(ctx context.Context, d *db.DB, beadID int64) string {
 		"not begin the task. The content of the bead spec is not the problem."
 }
 
+// partialProgressNote checks whether some (but not all) output_files for the
+// bead already exist on disk. When partial state is present, ADJUDICATE must
+// know which files are done and which remain — otherwise it misreads the
+// attempt as "no progress" and gives contradictory orientation instructions.
+func partialProgressNote(folderPath string, outputFiles []string) string {
+	if len(outputFiles) == 0 {
+		return ""
+	}
+	type fileStatus struct {
+		name string
+		size int64
+	}
+	var present, absent []fileStatus
+	for _, f := range outputFiles {
+		info, err := os.Stat(filepath.Join(folderPath, f))
+		if err == nil {
+			present = append(present, fileStatus{f, info.Size()})
+		} else {
+			absent = append(absent, fileStatus{f, 0})
+		}
+	}
+	if len(present) == 0 || len(absent) == 0 {
+		return "" // all present (success path) or all absent (normal start)
+	}
+	var parts []string
+	for _, f := range present {
+		parts = append(parts, fmt.Sprintf("%s present (%d bytes)", f.name, f.size))
+	}
+	for _, f := range absent {
+		parts = append(parts, fmt.Sprintf("%s not yet written", f.name))
+	}
+	return "[Partial progress] Some output_files already exist on disk: " +
+		strings.Join(parts, "; ") + ". Do NOT rewrite files that are already present " +
+		"and passing — focus only on the missing files listed above."
+}
+
+// stubImplNote fires when all output files are present on disk but some
+// non-test Go functions within them have zero-value stub bodies (e.g. return nil).
+// This catches the case where a prior attempt wrote a partial implementation —
+// NewGame correct, ApplyMove returning nil — and ADJUDICATE needs to direct the
+// next attempt to fill in only the stubs rather than rewrite from scratch.
+func stubImplNote(folderPath string, outputFiles []string) string {
+	var stubs []string
+	for _, f := range outputFiles {
+		if !strings.HasSuffix(f, ".go") || strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		stubs = append(stubs, detectStubFuncs(filepath.Join(folderPath, f), f)...)
+	}
+	if len(stubs) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"[Stub implementation] The following functions have zero-value stub bodies and are not yet implemented: %s. "+
+			"The surrounding code in these files is likely correct. "+
+			"ADJUDICATE should instruct the executor to: read the file(s) first, then overwrite with "+
+			"a single write_file call that keeps all existing correct implementations and fills in "+
+			"only the stub function bodies listed above.",
+		strings.Join(stubs, "; "))
+}
+
+// detectStubFuncs parses a Go source file and returns names of functions whose
+// bodies consist of a single zero-value return statement.
+func detectStubFuncs(path, basename string) []string {
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, decl := range node.Decls {
+		fd, ok := decl.(*ast.FuncDecl)
+		if !ok || fd.Body == nil {
+			continue
+		}
+		if fd.Type.Results == nil || fd.Type.Results.NumFields() == 0 {
+			continue
+		}
+		if len(fd.Body.List) == 1 {
+			ret, ok := fd.Body.List[0].(*ast.ReturnStmt)
+			if ok && isZeroValueReturn(ret) {
+				names = append(names, fmt.Sprintf("%s (in %s)", fd.Name.Name, basename))
+			}
+		}
+	}
+	return names
+}
+
+func isZeroValueReturn(ret *ast.ReturnStmt) bool {
+	for _, r := range ret.Results {
+		if !isZeroValueExpr(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isZeroValueExpr(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return e.Name == "nil" || e.Name == "false"
+	case *ast.BasicLit:
+		switch e.Kind {
+		case token.INT:
+			return e.Value == "0"
+		case token.STRING:
+			return e.Value == `""` || e.Value == "``"
+		}
+	case *ast.CompositeLit:
+		return len(e.Elts) == 0
+	case *ast.UnaryExpr:
+		if e.Op == token.AND {
+			cl, ok := e.X.(*ast.CompositeLit)
+			return ok && len(cl.Elts) == 0
+		}
+	}
+	return false
+}
+
+// testFirstCompleteNote fires when the bead has *_test.go files that exist on
+// disk but non-test implementation files are absent — i.e., the previous
+// attempt was a test-first attempt that wrote only test files.
+// Returns a note to inject into mechanical findings so ADJUDICATE knows to
+// always emit execute_revised, lock the test files, and direct the next
+// attempt to write only the implementation.
+func testFirstCompleteNote(folderPath string, outputFiles []string) string {
+	var testFiles, implFiles []string
+	for _, f := range outputFiles {
+		_, err := os.Stat(filepath.Join(folderPath, f))
+		if strings.HasSuffix(f, "_test.go") {
+			if err == nil {
+				testFiles = append(testFiles, f)
+			}
+		} else if strings.HasSuffix(f, ".go") {
+			if err != nil {
+				implFiles = append(implFiles, f)
+			}
+		}
+	}
+	if len(testFiles) == 0 || len(implFiles) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"[Test-first complete] Test files were written in the previous (test-first) attempt: %s. "+
+			"Implementation files are absent: %s.\n\n"+
+			"ADJUDICATE INSTRUCTIONS — this note requires specific handling:\n"+
+			"1. Decision MUST be execute_revised — tests written but implementation absent; never execute_as_is or declare_success.\n"+
+			"2. If the mechanical findings above contain \"[Test-first verification]\" MISMATCH entries: "+
+			"incorporate the exact corrections into the revised full_text (specific file, line context, old value → new value). "+
+			"Instruct the executor to apply each correction before writing any implementation file.\n"+
+			"3. The revised full_text MUST state: \"The test file(s) %s are LOCKED — do NOT modify them "+
+			"(except for the corrections specified above). Write ONLY the implementation file(s): %s.\"",
+		strings.Join(testFiles, ", "), strings.Join(implFiles, ", "),
+		strings.Join(testFiles, ", "), strings.Join(implFiles, ", "),
+	)
+}
+
 // missingPathNote detects the pattern where the latest execution ended with a
 // write_file call that omitted the path argument. The model generated correct
 // content but the file was never written. Returns a note to inject into
@@ -254,7 +415,16 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 	}
 
 	findings := analysis.MechanicalFindings
+	if note := testFirstCompleteNote(h.folderPath, currentBead.OutputFiles); note != "" {
+		findings += "\n\n" + note
+	}
 	if note := vacuousPassNote(currentBead, findings); note != "" {
+		findings += "\n\n" + note
+	}
+	if note := partialProgressNote(h.folderPath, currentBead.OutputFiles); note != "" {
+		findings += "\n\n" + note
+	}
+	if note := stubImplNote(h.folderPath, currentBead.OutputFiles); note != "" {
 		findings += "\n\n" + note
 	}
 	if note := orientationOnlyNote(ctx, d, beadID); note != "" {
@@ -600,7 +770,7 @@ func (h *AdjudicateNextExecution) atExecutionCap(ctx context.Context, tx *sql.Tx
 		return false, fmt.Errorf("load max_execution_attempts: %w", err)
 	}
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM executions WHERE bead_id = ? AND infra_failure = 0`, beadID,
+		`SELECT COUNT(*) FROM executions WHERE bead_id = ? AND infra_failure = 0 AND test_first_attempt = 0`, beadID,
 	).Scan(&count); err != nil {
 		return false, fmt.Errorf("count executions for bead %d: %w", beadID, err)
 	}
