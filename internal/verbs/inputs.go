@@ -342,10 +342,18 @@ func enqueueBeadExecution(ctx context.Context, tx *sql.Tx, projectID, beadID int
 	if beadSpecHasTestFiles(fullText) {
 		verb = db.VerbRefineTestsA
 	}
-	_, err := tx.ExecContext(ctx, `
-		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
-		VALUES (?, ?, ?, 'pending', ?, ?)`,
-		projectID, verb, beadID, now, now)
+	var err error
+	if verb == db.VerbRefineTestsA {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, refinement_cycle_id, created_at, updated_at)
+			VALUES (?, ?, ?, 'pending', 1, ?, ?)`,
+			projectID, verb, beadID, now, now)
+	} else {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
+			VALUES (?, ?, ?, 'pending', ?, ?)`,
+			projectID, verb, beadID, now, now)
+	}
 	return err
 }
 

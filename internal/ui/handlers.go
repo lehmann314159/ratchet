@@ -113,8 +113,15 @@ func (s *server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 	// Delete prior failed attempts so the strike count resets to zero.
 	_, _ = s.db.ExecContext(r.Context(),
 		`DELETE FROM handoff_attempts WHERE job_id = ? AND validation_result != 'valid'`, id)
-	_, err = s.db.ExecContext(r.Context(),
-		`UPDATE handoff_jobs SET status = 'pending', updated_at = ? WHERE id = ?`, now, id)
+	// For REFINE_TESTS jobs, increment refinement_cycle_id so the cap check resets.
+	_, err = s.db.ExecContext(r.Context(), `
+		UPDATE handoff_jobs
+		SET status = 'pending', updated_at = ?,
+		    refinement_cycle_id = CASE
+		        WHEN verb LIKE 'REFINE_TESTS%' THEN COALESCE(refinement_cycle_id, 1) + 1
+		        ELSE refinement_cycle_id
+		    END
+		WHERE id = ?`, now, id)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("requeue failed: %v", err), http.StatusInternalServerError)
 		return

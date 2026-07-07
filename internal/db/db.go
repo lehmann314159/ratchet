@@ -27,6 +27,8 @@ var columnMigrations = []columnMigration{
 	{"executions", "infra_failure", "INTEGER NOT NULL DEFAULT 0"},
 	{"beads", "execution_attempts_override", "INTEGER"},
 	{"executions", "test_first_attempt", "INTEGER NOT NULL DEFAULT 0"},
+	{"handoff_jobs", "refinement_cycle_id", "INTEGER"},
+	{"test_refinements", "cycle_id", "INTEGER NOT NULL DEFAULT 1"},
 }
 
 //go:embed schema.sql

@@ -63,13 +63,13 @@ func claimNextJob(ctx context.Context, d *db.DB, projectID int64) (*db.HandoffJo
 			ORDER BY created_at ASC
 			LIMIT 1
 		)
-		RETURNING id, project_id, verb, bead_id, status, created_at, updated_at`,
+		RETURNING id, project_id, verb, bead_id, status, refinement_cycle_id, created_at, updated_at`,
 		now, projectID)
 
 	j := &db.HandoffJob{}
 	var createdAt, updatedAt string
 	if err := row.Scan(
-		&j.ID, &j.ProjectID, &j.Verb, &j.BeadID, &j.Status, &createdAt, &updatedAt,
+		&j.ID, &j.ProjectID, &j.Verb, &j.BeadID, &j.Status, &j.RefinementCycleID, &createdAt, &updatedAt,
 	); err == sql.ErrNoRows {
 		return nil, nil
 	} else if err != nil {

@@ -87,13 +87,21 @@ func RunResumeProjectMain(args []string) {
 		firstVerb = db.VerbRefineTestsA
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
-		VALUES (?, ?, ?, 'pending', ?, ?)`,
-		*projectID, firstVerb, beadID, now, now,
-	); err != nil {
+	var enqueueErr error
+	if firstVerb == db.VerbRefineTestsA {
+		_, enqueueErr = tx.ExecContext(ctx, `
+			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, refinement_cycle_id, created_at, updated_at)
+			VALUES (?, ?, ?, 'pending', 1, ?, ?)`,
+			*projectID, firstVerb, beadID, now, now)
+	} else {
+		_, enqueueErr = tx.ExecContext(ctx, `
+			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
+			VALUES (?, ?, ?, 'pending', ?, ?)`,
+			*projectID, firstVerb, beadID, now, now)
+	}
+	if enqueueErr != nil {
 		_ = tx.Rollback()
-		slog.Error("resume-project: enqueue first bead", "error", err)
+		slog.Error("resume-project: enqueue first bead", "error", enqueueErr)
 		os.Exit(1)
 	}
 

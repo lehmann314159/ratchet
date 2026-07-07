@@ -128,13 +128,14 @@ CREATE TABLE IF NOT EXISTS spec_revisions (
 -- (audit_reconcile_rounds) rather than having rows here.
 -- MONITOR_EXECUTION has no row: its outputs have no malformed-output shape to validate.
 CREATE TABLE IF NOT EXISTS handoff_jobs (
-  id          INTEGER PRIMARY KEY,
-  project_id  INTEGER NOT NULL REFERENCES projects(id),
-  verb        TEXT    NOT NULL,
-  bead_id     INTEGER REFERENCES beads(id),  -- NULL for project-scoped verbs
-  status      TEXT    NOT NULL CHECK (status IN ('pending', 'running', 'failed_retry', 'escalated', 'complete')),
-  created_at  TIMESTAMP NOT NULL,
-  updated_at  TIMESTAMP NOT NULL
+  id                    INTEGER PRIMARY KEY,
+  project_id            INTEGER NOT NULL REFERENCES projects(id),
+  verb                  TEXT    NOT NULL,
+  bead_id               INTEGER REFERENCES beads(id),  -- NULL for project-scoped verbs
+  status                TEXT    NOT NULL CHECK (status IN ('pending', 'running', 'failed_retry', 'escalated', 'complete')),
+  refinement_cycle_id   INTEGER,  -- non-NULL only for REFINE_TESTS_A/B jobs (incremented on requeue)
+  created_at            TIMESTAMP NOT NULL,
+  updated_at            TIMESTAMP NOT NULL
 );
 
 -- Strike count is never stored. It is COUNT(*) WHERE validation_result != 'valid'.
@@ -181,6 +182,7 @@ CREATE TABLE IF NOT EXISTS test_refinements (
   id          INTEGER PRIMARY KEY,
   project_id  INTEGER NOT NULL REFERENCES projects(id),
   bead_id     INTEGER NOT NULL REFERENCES beads(id),
+  cycle_id    INTEGER NOT NULL DEFAULT 1,  -- incremented on requeue (scopes cap and consensus checks)
   turn        INTEGER NOT NULL,
   verb        TEXT    NOT NULL CHECK (verb IN ('REFINE_TESTS_A', 'REFINE_TESTS_B')),
   changed     INTEGER NOT NULL,   -- 0 or 1

@@ -149,13 +149,14 @@ type Adjudication struct {
 
 // HandoffJob represents a row in the handoff_jobs table.
 type HandoffJob struct {
-	ID        int64
-	ProjectID int64
-	Verb      string
-	BeadID    sql.NullInt64 // NULL for project-scoped verbs
-	Status    string        // 'pending' | 'running' | 'failed_retry' | 'escalated' | 'complete'
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID                int64
+	ProjectID         int64
+	Verb              string
+	BeadID            sql.NullInt64 // NULL for project-scoped verbs
+	Status            string        // 'pending' | 'running' | 'failed_retry' | 'escalated' | 'complete'
+	RefinementCycleID sql.NullInt64 // non-NULL only for REFINE_TESTS_A/B jobs
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 // HandoffAttempt represents a row in the handoff_attempts table.
