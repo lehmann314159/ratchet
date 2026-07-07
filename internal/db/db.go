@@ -29,6 +29,7 @@ var columnMigrations = []columnMigration{
 	{"executions", "test_first_attempt", "INTEGER NOT NULL DEFAULT 0"},
 	{"handoff_jobs", "refinement_cycle_id", "INTEGER"},
 	{"test_refinements", "cycle_id", "INTEGER NOT NULL DEFAULT 1"},
+	{"test_refinements", "decision", "TEXT NOT NULL DEFAULT ''"},
 }
 
 //go:embed schema.sql
@@ -202,37 +203,30 @@ func (db *DB) seedRevisePendingAssignments() error {
 	return nil
 }
 
-// seedRefineTestsAssignments inserts REFINE_TESTS_A and REFINE_TESTS_B
-// verb_model_assignments for any project that is missing them.
-// A: seeded from AUDIT_DECOMPOSITION (qwen3:32b — independent reviewer).
-// B: seeded from RECONCILE_DECOMPOSITION (gemma4:31b — different priors).
-// This backfills projects created before REFINE_TESTS was added.
+// seedRefineTestsAssignments inserts REFINE_TESTS_WRITE, REFINE_TESTS_CRITIQUE,
+// and REFINE_TESTS_JUDGE verb_model_assignments for any project that is missing them.
+// Write/Judge: seeded from EXECUTE_BEAD (gemma4:31b — proven code writer).
+// Critique: seeded from AUDIT_DECOMPOSITION (qwen3:32b — independent reviewer).
+// This backfills projects created before the three-verb REFINE_TESTS was added.
 func (db *DB) seedRefineTestsAssignments() error {
-	_, err := db.Exec(`
-		INSERT INTO verb_model_assignments (project_id, verb, model)
-		SELECT project_id, 'REFINE_TESTS_A', model
-		FROM verb_model_assignments
-		WHERE verb = 'AUDIT_DECOMPOSITION'
-		  AND NOT EXISTS (
-		    SELECT 1 FROM verb_model_assignments x
-		    WHERE x.project_id = verb_model_assignments.project_id
-		      AND x.verb = 'REFINE_TESTS_A'
-		  )`)
-	if err != nil {
-		return fmt.Errorf("seed REFINE_TESTS_A assignments: %w", err)
-	}
-	_, err = db.Exec(`
-		INSERT INTO verb_model_assignments (project_id, verb, model)
-		SELECT project_id, 'REFINE_TESTS_B', model
-		FROM verb_model_assignments
-		WHERE verb = 'RECONCILE_DECOMPOSITION'
-		  AND NOT EXISTS (
-		    SELECT 1 FROM verb_model_assignments x
-		    WHERE x.project_id = verb_model_assignments.project_id
-		      AND x.verb = 'REFINE_TESTS_B'
-		  )`)
-	if err != nil {
-		return fmt.Errorf("seed REFINE_TESTS_B assignments: %w", err)
+	for _, pair := range []struct{ verb, srcVerb string }{
+		{"REFINE_TESTS_WRITE", "EXECUTE_BEAD"},
+		{"REFINE_TESTS_CRITIQUE", "AUDIT_DECOMPOSITION"},
+		{"REFINE_TESTS_JUDGE", "EXECUTE_BEAD"},
+	} {
+		_, err := db.Exec(`
+			INSERT INTO verb_model_assignments (project_id, verb, model)
+			SELECT project_id, ?, model
+			FROM verb_model_assignments
+			WHERE verb = ?
+			  AND NOT EXISTS (
+			    SELECT 1 FROM verb_model_assignments x
+			    WHERE x.project_id = verb_model_assignments.project_id
+			      AND x.verb = ?
+			  )`, pair.verb, pair.srcVerb, pair.verb)
+		if err != nil {
+			return fmt.Errorf("seed %s assignments: %w", pair.verb, err)
+		}
 	}
 	return nil
 }

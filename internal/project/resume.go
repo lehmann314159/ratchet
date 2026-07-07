@@ -84,11 +84,11 @@ func RunResumeProjectMain(args []string) {
 
 	firstVerb := db.VerbExecuteBead
 	if resumeBeadHasTestFiles(beadFullText) {
-		firstVerb = db.VerbRefineTestsA
+		firstVerb = db.VerbRefineTestsWrite
 	}
 
 	var enqueueErr error
-	if firstVerb == db.VerbRefineTestsA {
+	if firstVerb == db.VerbRefineTestsWrite {
 		_, enqueueErr = tx.ExecContext(ctx, `
 			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, refinement_cycle_id, created_at, updated_at)
 			VALUES (?, ?, ?, 'pending', 1, ?, ?)`,

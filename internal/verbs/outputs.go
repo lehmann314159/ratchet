@@ -120,21 +120,32 @@ type RevisePendingOutput struct {
 	Revisions []RevisePendingRevision `json:"revisions"`
 }
 
-// --- REFINE_TESTS_A / REFINE_TESTS_B ---
+// --- REFINE_TESTS_WRITE / REFINE_TESTS_CRITIQUE / REFINE_TESTS_JUDGE ---
 
-// RefineTestsFile is one test file entry in the REFINE_TESTS output.
+// RefineTestsFile is one test file entry in the REFINE_TESTS_WRITE output.
 type RefineTestsFile struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
 }
 
-// RefineTestsOutput is the structured output of a REFINE_TESTS turn.
-// Changed=true means the model corrected or wrote the test files.
-// Changed=false means the model reviewed and found nothing wrong.
-type RefineTestsOutput struct {
-	Changed   bool              `json:"changed"`
+// RefineTestsWriteOutput is the output of REFINE_TESTS_WRITE.
+type RefineTestsWriteOutput struct {
+	TestFiles []RefineTestsFile `json:"test_files"`
 	Summary   string            `json:"summary"`
-	TestFiles []RefineTestsFile `json:"test_files,omitempty"`
+}
+
+// RefineTestsCritiqueOutput is the output of REFINE_TESTS_CRITIQUE.
+type RefineTestsCritiqueOutput struct {
+	Findings   []string `json:"findings"`
+	AllCorrect bool     `json:"all_correct"`
+	Summary    string   `json:"summary"`
+}
+
+// RefineTestsJudgeOutput is the output of REFINE_TESTS_JUDGE.
+type RefineTestsJudgeOutput struct {
+	Decision     string `json:"decision"`     // "approved" or "revise"
+	Instructions string `json:"instructions"` // only set when decision="revise"
+	Summary      string `json:"summary"`
 }
 
 // --- ADJUDICATE_NEXT_EXECUTION ---

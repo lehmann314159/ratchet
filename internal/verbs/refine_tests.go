@@ -16,44 +16,35 @@ import (
 	"ratchet/internal/ollama"
 )
 
-// refinementTurnCap is the maximum number of model calls (A+B interleaved)
-// per cycle before a stalemate is declared. Cap=4 allows 2 full A→B rounds.
-const refinementTurnCap = 4
+// refinementCycleCap is the maximum number of write-critique-judge cycles
+// per bead before escalating to the user.
+const refinementCycleCap = 3
 
-// RefineTests implements REFINE_TESTS_A and REFINE_TESTS_B: a symmetric peer-model
-// loop that certifies test files before EXECUTE_BEAD runs.
-//
-// Each invocation is one "turn" of the loop. Commit decides whether to continue
-// (enqueue the peer verb), declare consensus (enqueue EXECUTE_BEAD), or
-// declare stalemate (escalate the job).
-//
-// Consensus rule: two consecutive turns in the same cycle both returned changed=false.
-// Stalemate rule: refinementTurnCap turns elapsed in the current cycle without consensus.
-// Grant & Requeue increments refinement_cycle_id on the job, starting a fresh cycle.
-type RefineTests struct {
-	verbName string // "REFINE_TESTS_A" or "REFINE_TESTS_B"
-}
+// refinementWriteAttempts is the maximum number of chat rounds within a single
+// REFINE_TESTS_WRITE call to fix compile errors before giving up.
+const refinementWriteAttempts = 3
 
-func (h *RefineTests) Verb() string { return h.verbName }
+// --- shared helpers ---
 
-func (h *RefineTests) Run(ctx context.Context, d *db.DB, oc *ollama.Client, job *db.HandoffJob) (string, error) {
+func loadRefineContext(ctx context.Context, d *db.DB, job *db.HandoffJob) (
+	bead *beadState, project *db.Project, folderPath string,
+	implContext string, testFilePaths []string, currentTestContent string, err error,
+) {
 	if !job.BeadID.Valid {
-		return "", fmt.Errorf("%s job %d has no bead_id", h.verbName, job.ID)
+		return nil, nil, "", "", nil, "", fmt.Errorf("job %d has no bead_id", job.ID)
 	}
-	beadID := job.BeadID.Int64
-
-	bead, err := loadBeadByID(ctx, d, beadID)
+	bead, err = loadBeadByID(ctx, d, job.BeadID.Int64)
 	if err != nil {
-		return "", err
+		return
 	}
-	project, err := loadProject(ctx, d, job.ProjectID)
+	project, err = loadProject(ctx, d, job.ProjectID)
 	if err != nil {
-		return "", err
+		return
 	}
-	folderPath := project.FolderPath
+	folderPath = project.FolderPath
 
-	// Collect implementation files from prior beads for domain context.
-	var implContext strings.Builder
+	// Collect non-test .go files from prior beads for domain context.
+	var implBuf strings.Builder
 	if entries, rdErr := os.ReadDir(folderPath); rdErr == nil {
 		for _, entry := range entries {
 			if entry.IsDir() {
@@ -64,116 +55,179 @@ func (h *RefineTests) Run(ctx context.Context, d *db.DB, oc *ollama.Client, job 
 				continue
 			}
 			if content, rerr := os.ReadFile(filepath.Join(folderPath, name)); rerr == nil {
-				fmt.Fprintf(&implContext, "### %s\n\n```go\n%s\n```\n\n", name, string(content))
+				fmt.Fprintf(&implBuf, "### %s\n\n```go\n%s\n```\n\n", name, string(content))
 			}
 		}
 	}
+	implContext = implBuf.String()
 
-	// Collect current test file content and run a compile check.
-	var testContent strings.Builder
-	var testFilePaths []string
+	// Collect current test file content.
+	var testBuf strings.Builder
 	for _, f := range bead.OutputFiles {
 		if !strings.HasSuffix(f, "_test.go") {
 			continue
 		}
 		testFilePaths = append(testFilePaths, f)
-		content, err := os.ReadFile(filepath.Join(folderPath, f))
-		if err != nil {
+		content, rerr := os.ReadFile(filepath.Join(folderPath, f))
+		if rerr != nil {
 			continue
 		}
-		fmt.Fprintf(&testContent, "### %s\n\n```go\n%s\n```\n\n", f, string(content))
+		fmt.Fprintf(&testBuf, "### %s\n\n```go\n%s\n```\n\n", f, string(content))
 	}
+	currentTestContent = testBuf.String()
+	return
+}
 
-	// Run compile check on current state of test files (before this turn's edits).
-	var compileStatus string
-	if testContent.Len() > 0 {
-		cmd := exec.CommandContext(ctx, "go", "test", "-c", "-o", os.DevNull, ".")
-		cmd.Dir = folderPath
-		compileOut, compileErr := cmd.CombinedOutput()
-		if compileErr != nil {
-			compileStatus = "FAILED:\n```\n" + strings.TrimSpace(string(compileOut)) + "\n```"
-			slog.Error("REFINE_TESTS: compile check failed", "verb", h.verbName, "bead_id", beadID, "output", string(compileOut))
-		} else {
-			compileStatus = "PASS"
-			slog.Info("REFINE_TESTS: compile check passed", "verb", h.verbName, "bead_id", beadID)
-		}
-	}
+func buildBaseUserMsg(bead *beadState, folderPath string, implContext string,
+	currentTestContent string, testFilePaths []string) string {
+	msg := "## Bead Specification\n\n" + bead.FullText
 
-	userMsg := "## Bead Specification\n\n" + bead.FullText
-
-	// Inject prescriptive design doc if present in the project folder.
 	if prescriptive, rerr := os.ReadFile(filepath.Join(folderPath, "design_doc_prescriptive.md")); rerr == nil {
-		userMsg += "\n\n## Prescriptive Design Document\n\n" + string(prescriptive)
+		msg += "\n\n## Prescriptive Design Document\n\n" + string(prescriptive)
 	}
 
-	if implContext.Len() > 0 {
-		userMsg += "\n\n## Implementation Files (prior beads — use for type definitions and domain conventions)\n\n" +
-			strings.TrimSpace(implContext.String())
+	if implContext != "" {
+		msg += "\n\n## Implementation Files (prior beads — types and conventions)\n\n" +
+			strings.TrimSpace(implContext)
 	}
-	if testContent.Len() > 0 {
-		userMsg += "\n\n## Current Test Files\n\n" + strings.TrimSpace(testContent.String())
-		userMsg += "\n\n## Compilation Status\n\n" + compileStatus
+
+	if currentTestContent != "" {
+		msg += "\n\n## Current Test File\n\n" + strings.TrimSpace(currentTestContent)
 	} else {
-		userMsg += "\n\n## Current Test Files\n\n(No test files exist yet. Write them from scratch.)"
+		msg += "\n\n## Current Test File\n\n(No test file exists yet — write from scratch.)"
 	}
+
 	if len(testFilePaths) > 0 {
-		userMsg += "\n\n## Test Files to Produce\n\n" + strings.Join(testFilePaths, "\n")
+		msg += "\n\n## Test Files to Produce\n\n" + strings.Join(testFilePaths, "\n")
 	}
+	return msg
+}
 
-	model, err := loadVerbModel(ctx, d, job.ProjectID, h.verbName)
-	if err != nil {
-		return "", err
-	}
+func runCompile(ctx context.Context, folderPath string) (ok bool, output string) {
+	cmd := exec.CommandContext(ctx, "go", "test", "-c", "-o", os.DevNull, ".")
+	cmd.Dir = folderPath
+	out, err := cmd.CombinedOutput()
+	return err == nil, strings.TrimSpace(string(out))
+}
 
-	raw, err := oc.Chat(ctx, model, []ollama.Message{
-		{Role: "system", Content: refineTestsSystemPrompt},
-		{Role: "user", Content: userMsg},
-	}, nil)
-	if err != nil {
-		return "", err
-	}
-
-	// Write corrected test files to disk immediately when the model reports changes.
-	// Run() happens outside any transaction; Commit() will record the event.
-	var out RefineTestsOutput
-	if jsonErr := json.Unmarshal([]byte(ollama.ExtractJSON(raw)), &out); jsonErr == nil && out.Changed {
-		for _, tf := range out.TestFiles {
-			if !strings.HasSuffix(tf.Path, "_test.go") {
-				slog.Warn("REFINE_TESTS: skipping non-test file in output", "verb", h.verbName, "path", tf.Path)
-				continue
-			}
-			fullPath := filepath.Join(folderPath, tf.Path)
-			if mkErr := os.MkdirAll(filepath.Dir(fullPath), 0o755); mkErr != nil {
-				slog.Error("REFINE_TESTS: mkdir", "path", fullPath, "error", mkErr)
-				continue
-			}
-			if wErr := os.WriteFile(fullPath, []byte(tf.Content), 0o644); wErr != nil {
-				slog.Error("REFINE_TESTS: write file", "path", fullPath, "error", wErr)
-			}
+func writeTestFiles(folderPath string, files []RefineTestsFile) {
+	for _, tf := range files {
+		if !strings.HasSuffix(tf.Path, "_test.go") {
+			slog.Warn("REFINE_TESTS: skipping non-test file in output", "path", tf.Path)
+			continue
 		}
-		// Log post-write compile result; the next turn will include it in context.
-		postCmd := exec.CommandContext(ctx, "go", "test", "-c", "-o", os.DevNull, ".")
-		postCmd.Dir = folderPath
-		if postOut, postErr := postCmd.CombinedOutput(); postErr != nil {
-			slog.Error("REFINE_TESTS: post-write compile failed", "verb", h.verbName, "bead_id", beadID, "output", string(postOut))
-		} else {
-			slog.Info("REFINE_TESTS: post-write compile passed", "verb", h.verbName, "bead_id", beadID)
+		fullPath := filepath.Join(folderPath, tf.Path)
+		if mkErr := os.MkdirAll(filepath.Dir(fullPath), 0o755); mkErr != nil {
+			slog.Error("REFINE_TESTS: mkdir", "path", fullPath, "error", mkErr)
+			continue
+		}
+		if wErr := os.WriteFile(fullPath, []byte(tf.Content), 0o644); wErr != nil {
+			slog.Error("REFINE_TESTS: write file", "path", fullPath, "error", wErr)
+		}
+	}
+}
+
+func cycleID(job *db.HandoffJob) int64 {
+	if job.RefinementCycleID.Valid {
+		return job.RefinementCycleID.Int64
+	}
+	return 1
+}
+
+func insertRefinement(ctx context.Context, tx *sql.Tx, projectID, beadID, cycle int64,
+	verb, summary, decision string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO test_refinements (project_id, bead_id, cycle_id, turn, verb, changed, summary, decision, created_at)
+		VALUES (?, ?, ?, (SELECT COALESCE(MAX(turn),0)+1 FROM test_refinements WHERE bead_id=? AND cycle_id=?), ?, 0, ?, ?, ?)`,
+		projectID, beadID, cycle, beadID, cycle, verb, summary, decision, now)
+	return err
+}
+
+// --- REFINE_TESTS_WRITE ---
+
+type RefineTestsWrite struct{}
+
+func (h *RefineTestsWrite) Verb() string { return db.VerbRefineTestsWrite }
+
+func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client, job *db.HandoffJob) (string, error) {
+	bead, project, folderPath, implContext, testFilePaths, currentTestContent, err := loadRefineContext(ctx, d, job)
+	if err != nil {
+		return "", err
+	}
+	_ = project // folderPath used directly
+
+	model, err := loadVerbModel(ctx, d, job.ProjectID, h.Verb())
+	if err != nil {
+		return "", err
+	}
+
+	cid := cycleID(job)
+
+	// Fetch correction instructions from the most recent JUDGE turn (prior cycles).
+	var instructions string
+	if cid > 1 {
+		_ = d.QueryRowContext(ctx, `
+			SELECT summary FROM test_refinements
+			WHERE bead_id = ? AND verb = ? AND decision = 'revise'
+			ORDER BY cycle_id DESC LIMIT 1`,
+			job.BeadID.Int64, db.VerbRefineTestsJudge,
+		).Scan(&instructions)
+	}
+
+	userMsg := buildBaseUserMsg(bead, folderPath, implContext, currentTestContent, testFilePaths)
+	if instructions != "" {
+		userMsg += "\n\n## Correction Instructions (from prior review cycle — apply every item)\n\n" + instructions
+	}
+
+	messages := []ollama.Message{
+		{Role: "system", Content: refineTestsWriteSystemPrompt},
+		{Role: "user", Content: userMsg},
+	}
+
+	var raw string
+	for attempt := 1; attempt <= refinementWriteAttempts; attempt++ {
+		raw, err = oc.Chat(ctx, model, messages, nil)
+		if err != nil {
+			return "", err
+		}
+
+		var out RefineTestsWriteOutput
+		if jsonErr := json.Unmarshal([]byte(ollama.ExtractJSON(raw)), &out); jsonErr != nil || len(out.TestFiles) == 0 {
+			// Malformed response — let Validate() handle it on the final attempt.
+			break
+		}
+
+		writeTestFiles(folderPath, out.TestFiles)
+
+		ok, compileOut := runCompile(ctx, folderPath)
+		if ok {
+			slog.Info("REFINE_TESTS_WRITE: compile passed", "bead_id", job.BeadID.Int64, "attempt", attempt)
+			break
+		}
+		slog.Error("REFINE_TESTS_WRITE: compile failed", "bead_id", job.BeadID.Int64, "attempt", attempt, "output", compileOut)
+
+		if attempt < refinementWriteAttempts {
+			messages = append(messages,
+				ollama.Message{Role: "assistant", Content: raw},
+				ollama.Message{Role: "user", Content: "The file you wrote failed to compile:\n```\n" + compileOut + "\n```\nFix every error and output the complete corrected file."},
+			)
 		}
 	}
 
 	return raw, nil
 }
 
-func (h *RefineTests) Validate(rawOutput string) (string, any) {
-	var out RefineTestsOutput
+func (h *RefineTestsWrite) Validate(rawOutput string) (string, any) {
+	var out RefineTestsWriteOutput
 	if err := json.Unmarshal([]byte(ollama.ExtractJSON(rawOutput)), &out); err != nil {
 		return fmt.Sprintf("malformed: JSON parse error: %v", err), nil
 	}
 	if strings.TrimSpace(out.Summary) == "" {
 		return "malformed: summary is empty", nil
 	}
-	if out.Changed && len(out.TestFiles) == 0 {
-		return "malformed: changed is true but test_files is empty", nil
+	if len(out.TestFiles) == 0 {
+		return "malformed: test_files is empty", nil
 	}
 	for _, tf := range out.TestFiles {
 		if strings.TrimSpace(tf.Path) == "" {
@@ -189,58 +243,185 @@ func (h *RefineTests) Validate(rawOutput string) (string, any) {
 	return "valid", out
 }
 
-func (h *RefineTests) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJob, parsed any) error {
-	out := parsed.(RefineTestsOutput)
+func (h *RefineTestsWrite) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJob, parsed any) error {
+	out := parsed.(RefineTestsWriteOutput)
 	beadID := job.BeadID.Int64
+	cid := cycleID(job)
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	// Resolve the current cycle ID (1 for legacy rows without the column).
-	cycleID := int64(1)
-	if job.RefinementCycleID.Valid {
-		cycleID = job.RefinementCycleID.Int64
+	var folderPath string
+	if err := tx.QueryRowContext(ctx, `SELECT folder_path FROM projects WHERE id = ?`, job.ProjectID).Scan(&folderPath); err != nil {
+		return fmt.Errorf("load folder_path: %w", err)
 	}
 
-	// Determine turn number within the current cycle only.
-	var existingTurns int
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM test_refinements WHERE bead_id = ? AND cycle_id = ?`, beadID, cycleID,
-	).Scan(&existingTurns); err != nil {
-		return fmt.Errorf("count test_refinements: %w", err)
-	}
-	turn := existingTurns + 1
+	slog.Info("REFINE_TESTS_WRITE complete", "bead_id", beadID, "cycle_id", cid, "summary", out.Summary)
 
-	changed := 0
-	if out.Changed {
-		changed = 1
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO test_refinements (project_id, bead_id, cycle_id, turn, verb, changed, summary, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		job.ProjectID, beadID, cycleID, turn, h.verbName, changed, out.Summary, now,
-	); err != nil {
+	if err := insertRefinement(ctx, tx, job.ProjectID, beadID, cid, h.Verb(), out.Summary, ""); err != nil {
 		return fmt.Errorf("insert test_refinement: %w", err)
 	}
 
-	slog.Info("REFINE_TESTS turn complete",
-		"verb", h.verbName, "bead_id", beadID, "cycle_id", cycleID, "turn", turn, "changed", out.Changed,
-		"summary", out.Summary)
-
-	// Read the previous turn's changed flag within the same cycle for the consensus check.
-	prevChanged := -1 // sentinel: no previous turn
-	if turn >= 2 {
-		_ = tx.QueryRowContext(ctx, `
-			SELECT changed FROM test_refinements
-			WHERE bead_id = ? AND cycle_id = ?
-			ORDER BY turn DESC
-			LIMIT 1 OFFSET 1`, beadID, cycleID,
-		).Scan(&prevChanged)
+	// Check compile state of what's now on disk.
+	ok, compileOut := runCompile(ctx, folderPath)
+	if !ok {
+		slog.Error("REFINE_TESTS_WRITE: compile still failing after all attempts — escalating",
+			"bead_id", beadID, "cycle_id", cid, "output", compileOut)
+		_, err := tx.ExecContext(ctx,
+			`UPDATE handoff_jobs SET status = 'escalated', updated_at = ? WHERE id = ?`, now, job.ID)
+		return err
 	}
 
-	// Consensus: this turn AND the previous turn both declared changed=false.
-	if turn >= 2 && changed == 0 && prevChanged == 0 {
-		slog.Info("REFINE_TESTS consensus reached — enqueuing EXECUTE_BEAD",
-			"bead_id", beadID, "cycle_id", cycleID, "turns", turn)
+	// Enqueue CRITIQUE for this cycle.
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, refinement_cycle_id, created_at, updated_at)
+		VALUES (?, ?, ?, 'pending', ?, ?, ?)`,
+		job.ProjectID, db.VerbRefineTestsCritique, beadID, cid, now, now)
+	return err
+}
+
+// --- REFINE_TESTS_CRITIQUE ---
+
+type RefineTestsCritique struct{}
+
+func (h *RefineTestsCritique) Verb() string { return db.VerbRefineTestsCritique }
+
+func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Client, job *db.HandoffJob) (string, error) {
+	bead, project, _, implContext, testFilePaths, currentTestContent, err := loadRefineContext(ctx, d, job)
+	if err != nil {
+		return "", err
+	}
+
+	model, err := loadVerbModel(ctx, d, job.ProjectID, h.Verb())
+	if err != nil {
+		return "", err
+	}
+
+	userMsg := buildBaseUserMsg(bead, project.FolderPath, implContext, currentTestContent, testFilePaths)
+
+	return oc.Chat(ctx, model, []ollama.Message{
+		{Role: "system", Content: refineTestsCritiqueSystemPrompt},
+		{Role: "user", Content: userMsg},
+	}, nil)
+}
+
+func (h *RefineTestsCritique) Validate(rawOutput string) (string, any) {
+	var out RefineTestsCritiqueOutput
+	if err := json.Unmarshal([]byte(ollama.ExtractJSON(rawOutput)), &out); err != nil {
+		return fmt.Sprintf("malformed: JSON parse error: %v", err), nil
+	}
+	if strings.TrimSpace(out.Summary) == "" {
+		return "malformed: summary is empty", nil
+	}
+	return "valid", out
+}
+
+func (h *RefineTestsCritique) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJob, parsed any) error {
+	out := parsed.(RefineTestsCritiqueOutput)
+	beadID := job.BeadID.Int64
+	cid := cycleID(job)
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	slog.Info("REFINE_TESTS_CRITIQUE complete", "bead_id", beadID, "cycle_id", cid,
+		"all_correct", out.AllCorrect, "findings", len(out.Findings), "summary", out.Summary)
+
+	if err := insertRefinement(ctx, tx, job.ProjectID, beadID, cid, h.Verb(), out.Summary, ""); err != nil {
+		return fmt.Errorf("insert test_refinement: %w", err)
+	}
+
+	// Enqueue JUDGE for this cycle.
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, refinement_cycle_id, created_at, updated_at)
+		VALUES (?, ?, ?, 'pending', ?, ?, ?)`,
+		job.ProjectID, db.VerbRefineTestsJudge, beadID, cid, now, now)
+	return err
+}
+
+// --- REFINE_TESTS_JUDGE ---
+
+type RefineTestsJudge struct{}
+
+func (h *RefineTestsJudge) Verb() string { return db.VerbRefineTestsJudge }
+
+func (h *RefineTestsJudge) Run(ctx context.Context, d *db.DB, oc *ollama.Client, job *db.HandoffJob) (string, error) {
+	_, _, _, _, _, currentTestContent, err := loadRefineContext(ctx, d, job)
+	if err != nil {
+		return "", err
+	}
+
+	model, err := loadVerbModel(ctx, d, job.ProjectID, h.Verb())
+	if err != nil {
+		return "", err
+	}
+
+	cid := cycleID(job)
+
+	// Prefer the full structured JSON from the critique's raw output over the summary.
+	var critiqueRaw string
+	_ = d.QueryRowContext(ctx, `
+		SELECT ha.raw_output FROM handoff_attempts ha
+		JOIN handoff_jobs hj ON hj.id = ha.job_id
+		WHERE hj.project_id = ? AND hj.verb = ? AND hj.bead_id = ? AND hj.refinement_cycle_id = ?
+		  AND ha.validation_result = 'valid'
+		ORDER BY ha.id DESC LIMIT 1`,
+		job.ProjectID, db.VerbRefineTestsCritique, job.BeadID.Int64, cid,
+	).Scan(&critiqueRaw)
+
+	if critiqueRaw == "" {
+		// Fallback: use the summary stored in test_refinements.
+		_ = d.QueryRowContext(ctx, `
+			SELECT summary FROM test_refinements
+			WHERE bead_id = ? AND verb = ? AND cycle_id = ?
+			ORDER BY created_at DESC LIMIT 1`,
+			job.BeadID.Int64, db.VerbRefineTestsCritique, cid,
+		).Scan(&critiqueRaw)
+	}
+
+	userMsg := "## Test File\n\n" + strings.TrimSpace(currentTestContent)
+	userMsg += "\n\n## Critique Findings\n\n" + critiqueRaw
+
+	return oc.Chat(ctx, model, []ollama.Message{
+		{Role: "system", Content: refineTestsJudgeSystemPrompt},
+		{Role: "user", Content: userMsg},
+	}, nil)
+}
+
+func (h *RefineTestsJudge) Validate(rawOutput string) (string, any) {
+	var out RefineTestsJudgeOutput
+	if err := json.Unmarshal([]byte(ollama.ExtractJSON(rawOutput)), &out); err != nil {
+		return fmt.Sprintf("malformed: JSON parse error: %v", err), nil
+	}
+	if strings.TrimSpace(out.Summary) == "" {
+		return "malformed: summary is empty", nil
+	}
+	if out.Decision != "approved" && out.Decision != "revise" {
+		return fmt.Sprintf("malformed: decision must be 'approved' or 'revise', got %q", out.Decision), nil
+	}
+	if out.Decision == "revise" && strings.TrimSpace(out.Instructions) == "" {
+		return "malformed: decision is 'revise' but instructions is empty", nil
+	}
+	return "valid", out
+}
+
+func (h *RefineTestsJudge) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJob, parsed any) error {
+	out := parsed.(RefineTestsJudgeOutput)
+	beadID := job.BeadID.Int64
+	cid := cycleID(job)
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	slog.Info("REFINE_TESTS_JUDGE complete", "bead_id", beadID, "cycle_id", cid,
+		"decision", out.Decision, "summary", out.Summary)
+
+	// Store instructions in summary so WRITE can retrieve them next cycle.
+	summary := out.Summary
+	if out.Decision == "revise" {
+		summary = out.Instructions
+	}
+
+	if err := insertRefinement(ctx, tx, job.ProjectID, beadID, cid, h.Verb(), summary, out.Decision); err != nil {
+		return fmt.Errorf("insert test_refinement: %w", err)
+	}
+
+	if out.Decision == "approved" {
+		slog.Info("REFINE_TESTS_JUDGE: approved — enqueuing EXECUTE_BEAD", "bead_id", beadID)
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
 			VALUES (?, ?, ?, 'pending', ?, ?)`,
@@ -248,24 +429,20 @@ func (h *RefineTests) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJob
 		return err
 	}
 
-	// Stalemate: hit the cap without consensus → escalate.
-	if turn >= refinementTurnCap {
-		slog.Error("ESCALATION — REFINE_TESTS stalemate: models disagree after cap",
-			"bead_id", beadID, "cycle_id", cycleID, "turns", turn, "cap", refinementTurnCap)
+	// revise — check cycle cap.
+	nextCycle := cid + 1
+	if nextCycle > refinementCycleCap {
+		slog.Error("ESCALATION — REFINE_TESTS: judge requested revision after cycle cap",
+			"bead_id", beadID, "cycle_id", cid, "cap", refinementCycleCap)
 		_, err := tx.ExecContext(ctx,
-			`UPDATE handoff_jobs SET status = 'escalated', updated_at = ? WHERE id = ?`,
-			now, job.ID)
+			`UPDATE handoff_jobs SET status = 'escalated', updated_at = ? WHERE id = ?`, now, job.ID)
 		return err
 	}
 
-	// Continue loop: enqueue the peer verb with the same cycle_id.
-	peerVerb := db.VerbRefineTestsB
-	if h.verbName == db.VerbRefineTestsB {
-		peerVerb = db.VerbRefineTestsA
-	}
+	slog.Info("REFINE_TESTS_JUDGE: requesting revision", "bead_id", beadID, "next_cycle", nextCycle)
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, refinement_cycle_id, created_at, updated_at)
 		VALUES (?, ?, ?, 'pending', ?, ?, ?)`,
-		job.ProjectID, peerVerb, beadID, cycleID, now, now)
+		job.ProjectID, db.VerbRefineTestsWrite, beadID, nextCycle, now, now)
 	return err
 }

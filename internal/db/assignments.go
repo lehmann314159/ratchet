@@ -66,8 +66,9 @@ func SeedVerbModelAssignments(ctx context.Context, tx *sql.Tx, projectID int64) 
 		VerbCompressAnalysis:        "gemma4:31b",
 		VerbAdjudicateNextExecution: "gemma4:31b",
 		VerbRevisePending:           "gemma4:31b",
-		VerbRefineTestsA:            "gemma4:31b",         // independent reviewer
-		VerbRefineTestsB:            "mistral-small3.2:24b", // different priors
+		VerbRefineTestsWrite:        "gemma4:31b",         // writer
+		VerbRefineTestsCritique:     "mistral-small3.2:24b", // critic
+		VerbRefineTestsJudge:        "gemma4:31b",         // judge
 	}
 
 	// Validate constraints before writing anything.
@@ -114,17 +115,21 @@ func SeedVerbModelAssignmentsFromFleet(ctx context.Context, tx *sql.Tx, projectI
 			enriched[VerbRevisePending] = m
 		}
 	}
-	// REFINE_TESTS_A: independent reviewer → AUDIT model (qwen3:32b in live fleet).
-	// REFINE_TESTS_B: different-priors peer → RECONCILE model (gemma4:31b in live fleet).
-	// These two must differ; the AUDIT≠RECONCILE constraint (constraint 1+2) guarantees it.
-	if _, ok := enriched[VerbRefineTestsA]; !ok {
-		if m, ok := enriched[VerbAuditDecomposition]; ok {
-			enriched[VerbRefineTestsA] = m
+	// REFINE_TESTS_WRITE/JUDGE: writer and judge → EXECUTE model (gemma4:31b in live fleet).
+	// REFINE_TESTS_CRITIQUE: critic → AUDIT model (qwen3:32b in live fleet).
+	if _, ok := enriched[VerbRefineTestsWrite]; !ok {
+		if m, ok := enriched[VerbExecuteBead]; ok {
+			enriched[VerbRefineTestsWrite] = m
 		}
 	}
-	if _, ok := enriched[VerbRefineTestsB]; !ok {
-		if m, ok := enriched[VerbReconcileDecomposition]; ok {
-			enriched[VerbRefineTestsB] = m
+	if _, ok := enriched[VerbRefineTestsCritique]; !ok {
+		if m, ok := enriched[VerbAuditDecomposition]; ok {
+			enriched[VerbRefineTestsCritique] = m
+		}
+	}
+	if _, ok := enriched[VerbRefineTestsJudge]; !ok {
+		if m, ok := enriched[VerbExecuteBead]; ok {
+			enriched[VerbRefineTestsJudge] = m
 		}
 	}
 	for _, v := range AllVerbs {
@@ -179,8 +184,8 @@ func checkModelConstraints(m map[string]string) error {
 	analyze, hasAnalyze := m[VerbAnalyzeExecution]
 	survey, hasSurvey := m[VerbSurveySpec]
 	certify, hasCertify := m[VerbCertifyManifest]
-	refineA, hasRefineA := m[VerbRefineTestsA]
-	refineB, hasRefineB := m[VerbRefineTestsB]
+	refineWrite, hasRefineWrite := m[VerbRefineTestsWrite]
+	refineCtiq, hasRefineCtiq := m[VerbRefineTestsCritique]
 
 	if hasDecompose && hasReconcile && decompose != reconcile {
 		return errors.New(
@@ -206,10 +211,10 @@ func checkModelConstraints(m map[string]string) error {
 				"(a model cannot independently review its own manifest output)",
 		)
 	}
-	if hasRefineA && hasRefineB && refineA == refineB {
+	if hasRefineWrite && hasRefineCtiq && refineWrite == refineCtiq {
 		return errors.New(
-			"REFINE_TESTS_A and REFINE_TESTS_B must use different models " +
-				"(the peer loop requires genuine independence — different priors)",
+			"REFINE_TESTS_WRITE and REFINE_TESTS_CRITIQUE must use different models " +
+				"(writer and critic must be independent)",
 		)
 	}
 	return nil

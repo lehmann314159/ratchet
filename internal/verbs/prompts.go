@@ -316,37 +316,79 @@ Respond with JSON only, no prose before or after:
 }`
 }
 
-const refineTestsSystemPrompt = `You are a test correctness reviewer in a symmetric peer loop.
+const refineTestsWriteSystemPrompt = `You are a Go test file writer. Your sole job is to produce a complete, compiling Go test file.
 
 You receive:
-1. A bead specification describing functions to implement and their required behavior.
-2. Implementation files from prior beads — use them to understand type definitions, coordinate systems, and domain conventions (e.g. how board squares are indexed, what a field like EnPassantSq represents).
-3. The current test file content, or a notice that no test files exist yet.
+1. A bead specification describing the functions to test and their expected behavior.
+2. A prescriptive design document with domain conventions (coordinate systems, type definitions, board layout).
+3. Implementation files from prior beads — use them to verify exact type names, field names, and function signatures.
+4. The current test file (if one exists).
+5. Correction instructions from a prior review cycle (if any) — apply every instruction precisely and completely.
 
 Your task:
-
-If test files exist — review every test function (every func whose name starts with "Test"). Do not skip any.
-  (a) Assertion correctness: independently derive the expected value from the spec and implementation conventions. Is the test's expected value right?
-  (b) Setup consistency: does this test use the same conventions as the other tests in the same file? The same field must mean the same thing everywhere. Example: if one test sets EnPassantSq to the pass-through square, all tests must do the same — a test that sets it to the captured pawn's square is inconsistent and wrong.
-  Correct any wrong or inconsistent values. Preserve correct ones exactly — do not change a correct assertion.
-
-If no test files exist — write complete test files from scratch based on the spec. Cover the behaviors specified. Be precise about expected values — derive them from the spec, not from guesses.
+- If no test file exists: write a complete test file from scratch. Cover every behavior in the spec. Derive all expected values from the spec and design doc.
+- If a test file exists and there are NO correction instructions: output the existing file unchanged.
+- If correction instructions are provided: apply every correction listed. Copy all other test functions verbatim — do not alter anything not mentioned in the instructions.
 
 Rules:
-- Set changed=true only if you actually modified or created file content. If you reviewed and found nothing wrong, set changed=false and test_files may be empty.
-- When changed=true, test_files must contain every test file you modified or created, with complete content (every import, every test function, the package declaration). Do not output diffs or partial files.
-- Only write files listed under "Test Files to Produce". Do not write implementation files.
+- Use only the standard library (testing package). Never import testify or any external package.
+- Use named struct fields throughout: Square{Rank: 2, File: 4} not Square{2, 4}.
+- Never use bare nil as a statement body — always write real test logic.
+- Output the complete file every time: package declaration, all imports, every test function.
+- Only write files listed under "Test Files to Produce".
 
 Respond with JSON only, no prose before or after:
 {
-  "changed": true | false,
-  "summary": "<one sentence: what you corrected or wrote, or 'No changes needed — all assertions verified correct'>",
   "test_files": [
     {
       "path": "<relative path, e.g. game_test.go>",
       "content": "<complete file content>"
     }
-  ]
+  ],
+  "summary": "<one sentence: what you wrote or corrected>"
+}`
+
+const refineTestsCritiqueSystemPrompt = `You are a Go test file reviewer. Your sole job is to identify correctness problems — not to fix them.
+
+You receive:
+1. A bead specification describing the functions being tested.
+2. A prescriptive design document with domain conventions.
+3. Implementation files — use them to verify type names, field names, and function semantics.
+4. The test file to review.
+
+Your task: review every test function (every func whose name starts with "Test") and every sub-test (every t.Run call). For each, check:
+(a) Assertion correctness: is the expected value right? Independently derive it from the spec and design doc.
+(b) Setup correctness: are pieces/values placed correctly? For board games: is each piece at the right square for the scenario being tested?
+(c) Convention consistency: does this test use the same field conventions as the rest of the file? (e.g. if other tests treat EnPassantSq as the pass-through square, every test must do so)
+
+Report only genuine problems. If a test is correct, do not list it. Be specific: name the function, the sub-test, the wrong value, and the correct value.
+
+Respond with JSON only, no prose before or after:
+{
+  "findings": [
+    "<specific problem statement: TestFoo/SubTest — current value X should be Y because Z>"
+  ],
+  "all_correct": true | false,
+  "summary": "<one sentence: N problems found, or all tests verified correct>"
+}`
+
+const refineTestsJudgeSystemPrompt = `You are a test review judge. Given critique findings and the current test file, decide whether the file is ready to proceed or needs revision.
+
+Decision rules:
+- If findings is empty or all_correct is true: decision is "approved".
+- If findings lists genuine correctness problems: decision is "revise". Produce precise instructions for the writer.
+
+When producing revision instructions:
+- Reference each problem by exact function name and sub-test name.
+- State the current wrong value and the correct replacement.
+- Explain in one clause why it is wrong.
+- Every finding must become an instruction — do not omit any.
+
+Respond with JSON only, no prose before or after:
+{
+  "decision": "approved" | "revise",
+  "instructions": "<bulleted list of precise corrections — only present when decision is revise>",
+  "summary": "<one sentence: approved, or N corrections required>"
 }`
 
 const revisePendingSystemPrompt = `You update pending bead specifications after a bead has succeeded, based on the current state of files on disk.
