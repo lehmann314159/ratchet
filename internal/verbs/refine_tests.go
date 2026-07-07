@@ -150,12 +150,29 @@ type RefineTestsWrite struct{}
 
 func (h *RefineTestsWrite) Verb() string { return db.VerbRefineTestsWrite }
 
+// writeFileTool is the sole tool available to REFINE_TESTS_WRITE.
+var writeFileTool = ollama.Tool{
+	Type: "function",
+	Function: ollama.ToolFunction{
+		Name:        "write_file",
+		Description: "Create or overwrite a test file in the project directory.",
+		Parameters: ollama.ToolParameters{
+			Type: "object",
+			Properties: map[string]ollama.ToolProperty{
+				"path":    {Type: "string", Description: "File path relative to project root (must end in _test.go)"},
+				"content": {Type: "string", Description: "Complete file content"},
+			},
+			Required: []string{"path", "content"},
+		},
+	},
+}
+
 func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client, job *db.HandoffJob) (string, error) {
 	bead, project, folderPath, implContext, testFilePaths, currentTestContent, err := loadRefineContext(ctx, d, job)
 	if err != nil {
 		return "", err
 	}
-	_ = project // folderPath used directly
+	_ = project
 
 	model, err := loadVerbModel(ctx, d, job.ProjectID, h.Verb())
 	if err != nil {
@@ -164,7 +181,7 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 
 	cid := cycleID(job)
 
-	// Fetch correction instructions from the most recent JUDGE turn (prior cycles).
+	// Fetch correction instructions from the most recent JUDGE revise turn.
 	var instructions string
 	if cid > 1 {
 		_ = d.QueryRowContext(ctx, `
@@ -185,60 +202,86 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		{Role: "user", Content: userMsg},
 	}
 
-	var raw string
-	for attempt := 1; attempt <= refinementWriteAttempts; attempt++ {
-		raw, err = oc.Chat(ctx, model, messages, nil)
-		if err != nil {
-			return "", err
+	tools := []ollama.Tool{writeFileTool}
+	var summary string
+
+	for turn := 1; turn <= refinementWriteAttempts; turn++ {
+		msg, toolErr := oc.ChatWithTools(ctx, model, messages, tools, nil, nil)
+		if toolErr != nil {
+			return "", toolErr
 		}
 
-		var out RefineTestsWriteOutput
-		if jsonErr := json.Unmarshal([]byte(ollama.ExtractJSON(raw)), &out); jsonErr != nil || len(out.TestFiles) == 0 {
-			// Malformed response — let Validate() handle it on the final attempt.
+		// Collect text content as potential summary.
+		if strings.TrimSpace(msg.Content) != "" {
+			summary = strings.TrimSpace(msg.Content)
+		}
+
+		if len(msg.ToolCalls) == 0 {
+			// Model declared done (no more tool calls).
 			break
 		}
 
-		writeTestFiles(folderPath, out.TestFiles)
+		// Execute tool calls and build reply messages.
+		messages = append(messages, msg)
+		for _, tc := range msg.ToolCalls {
+			var result string
+			if tc.Function.Name == "write_file" {
+				path, _ := tc.Function.Arguments["path"].(string)
+				content, _ := tc.Function.Arguments["content"].(string)
+				if path == "" {
+					result = "error: write_file requires a 'path' argument"
+				} else if !strings.HasSuffix(path, "_test.go") {
+					result = fmt.Sprintf("error: %q is not a _test.go file — only test files may be written here", path)
+				} else {
+					fullPath := filepath.Join(folderPath, path)
+					if mkErr := os.MkdirAll(filepath.Dir(fullPath), 0o755); mkErr != nil {
+						result = fmt.Sprintf("error: mkdir: %v", mkErr)
+					} else if wErr := os.WriteFile(fullPath, []byte(content), 0o644); wErr != nil {
+						result = fmt.Sprintf("error: write: %v", wErr)
+					} else {
+						result = fmt.Sprintf("ok: wrote %d bytes to %s", len(content), path)
+						slog.Info("REFINE_TESTS_WRITE: file written", "path", path, "bytes", len(content))
+					}
+				}
+			} else {
+				result = fmt.Sprintf("error: unknown tool %q", tc.Function.Name)
+			}
+			messages = append(messages, ollama.Message{Role: "tool", Content: result})
+		}
 
+		// After each write, compile check. If passing, no need to continue.
 		ok, compileOut := runCompile(ctx, folderPath)
 		if ok {
-			slog.Info("REFINE_TESTS_WRITE: compile passed", "bead_id", job.BeadID.Int64, "attempt", attempt)
+			slog.Info("REFINE_TESTS_WRITE: compile passed", "bead_id", job.BeadID.Int64, "turn", turn)
+			if summary == "" {
+				summary = "Test file written and compiling."
+			}
 			break
 		}
-		slog.Error("REFINE_TESTS_WRITE: compile failed", "bead_id", job.BeadID.Int64, "attempt", attempt, "output", compileOut)
-
-		if attempt < refinementWriteAttempts {
-			messages = append(messages,
-				ollama.Message{Role: "assistant", Content: raw},
-				ollama.Message{Role: "user", Content: "The file you wrote failed to compile:\n```\n" + compileOut + "\n```\nFix every error and output the complete corrected file."},
-			)
+		slog.Error("REFINE_TESTS_WRITE: compile failed", "bead_id", job.BeadID.Int64, "turn", turn, "output", compileOut)
+		if turn < refinementWriteAttempts {
+			messages = append(messages, ollama.Message{
+				Role:    "user",
+				Content: "The file failed to compile:\n```\n" + compileOut + "\n```\nFix every error. Call write_file again with the corrected complete file.",
+			})
 		}
 	}
 
-	return raw, nil
+	if summary == "" {
+		summary = "Test file write attempted."
+	}
+	// Return a minimal JSON that Validate() can parse.
+	out, _ := json.Marshal(RefineTestsWriteOutput{Summary: summary})
+	return string(out), nil
 }
 
 func (h *RefineTestsWrite) Validate(rawOutput string) (string, any) {
 	var out RefineTestsWriteOutput
-	if err := json.Unmarshal([]byte(ollama.ExtractJSON(rawOutput)), &out); err != nil {
+	if err := json.Unmarshal([]byte(rawOutput), &out); err != nil {
 		return fmt.Sprintf("malformed: JSON parse error: %v", err), nil
 	}
 	if strings.TrimSpace(out.Summary) == "" {
 		return "malformed: summary is empty", nil
-	}
-	if len(out.TestFiles) == 0 {
-		return "malformed: test_files is empty", nil
-	}
-	for _, tf := range out.TestFiles {
-		if strings.TrimSpace(tf.Path) == "" {
-			return "malformed: test_files entry has empty path", nil
-		}
-		if !strings.HasSuffix(tf.Path, "_test.go") {
-			return fmt.Sprintf("malformed: test_files entry %q is not a _test.go file", tf.Path), nil
-		}
-		if strings.TrimSpace(tf.Content) == "" {
-			return fmt.Sprintf("malformed: test_files entry %q has empty content", tf.Path), nil
-		}
 	}
 	return "valid", out
 }

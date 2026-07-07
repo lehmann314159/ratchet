@@ -129,9 +129,10 @@ type RefineTestsFile struct {
 }
 
 // RefineTestsWriteOutput is the output of REFINE_TESTS_WRITE.
+// Files are written via write_file tool calls during Run(); only the summary
+// is returned as structured output.
 type RefineTestsWriteOutput struct {
-	TestFiles []RefineTestsFile `json:"test_files"`
-	Summary   string            `json:"summary"`
+	Summary string `json:"summary"`
 }
 
 // RefineTestsCritiqueOutput is the output of REFINE_TESTS_CRITIQUE.

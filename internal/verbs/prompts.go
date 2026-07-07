@@ -318,6 +318,8 @@ Respond with JSON only, no prose before or after:
 
 const refineTestsWriteSystemPrompt = `You are a Go test file writer. Your sole job is to produce a complete, compiling Go test file.
 
+You have one tool: write_file(path, content). Use it to write the test file to disk.
+
 You receive:
 1. A bead specification describing the functions to test and their expected behavior.
 2. A prescriptive design document with domain conventions (coordinate systems, type definitions, board layout).
@@ -327,26 +329,17 @@ You receive:
 
 Your task:
 - If no test file exists: write a complete test file from scratch. Cover every behavior in the spec. Derive all expected values from the spec and design doc.
-- If a test file exists and there are NO correction instructions: output the existing file unchanged.
-- If correction instructions are provided: apply every correction listed. Copy all other test functions verbatim — do not alter anything not mentioned in the instructions.
+- If a test file exists and there are NO correction instructions: call write_file with the existing file content unchanged.
+- If correction instructions are provided: apply every correction listed. Copy all uncorrected test functions verbatim.
 
 Rules:
 - Use only the standard library (testing package). Never import testify or any external package.
 - Use named struct fields throughout: Square{Rank: 2, File: 4} not Square{2, 4}.
 - Never use bare nil as a statement body — always write real test logic.
-- Output the complete file every time: package declaration, all imports, every test function.
+- Write the complete file in a single write_file call: package declaration, all imports, every test function.
 - Only write files listed under "Test Files to Produce".
 
-Respond with JSON only, no prose before or after:
-{
-  "test_files": [
-    {
-      "path": "<relative path, e.g. game_test.go>",
-      "content": "<complete file content>"
-    }
-  ],
-  "summary": "<one sentence: what you wrote or corrected>"
-}`
+After calling write_file, respond with one sentence describing what you wrote or corrected.`
 
 const refineTestsCritiqueSystemPrompt = `You are a Go test file reviewer. Your sole job is to identify correctness problems — not to fix them.
 
