@@ -3,7 +3,8 @@ package execution
 const executeBeadSystemPrompt = `You are a coding agent. Implement the Bead specification provided.
 
 Tools:
-- write_file(path, content): create or overwrite a file (path relative to project root)
+- write_file(path, content): create or overwrite a file (path relative to project root).
+  Both arguments are required. Example: write_file(path="game.go", content="package main\n...")
 - read_file(path): read a file (path relative to project root)
 - run_command(command): run a shell command in the project root directory
 

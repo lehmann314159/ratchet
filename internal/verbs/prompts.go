@@ -116,11 +116,13 @@ returns the original value"). When paired behaviors are present:
   round-trip or cross-function tests in individual Bead exit criteria.
 - Add a dedicated integration Bead immediately after the paired Beads. Its sole purpose is
   verifying the joint correctness invariant (round-trip tests, inverse property checks). It
-  writes only test files. Its sequential dependency on the paired Beads' output files is
-  expected and will not be flagged by AUDIT as an independence violation. The exit criterion
-  should exercise one specific, bounded scenario (e.g. a single round-trip with fixed inputs
-  and one asserted output) rather than comprehensive coverage — a focused test that runs and
-  passes is more valuable than an exhaustive test that times out mid-generation.
+  writes only test files. The test file must be a new, dedicated file for the integration
+  scenario — it must not reuse or append to a test file already owned by a prior Bead.
+  Its sequential dependency on the paired Beads' compiled source files is expected and will
+  not be flagged by AUDIT as an independence violation. The exit criterion should exercise
+  one specific, bounded scenario (e.g. a single round-trip with fixed inputs and one asserted
+  output) rather than comprehensive coverage — a focused test that runs and passes is more
+  valuable than an exhaustive test that times out mid-generation.
 
 **Cross-bead contracts:** If the design document contains a ` + "`## Cross-Bead Contracts`" + ` section,
 read all entries before finalizing any Bead's spec or exit criteria. Each entry declares a
@@ -194,7 +196,11 @@ func auditDecompositionSystemPrompt(lang string) string {
 			"   httptest starts a real HTTP server on a random port. Do not flag this pattern.\n" +
 			"   Also flag if the exit criterion starts a server on a fixed port (e.g. :8080) rather than\n" +
 			"   using `net/http/httptest.NewServer` — a fixed port may collide with the execution\n" +
-			"   environment and cause the criterion to silently verify the wrong server."
+			"   environment and cause the criterion to silently verify the wrong server.\n" +
+			"   Integration Bead clobber risk: if an integration Bead's output_files includes a *_test.go\n" +
+			"   file that already appears in a prior Bead's output_files, flag it — integration test files\n" +
+			"   must be new and dedicated; sharing a *_test.go with a prior Bead risks overwriting\n" +
+			"   certified test content."
 	}
 	return `You review a decomposition against its source design document, checking for the following:
 

@@ -175,6 +175,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 
 	var writeFileCount int
 	var stubWarningInjected bool
+	var missingPathWarningInjected bool
 
 	for turn := 1; ; turn++ {
 		writeLine(traceFile, fmt.Sprintf("[TURN %d]", turn))
@@ -220,6 +221,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 			return writeTerminationCause(d, execID, "success")
 		}
 
+		var missingPathDetected bool
 		for _, tc := range msg.ToolCalls {
 			if tc.Function.Name == "write_file" {
 				writeFileCount++
@@ -227,10 +229,23 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 			writeLine(traceFile, fmt.Sprintf("[tool: %s %v]", tc.Function.Name, tc.Function.Arguments))
 			result := executeTool(ctx, tc, folderPath)
 			writeLine(traceFile, fmt.Sprintf("[result]\n%s", result))
+			if tc.Function.Name == "write_file" && strings.Contains(result, "write_file requires a 'path' argument") {
+				missingPathDetected = true
+			}
 			messages = append(messages, ollama.Message{
 				Role:    "tool",
 				Content: result,
 			})
+		}
+
+		if missingPathDetected && !missingPathWarningInjected {
+			missingPathWarningInjected = true
+			writeLine(traceFile, "[injected: missing write_file path — prompting model to retry with explicit path]")
+			messages = append(messages, ollama.Message{
+				Role:    "user",
+				Content: buildMissingPathWarning(expectedFiles),
+			})
+			continue
 		}
 
 		select {
@@ -519,6 +534,21 @@ func buildNoWriteWarning(expectedFiles []string) string {
 			"write_file with the correct path and your complete implementation as content. "+
 			"Call write_file now.",
 		fileList,
+	)
+}
+
+// buildMissingPathWarning returns a user-turn message injected when the model
+// calls write_file without a path argument. The generated content is still in
+// context; the model only needs to retry the call with an explicit path= argument.
+func buildMissingPathWarning(expectedFiles []string) string {
+	fileList := strings.Join(expectedFiles, ", ")
+	return fmt.Sprintf(
+		"Your write_file call was missing the required 'path' argument, so nothing was written to disk.\n\n"+
+			"Your generated content is still in context — do NOT regenerate it. "+
+			"Call write_file again immediately with an explicit path= argument naming your output file (%s). "+
+			"Example: write_file(path=%q, content=\"...\")",
+		fileList,
+		expectedFiles[0],
 	)
 }
 
