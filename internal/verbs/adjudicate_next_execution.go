@@ -417,8 +417,12 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 	}
 
 	findings := analysis.MechanicalFindings
-	if note := testFirstCompleteNote(h.folderPath, currentBead.OutputFiles); note != "" {
-		findings += "\n\n" + note
+	// Suppress test-first machinery for beads that went through REFINE_TESTS —
+	// tests are pre-certified and "tests present + impl absent" is normal state.
+	if !beadHasRefinements(ctx, d, beadID) {
+		if note := testFirstCompleteNote(h.folderPath, currentBead.OutputFiles); note != "" {
+			findings += "\n\n" + note
+		}
 	}
 	if note := vacuousPassNote(currentBead, findings); note != "" {
 		findings += "\n\n" + note

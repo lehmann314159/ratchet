@@ -3,10 +3,12 @@ package project
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"ratchet/internal/db"
@@ -69,18 +71,26 @@ func RunResumeProjectMain(args []string) {
 	}
 
 	var beadID int64
-	if err := tx.QueryRowContext(ctx,
-		`SELECT id FROM beads WHERE project_id = ? ORDER BY id LIMIT 1`, *projectID,
-	).Scan(&beadID); err != nil {
+	var beadFullText string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT b.id, br.full_text FROM beads b
+		JOIN bead_revisions br ON br.id = b.current_revision_id
+		WHERE b.project_id = ? ORDER BY b.id LIMIT 1`, *projectID,
+	).Scan(&beadID, &beadFullText); err != nil {
 		_ = tx.Rollback()
 		slog.Error("resume-project: find first bead", "error", err)
 		os.Exit(1)
 	}
 
+	firstVerb := db.VerbExecuteBead
+	if resumeBeadHasTestFiles(beadFullText) {
+		firstVerb = db.VerbRefineTestsA
+	}
+
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
 		VALUES (?, ?, ?, 'pending', ?, ?)`,
-		*projectID, db.VerbExecuteBead, beadID, now, now,
+		*projectID, firstVerb, beadID, now, now,
 	); err != nil {
 		_ = tx.Rollback()
 		slog.Error("resume-project: enqueue first bead", "error", err)
@@ -96,5 +106,22 @@ func RunResumeProjectMain(args []string) {
 	fmt.Printf("  id:        %d\n", *projectID)
 	fmt.Printf("  label:     %s\n", label)
 	fmt.Printf("  status:    active\n")
-	fmt.Printf("  next job:  EXECUTE_BEAD (bead %d)\n", beadID)
+	fmt.Printf("  next job:  %s (bead %d)\n", firstVerb, beadID)
+}
+
+// resumeBeadHasTestFiles returns true when the bead spec includes *_test.go
+// output files, indicating REFINE_TESTS should run before EXECUTE_BEAD.
+func resumeBeadHasTestFiles(fullText string) bool {
+	var spec struct {
+		OutputFiles []string `json:"output_files"`
+	}
+	if json.Unmarshal([]byte(fullText), &spec) != nil {
+		return false
+	}
+	for _, f := range spec.OutputFiles {
+		if strings.HasSuffix(f, "_test.go") {
+			return true
+		}
+	}
+	return false
 }

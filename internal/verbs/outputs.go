@@ -120,6 +120,23 @@ type RevisePendingOutput struct {
 	Revisions []RevisePendingRevision `json:"revisions"`
 }
 
+// --- REFINE_TESTS_A / REFINE_TESTS_B ---
+
+// RefineTestsFile is one test file entry in the REFINE_TESTS output.
+type RefineTestsFile struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+// RefineTestsOutput is the structured output of a REFINE_TESTS turn.
+// Changed=true means the model corrected or wrote the test files.
+// Changed=false means the model reviewed and found nothing wrong.
+type RefineTestsOutput struct {
+	Changed   bool              `json:"changed"`
+	Summary   string            `json:"summary"`
+	TestFiles []RefineTestsFile `json:"test_files,omitempty"`
+}
+
 // --- ADJUDICATE_NEXT_EXECUTION ---
 
 type AdjudicateNextExecutionOutput struct {

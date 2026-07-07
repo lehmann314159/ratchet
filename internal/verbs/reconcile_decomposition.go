@@ -285,10 +285,9 @@ func (h *ReconcileDecomposition) applyFixes(ctx context.Context, tx *sql.Tx, pro
 	return nil
 }
 
-// enqueueFirstBeadForExecution creates an EXECUTE_BEAD job for the first bead
-// in the project (lowest id). Subsequent beads are enqueued one at a time by
-// ADJUDICATE after each bead declares success, so every bead runs on a
-// fully-completed workspace rather than against whatever earlier beads left behind.
+// enqueueFirstBeadForExecution enqueues the first bead for execution. If the
+// bead has test files, REFINE_TESTS_A runs first to certify them; otherwise
+// EXECUTE_BEAD is enqueued directly.
 func enqueueFirstBeadForExecution(ctx context.Context, tx *sql.Tx, projectID int64, now string) error {
 	var beadID int64
 	if err := tx.QueryRowContext(ctx,
@@ -296,9 +295,5 @@ func enqueueFirstBeadForExecution(ctx context.Context, tx *sql.Tx, projectID int
 	).Scan(&beadID); err != nil {
 		return fmt.Errorf("find first bead: %w", err)
 	}
-	_, err := tx.ExecContext(ctx, `
-		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
-		VALUES (?, ?, ?, 'pending', ?, ?)`,
-		projectID, db.VerbExecuteBead, beadID, now, now)
-	return err
+	return enqueueBeadExecution(ctx, tx, projectID, beadID, now)
 }

@@ -50,5 +50,7 @@ func All(ollamaBase string) map[string]Handler {
 		db.VerbCompressAnalysis:        &CompressAnalysis{},
 		db.VerbAdjudicateNextExecution: &AdjudicateNextExecution{},
 		db.VerbRevisePending:           &RevisePending{},
+		db.VerbRefineTestsA:            &RefineTests{verbName: db.VerbRefineTestsA},
+		db.VerbRefineTestsB:            &RefineTests{verbName: db.VerbRefineTestsB},
 	}
 }

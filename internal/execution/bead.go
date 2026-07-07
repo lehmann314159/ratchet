@@ -143,16 +143,26 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	priorHistory := loadPriorAttemptSummary(ctx, d, beadID)
 
 	// Compute the files the model was instructed to write this attempt.
-	// In test-first mode the prompt only lists test files; in normal mode all output files.
+	// test-first mode: tests absent → list only test files.
+	// tests-locked mode: tests present, impl absent → list only impl files (tests are certified).
+	// normal mode: list all output files.
 	testFirst := isTestFirstMode(folderPath, parsedBead.OutputFiles)
+	testsLocked := !testFirst && isTestsLockedMode(folderPath, parsedBead.OutputFiles)
 	var expectedFiles []string
-	if testFirst {
+	switch {
+	case testFirst:
 		for _, f := range parsedBead.OutputFiles {
 			if strings.HasSuffix(f, "_test.go") {
 				expectedFiles = append(expectedFiles, f)
 			}
 		}
-	} else {
+	case testsLocked:
+		for _, f := range parsedBead.OutputFiles {
+			if !strings.HasSuffix(f, "_test.go") {
+				expectedFiles = append(expectedFiles, f)
+			}
+		}
+	default:
 		expectedFiles = parsedBead.OutputFiles
 	}
 
@@ -332,10 +342,12 @@ func buildBeadUserMsg(specText string, outputFiles []string, exitCriteria []stri
 	var msg string
 
 	testFirst := isTestFirstMode(folderPath, outputFiles)
+	testsLocked := !testFirst && isTestsLockedMode(folderPath, outputFiles)
 
-	// In test-first mode, show only the test files as the write target.
+	// Determine which files to show as write targets.
 	displayFiles := outputFiles
-	if testFirst {
+	switch {
+	case testFirst:
 		var tf []string
 		for _, f := range outputFiles {
 			if strings.HasSuffix(f, "_test.go") {
@@ -343,6 +355,16 @@ func buildBeadUserMsg(specText string, outputFiles []string, exitCriteria []stri
 			}
 		}
 		displayFiles = tf
+	case testsLocked:
+		var impl []string
+		for _, f := range outputFiles {
+			if !strings.HasSuffix(f, "_test.go") {
+				impl = append(impl, f)
+			}
+		}
+		if len(impl) > 0 {
+			displayFiles = impl
+		}
 	}
 
 	if len(displayFiles) > 0 {
@@ -353,7 +375,8 @@ func buildBeadUserMsg(specText string, outputFiles []string, exitCriteria []stri
 		msg += "\n"
 	}
 
-	if testFirst {
+	switch {
+	case testFirst:
 		msg += "## Test-First Mode\n\n" +
 			"This bead delivers both test files and implementation files. On this first attempt, " +
 			"write ONLY the test files listed above. Do NOT write any implementation files — " +
@@ -362,6 +385,16 @@ func buildBeadUserMsg(specText string, outputFiles []string, exitCriteria []stri
 			"this is expected. Do not try to make the tests pass on this attempt.\n\n" +
 			"Write test cases that correctly verify what the specification says the implementation " +
 			"should do. Be precise about expected values — derive them from the specification.\n\n"
+	case testsLocked:
+		msg += "## Tests Locked\n\n" +
+			"The following test files were pre-certified by REFINE_TESTS and are LOCKED:\n"
+		for _, f := range outputFiles {
+			if strings.HasSuffix(f, "_test.go") {
+				msg += fmt.Sprintf("- %s\n", f)
+			}
+		}
+		msg += "\nDo NOT write to these files under any circumstances. " +
+			"Write ONLY the implementation files listed in Output Files above.\n\n"
 	}
 
 	msg += specText
@@ -415,6 +448,21 @@ func isTestFirstMode(folderPath string, outputFiles []string) bool {
 		}
 	}
 	return true
+}
+
+// isTestsLockedMode returns true when the bead has *_test.go output files AND
+// at least one of them already exists on disk. This indicates REFINE_TESTS has
+// already run: the test files are certified and must not be modified by EXECUTE_BEAD.
+// In this mode the executor should write ONLY the implementation files.
+func isTestsLockedMode(folderPath string, outputFiles []string) bool {
+	for _, f := range outputFiles {
+		if strings.HasSuffix(f, "_test.go") {
+			if _, err := os.Stat(filepath.Join(folderPath, f)); err == nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // loadContextFiles reads all Go source files and go.mod from folderPath

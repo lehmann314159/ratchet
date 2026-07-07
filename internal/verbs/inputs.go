@@ -326,6 +326,51 @@ func loadVerbModelOrFallback(ctx context.Context, d *db.DB, projectID int64, ver
 	return loadVerbModel(ctx, d, projectID, fallbackVerb)
 }
 
+// enqueueBeadExecution enqueues REFINE_TESTS_A if the bead has *_test.go output
+// files (so tests are certified before implementation starts), or EXECUTE_BEAD
+// otherwise. Called from reconcile_decomposition, revise_pending, and resume.
+func enqueueBeadExecution(ctx context.Context, tx *sql.Tx, projectID, beadID int64, now string) error {
+	var fullText string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT br.full_text FROM beads b
+		JOIN bead_revisions br ON br.id = b.current_revision_id
+		WHERE b.id = ?`, beadID,
+	).Scan(&fullText); err != nil {
+		return fmt.Errorf("load bead %d for enqueue decision: %w", beadID, err)
+	}
+	verb := db.VerbExecuteBead
+	if beadSpecHasTestFiles(fullText) {
+		verb = db.VerbRefineTestsA
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
+		VALUES (?, ?, ?, 'pending', ?, ?)`,
+		projectID, verb, beadID, now, now)
+	return err
+}
+
+// beadSpecHasTestFiles returns true when the bead spec's output_files includes
+// at least one *_test.go file — indicating REFINE_TESTS should run first.
+func beadSpecHasTestFiles(fullText string) bool {
+	var spec struct {
+		OutputFiles []string `json:"output_files"`
+	}
+	if json.Unmarshal([]byte(fullText), &spec) != nil {
+		return false
+	}
+	return hasTestGoFile(spec.OutputFiles)
+}
+
+// beadHasRefinements returns true if any test_refinements rows exist for beadID.
+// Used to prevent the old test-first machinery from firing on post-REFINE_TESTS beads.
+func beadHasRefinements(ctx context.Context, d *db.DB, beadID int64) bool {
+	var count int
+	_ = d.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM test_refinements WHERE bead_id = ?`, beadID,
+	).Scan(&count)
+	return count > 0
+}
+
 // loadBeadByID returns a single bead's current state by bead ID.
 func loadBeadByID(ctx context.Context, d *db.DB, beadID int64) (*beadState, error) {
 	var s beadState

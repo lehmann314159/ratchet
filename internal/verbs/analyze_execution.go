@@ -88,8 +88,9 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		return "", err
 	}
 
-	// Independent test verification after a test-first attempt.
-	if isPostTestFirstState(folderPath, beadSpec.OutputFiles) {
+	// Independent test verification after a legacy test-first attempt.
+	// Skipped when REFINE_TESTS ran for this bead — tests are pre-certified.
+	if isPostTestFirstState(folderPath, beadSpec.OutputFiles) && !beadHasRefinements(ctx, d, beadID) {
 		if verif := verifyTestExpectations(ctx, oc, model, folderPath, beadSpec.FullText, beadSpec.OutputFiles); verif != "" {
 			mechanicalFindings += "\n\n" + verif
 		}

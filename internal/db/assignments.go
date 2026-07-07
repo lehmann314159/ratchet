@@ -66,6 +66,8 @@ func SeedVerbModelAssignments(ctx context.Context, tx *sql.Tx, projectID int64) 
 		VerbCompressAnalysis:        "gemma4:31b",
 		VerbAdjudicateNextExecution: "gemma4:31b",
 		VerbRevisePending:           "gemma4:31b",
+		VerbRefineTestsA:            "gemma4:31b",         // independent reviewer
+		VerbRefineTestsB:            "mistral-small3.2:24b", // different priors
 	}
 
 	// Validate constraints before writing anything.
@@ -110,6 +112,19 @@ func SeedVerbModelAssignmentsFromFleet(ctx context.Context, tx *sql.Tx, projectI
 	if _, ok := enriched[VerbRevisePending]; !ok {
 		if m, ok := enriched[VerbAuditDecomposition]; ok {
 			enriched[VerbRevisePending] = m
+		}
+	}
+	// REFINE_TESTS_A: independent reviewer → AUDIT model (qwen3:32b in live fleet).
+	// REFINE_TESTS_B: different-priors peer → RECONCILE model (gemma4:31b in live fleet).
+	// These two must differ; the AUDIT≠RECONCILE constraint (constraint 1+2) guarantees it.
+	if _, ok := enriched[VerbRefineTestsA]; !ok {
+		if m, ok := enriched[VerbAuditDecomposition]; ok {
+			enriched[VerbRefineTestsA] = m
+		}
+	}
+	if _, ok := enriched[VerbRefineTestsB]; !ok {
+		if m, ok := enriched[VerbReconcileDecomposition]; ok {
+			enriched[VerbRefineTestsB] = m
 		}
 	}
 	for _, v := range AllVerbs {
@@ -164,6 +179,8 @@ func checkModelConstraints(m map[string]string) error {
 	analyze, hasAnalyze := m[VerbAnalyzeExecution]
 	survey, hasSurvey := m[VerbSurveySpec]
 	certify, hasCertify := m[VerbCertifyManifest]
+	refineA, hasRefineA := m[VerbRefineTestsA]
+	refineB, hasRefineB := m[VerbRefineTestsB]
 
 	if hasDecompose && hasReconcile && decompose != reconcile {
 		return errors.New(
@@ -187,6 +204,12 @@ func checkModelConstraints(m map[string]string) error {
 		return errors.New(
 			"CERTIFY_MANIFEST must use a different model from SURVEY_SPEC " +
 				"(a model cannot independently review its own manifest output)",
+		)
+	}
+	if hasRefineA && hasRefineB && refineA == refineB {
+		return errors.New(
+			"REFINE_TESTS_A and REFINE_TESTS_B must use different models " +
+				"(the peer loop requires genuine independence — different priors)",
 		)
 	}
 	return nil

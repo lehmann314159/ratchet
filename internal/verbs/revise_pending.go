@@ -204,11 +204,7 @@ func (h *RevisePending) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJ
 	if err != nil {
 		return fmt.Errorf("find next pending bead: %w", err)
 	}
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
-		VALUES (?, ?, ?, 'pending', ?, ?)`,
-		job.ProjectID, db.VerbExecuteBead, nextBeadID, now, now)
-	return err
+	return enqueueBeadExecution(ctx, tx, job.ProjectID, nextBeadID, now)
 }
 
 // readProjectSourceFiles reads .go and .mod source files from the project root.

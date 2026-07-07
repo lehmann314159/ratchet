@@ -122,6 +122,9 @@ func (db *DB) applyTableMigrations() error {
 	if err := db.seedRevisePendingAssignments(); err != nil {
 		return err
 	}
+	if err := db.seedRefineTestsAssignments(); err != nil {
+		return err
+	}
 	if err := db.migrateProjectsStatus(); err != nil {
 		return err
 	}
@@ -193,6 +196,41 @@ func (db *DB) seedRevisePendingAssignments() error {
 		  )`)
 	if err != nil {
 		return fmt.Errorf("seed REVISE_PENDING assignments: %w", err)
+	}
+	return nil
+}
+
+// seedRefineTestsAssignments inserts REFINE_TESTS_A and REFINE_TESTS_B
+// verb_model_assignments for any project that is missing them.
+// A: seeded from AUDIT_DECOMPOSITION (qwen3:32b — independent reviewer).
+// B: seeded from RECONCILE_DECOMPOSITION (gemma4:31b — different priors).
+// This backfills projects created before REFINE_TESTS was added.
+func (db *DB) seedRefineTestsAssignments() error {
+	_, err := db.Exec(`
+		INSERT INTO verb_model_assignments (project_id, verb, model)
+		SELECT project_id, 'REFINE_TESTS_A', model
+		FROM verb_model_assignments
+		WHERE verb = 'AUDIT_DECOMPOSITION'
+		  AND NOT EXISTS (
+		    SELECT 1 FROM verb_model_assignments x
+		    WHERE x.project_id = verb_model_assignments.project_id
+		      AND x.verb = 'REFINE_TESTS_A'
+		  )`)
+	if err != nil {
+		return fmt.Errorf("seed REFINE_TESTS_A assignments: %w", err)
+	}
+	_, err = db.Exec(`
+		INSERT INTO verb_model_assignments (project_id, verb, model)
+		SELECT project_id, 'REFINE_TESTS_B', model
+		FROM verb_model_assignments
+		WHERE verb = 'RECONCILE_DECOMPOSITION'
+		  AND NOT EXISTS (
+		    SELECT 1 FROM verb_model_assignments x
+		    WHERE x.project_id = verb_model_assignments.project_id
+		      AND x.verb = 'REFINE_TESTS_B'
+		  )`)
+	if err != nil {
+		return fmt.Errorf("seed REFINE_TESTS_B assignments: %w", err)
 	}
 	return nil
 }

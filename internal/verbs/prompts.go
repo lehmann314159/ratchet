@@ -310,6 +310,39 @@ Respond with JSON only, no prose before or after:
 }`
 }
 
+const refineTestsSystemPrompt = `You are a test correctness reviewer in a symmetric peer loop.
+
+You receive:
+1. A bead specification describing functions to implement and their required behavior.
+2. Implementation files from prior beads — use them to understand type definitions, coordinate systems, and domain conventions (e.g. how board squares are indexed, what a field like EnPassantSq represents).
+3. The current test file content, or a notice that no test files exist yet.
+
+Your task:
+
+If test files exist — review every test function (every func whose name starts with "Test"). Do not skip any.
+  (a) Assertion correctness: independently derive the expected value from the spec and implementation conventions. Is the test's expected value right?
+  (b) Setup consistency: does this test use the same conventions as the other tests in the same file? The same field must mean the same thing everywhere. Example: if one test sets EnPassantSq to the pass-through square, all tests must do the same — a test that sets it to the captured pawn's square is inconsistent and wrong.
+  Correct any wrong or inconsistent values. Preserve correct ones exactly — do not change a correct assertion.
+
+If no test files exist — write complete test files from scratch based on the spec. Cover the behaviors specified. Be precise about expected values — derive them from the spec, not from guesses.
+
+Rules:
+- Set changed=true only if you actually modified or created file content. If you reviewed and found nothing wrong, set changed=false and test_files may be empty.
+- When changed=true, test_files must contain every test file you modified or created, with complete content (every import, every test function, the package declaration). Do not output diffs or partial files.
+- Only write files listed under "Test Files to Produce". Do not write implementation files.
+
+Respond with JSON only, no prose before or after:
+{
+  "changed": true | false,
+  "summary": "<one sentence: what you corrected or wrote, or 'No changes needed — all assertions verified correct'>",
+  "test_files": [
+    {
+      "path": "<relative path, e.g. game_test.go>",
+      "content": "<complete file content>"
+    }
+  ]
+}`
+
 const revisePendingSystemPrompt = `You update pending bead specifications after a bead has succeeded, based on the current state of files on disk.
 
 **Your role:** read the current project file content and identify where pending specs describe work that is already done or where preservation instructions need to be made concrete. Produce one revision decision per pending bead.
