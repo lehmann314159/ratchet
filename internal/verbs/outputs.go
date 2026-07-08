@@ -1,5 +1,10 @@
 package verbs
 
+import (
+	"encoding/json"
+	"strings"
+)
+
 // --- SURVEY_SPEC ---
 
 // SurveyManifestFile is one file entry in the SURVEY_SPEC manifest.
@@ -143,12 +148,31 @@ type RefineTestsCritiqueOutput struct {
 	Summary           string   `json:"summary"`
 }
 
+// flexString unmarshals a JSON field that may be either a string or an array
+// of strings. Array elements are joined with newlines. This handles models
+// that emit ["item1", "item2"] instead of "item1\nitem2".
+type flexString string
+
+func (f *flexString) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*f = flexString(s)
+		return nil
+	}
+	var a []string
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*f = flexString(strings.Join(a, "\n"))
+	return nil
+}
+
 // RefineTestsJudgeOutput is the output of REFINE_TESTS_JUDGE.
 type RefineTestsJudgeOutput struct {
-	Decision           string   `json:"decision"`            // "approved" or "revise"
-	FunctionsToRewrite []string `json:"functions_to_rewrite"` // only set when decision="revise"
-	Instructions       string   `json:"instructions"`         // only set when decision="revise"
-	Summary            string   `json:"summary"`
+	Decision           string     `json:"decision"`             // "approved" or "revise"
+	FunctionsToRewrite []string   `json:"functions_to_rewrite"` // only set when decision="revise"
+	Instructions       flexString `json:"instructions"`         // only set when decision="revise"
+	Summary            string     `json:"summary"`
 }
 
 // --- ADJUDICATE_NEXT_EXECUTION ---

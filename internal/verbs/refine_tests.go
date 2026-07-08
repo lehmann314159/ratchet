@@ -203,7 +203,7 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 				}
 			}
 		}
-		userMsg = buildRevisionWriteMsg(bead, folderPath, implContext, brokenBodies, judgeOut.Instructions)
+		userMsg = buildRevisionWriteMsg(bead, folderPath, implContext, brokenBodies, string(judgeOut.Instructions))
 	}
 
 	messages := []ollama.Message{
@@ -580,7 +580,7 @@ func (h *RefineTestsJudge) Validate(rawOutput string) (string, any) {
 	if out.Decision != "approved" && out.Decision != "revise" {
 		return fmt.Sprintf("malformed: decision must be 'approved' or 'revise', got %q", out.Decision), nil
 	}
-	if out.Decision == "revise" && strings.TrimSpace(out.Instructions) == "" {
+	if out.Decision == "revise" && strings.TrimSpace(string(out.Instructions)) == "" {
 		return "malformed: decision is 'revise' but instructions is empty", nil
 	}
 	if out.Decision == "revise" && len(out.FunctionsToRewrite) == 0 {
@@ -601,7 +601,7 @@ func (h *RefineTestsJudge) Commit(ctx context.Context, tx *sql.Tx, job *db.Hando
 	// Store instructions in summary so WRITE can retrieve them next cycle.
 	summary := out.Summary
 	if out.Decision == "revise" {
-		summary = out.Instructions
+		summary = string(out.Instructions)
 	}
 
 	if err := insertRefinement(ctx, tx, job.ProjectID, beadID, cid, h.Verb(), summary, out.Decision); err != nil {
