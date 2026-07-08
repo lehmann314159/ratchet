@@ -441,8 +441,6 @@ Step 1 — enumerate: list every test function you find (every func whose name s
 Step 2 — verify: for each test function, check at least one concrete assertion (expected values, counts, board positions, boolean conditions). Independently derive the correct expected value by tracing through the specification and implementation logic — do not trust what the test says.
 Step 3 — compare: report MATCH when your derived value agrees, MISMATCH when it differs.
 
-For board-position and game-state tests: trace through the actual coordinate system and piece behavior defined in the implementation files to check whether setup positions produce the expected outcome. Pay special attention to test setup values (squares, indices, flags) for consistency with conventions established elsewhere in the same test file.
-
 Report MATCH when your derived value agrees with the test assertion.
 Report MISMATCH when your derived value differs — provide the correct expected value and cite the spec text or implementation file line that leads to it.
 
