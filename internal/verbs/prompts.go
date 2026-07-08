@@ -561,7 +561,14 @@ immediately with trend=same, bead_spec_fit=execution_capability_problem, executi
 doubled, and prepend exactly one sentence to the existing full_text:
 "Begin writing to output_files immediately; do not re-run ls or other orientation commands
 before starting implementation."
+If the existing full_text already begins with that sentence, do not prepend it again.
 Make no other changes to the spec — the content is not the problem.
+
+Exception — do NOT apply this fast path when the mechanical findings also contain
+"[REFINE_TESTS bead]" and the compressed history shows the same test functions failing
+identically across multiple attempts. In that case the agent is running tests because the
+tests themselves are broken, not because it is avoiding implementation. Evaluate re_refine
+instead.
 
 Compile error in previously-written file (repair guidance): when the mechanical findings
 include a compile error in a file that was written in a prior attempt (e.g.,
