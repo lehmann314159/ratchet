@@ -476,14 +476,14 @@ Stripping rules — apply these when incorporating the latest analysis:
 Size target: each per-attempt entry should be ≤ 600 characters. Use telegraphic prose.
 
 Structure: label each attempt entry "Attempt N (termination_cause):" where N is inferred from
-the number of entries already in the history (prior entries + 1). If no prior history exists,
-this is Attempt 1 and all failure classes are [NEW].
+the number of entries already in the history (prior entries + 1).
 
-Recurrence tagging: for each distinct failure class in the latest analysis, mark it [NEW] (first
-appearance) or [RECURRING × N] (appeared in N prior attempts). A failure class is recurring when
-the same error message, missing symbol, wrong type, or test failure name appeared in any prior
-attempt. Do not split symptom variations that share the same root error into separate failure
-classes. Update recurrence counts on every pass.
+Recurrence tagging: every distinct failure class in the latest analysis MUST be tagged — no
+exceptions, including Attempt 1. Mark each [NEW] (first appearance) or [RECURRING × N]
+(appeared in N prior attempts). A failure class is recurring when the same error message,
+missing symbol, wrong type, or test failure name appeared in any prior attempt. Do not split
+symptom variations that share the same root error into separate failure classes. Update
+recurrence counts on every pass. Never output untagged failure text.
 
 Resolution detection: if a failure class tagged [NEW] or [RECURRING] in the existing history does
 not appear in the latest analysis, mark it [RESOLVED — absent from latest attempt] in your output.
@@ -501,44 +501,43 @@ Respond with JSON only, no prose before or after:
 
 const adjudicateNextExecutionSystemPrompt = `You make a decision after a completed execution attempt.
 
-Two output fields are REQUIRED. For retry and stop decisions, they are checked for internal
-consistency against your reasoning. For declare_success, both must be "not_applicable":
+Two classification fields are required on every output:
 
-  trend: "same"           — the failure mode this attempt is the same as or a recurrence of the previous one
-         "narrower"       — the same root area but the failure scope has meaningfully narrowed
-         "unrelated"      — a genuinely different failure mode from the previous attempt
-         "not_applicable" — use only when decision is "declare_success", "test_reject", or "re_refine"
+  trend:         "same" | "narrower" | "unrelated" | "not_applicable"
+  bead_spec_fit: "bead_problem" | "execution_capability_problem" | "not_applicable"
 
-  bead_spec_fit: "bead_problem"                — the Bead specification is wrong, ambiguous, or missing detail
-                 "execution_capability_problem" — the spec is correct but execution failed to implement it
-                 "not_applicable"              — use only when decision is "declare_success", "test_reject", or "re_refine"
+  "same"      — same failure mode as or a recurrence of the previous attempt
+  "narrower"  — same root area but meaningfully narrowed scope
+  "unrelated" — genuinely different failure mode from the previous attempt
 
-If your declared trend or bead_spec_fit contradicts your own reasoning (on retry/stop decisions),
-the output is treated as invalid.
+  "bead_problem"                 — the spec is wrong, ambiguous, or missing detail
+  "execution_capability_problem" — the spec is correct but execution failed to implement it
+
+Terminal decisions (declare_success, test_reject, re_refine): set both to "not_applicable".
+Retry/stop decisions (execute_as_is, execute_revised, full_stop): set both meaningfully —
+"not_applicable" is invalid here, and a mismatch with your reasoning makes the output invalid.
 
 decision:
   "execute_as_is"   — retry the Bead without changes
   "execute_revised" — retry with a revised Bead (include revised_bead in your output)
   "full_stop"       — stop; the project must restart from DECOMPOSE_SPEC
   "declare_success" — the Bead's exit criteria are confirmed met by the mechanical findings;
-                      no further execution needed. Set trend and bead_spec_fit to "not_applicable".
+                      no further execution needed.
   "test_reject"     — the test-first attempt wrote test files with incorrect assertions (MISMATCH
                       entries in "[Test-first verification]"). The test files will be deleted and
                       test-first will re-run with your corrections. Include test_rejection_guidance
                       listing each correction (test function, wrong value → correct value, cite spec
-                      or established convention). Set trend and bead_spec_fit to "not_applicable".
-                      Only valid when the mechanical findings contain MISMATCH entries from
-                      "[Test-first verification]".
+                      or established convention). Only valid when the mechanical findings contain
+                      MISMATCH entries from "[Test-first verification]".
   "re_refine"       — the REFINE_TESTS-written test file contains logically incorrect assertions
                       that no correct implementation can satisfy. The existing tests are preserved;
                       only the broken functions will be rewritten. Include re_refine_guidance with
                       a bulleted diagnosis: for each broken assertion, name the test function and
                       sub-test, state the impossible expectation, and explain why a correct
-                      implementation cannot satisfy it. Set trend and bead_spec_fit to
-                      "not_applicable". Use this when the same test functions fail identically
-                      across multiple attempts and the implementation logic appears correct — not
-                      as a first resort. Only valid when "[REFINE_TESTS bead]" appears in the
-                      mechanical findings.
+                      implementation cannot satisfy it. Use this when the same test functions fail
+                      identically across multiple attempts and the implementation logic appears
+                      correct — not as a first resort. Only valid when "[REFINE_TESTS bead]"
+                      appears in the mechanical findings.
 
 Guidance on choosing between execute_as_is and execute_revised when bead_spec_fit is
 "execution_capability_problem":
@@ -579,17 +578,11 @@ Pre-implementation commitment for persistent capability failures:
     in the trace early rather than after a full failed attempt.
 
 Specificity ratchet for RECURRING failures:
-  - The compressed history tags failure classes as NEW or RECURRING (N prior attempts).
-    Note: compression is passthrough for the first two attempts — the history contains raw
-    findings text with no NEW/RECURRING tags. For those early attempts, infer recurrence
-    yourself: if the same error, missing symbol, or test failure name appears in the raw
-    history across multiple attempts, treat it as RECURRING and apply the ratchet.
-  - For any failure class that is RECURRING (tagged or inferred) with 2 or more prior
+  - For any failure class the compressed history tags RECURRING with 2 or more prior
     attempts, prose descriptions in the revised spec are insufficient — the agent has
-    already read prose descriptions and failed. Escalate to verbatim code: include the
-    exact function call, correct type, or a minimal working skeleton directly in the
-    revised full_text. Do not describe the correct approach — write it out literally so
-    the agent can copy it without interpretation.
+    already read prose and failed. Escalate to verbatim code: include the exact function
+    call, correct type, or a minimal working skeleton directly in the revised full_text.
+    Write it literally so the agent can copy it without interpretation.
   - Apply this to every RECURRING failure class, not just the most recent one.
 
 Vacuous test pass: if the bead's exit_criteria include a test command and mechanical_findings
