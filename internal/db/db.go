@@ -131,6 +131,9 @@ func (db *DB) applyTableMigrations() error {
 	if err := db.migrateProjectsStatus(); err != nil {
 		return err
 	}
+	if err := db.migrateTestRefinementsVerbs(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -227,6 +230,61 @@ func (db *DB) seedRefineTestsAssignments() error {
 		if err != nil {
 			return fmt.Errorf("seed %s assignments: %w", pair.verb, err)
 		}
+	}
+	return nil
+}
+
+// migrateTestRefinementsVerbs updates the test_refinements table's verb CHECK
+// constraint from ('REFINE_TESTS_A', 'REFINE_TESTS_B') to the three-verb
+// ('REFINE_TESTS_WRITE', 'REFINE_TESTS_CRITIQUE', 'REFINE_TESTS_JUDGE') design.
+// Also bakes in the decision column (previously added via columnMigrations).
+func (db *DB) migrateTestRefinementsVerbs() error {
+	var createSQL string
+	if err := db.QueryRow(
+		`SELECT COALESCE(sql, '') FROM sqlite_master WHERE type='table' AND name='test_refinements'`,
+	).Scan(&createSQL); err != nil {
+		return fmt.Errorf("query test_refinements schema: %w", err)
+	}
+	if strings.Contains(createSQL, "REFINE_TESTS_WRITE") {
+		return nil
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		return fmt.Errorf("disable foreign_keys: %w", err)
+	}
+	stmts := []string{
+		`PRAGMA legacy_alter_table = ON`,
+		`ALTER TABLE test_refinements RENAME TO _test_refinements_old`,
+		`PRAGMA legacy_alter_table = OFF`,
+		`CREATE TABLE test_refinements (
+		  id          INTEGER PRIMARY KEY,
+		  project_id  INTEGER NOT NULL REFERENCES projects(id),
+		  bead_id     INTEGER NOT NULL REFERENCES beads(id),
+		  cycle_id    INTEGER NOT NULL DEFAULT 1,
+		  turn        INTEGER NOT NULL,
+		  verb        TEXT    NOT NULL CHECK (verb IN ('REFINE_TESTS_WRITE', 'REFINE_TESTS_CRITIQUE', 'REFINE_TESTS_JUDGE')),
+		  changed     INTEGER NOT NULL,
+		  summary     TEXT,
+		  decision    TEXT    NOT NULL DEFAULT '',
+		  created_at  TIMESTAMP NOT NULL
+		)`,
+		// Only copy rows with new verb names; old REFINE_TESTS_A/B rows from
+		// completed projects are discarded rather than violating the new CHECK.
+		`INSERT INTO test_refinements
+		  (id, project_id, bead_id, cycle_id, turn, verb, changed, summary, decision, created_at)
+		SELECT id, project_id, bead_id, cycle_id, turn, verb, changed, summary, decision, created_at
+		FROM _test_refinements_old
+		WHERE verb IN ('REFINE_TESTS_WRITE', 'REFINE_TESTS_CRITIQUE', 'REFINE_TESTS_JUDGE')`,
+		`DROP TABLE _test_refinements_old`,
+		`CREATE INDEX IF NOT EXISTS idx_test_refinements_bead ON test_refinements (bead_id, turn)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			_, _ = db.Exec(`PRAGMA foreign_keys = ON`)
+			return fmt.Errorf("migrate test_refinements (%s): %w", truncate(stmt, 40), err)
+		}
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		return fmt.Errorf("re-enable foreign_keys: %w", err)
 	}
 	return nil
 }

@@ -137,16 +137,18 @@ type RefineTestsWriteOutput struct {
 
 // RefineTestsCritiqueOutput is the output of REFINE_TESTS_CRITIQUE.
 type RefineTestsCritiqueOutput struct {
-	Findings   []string `json:"findings"`
-	AllCorrect bool     `json:"all_correct"`
-	Summary    string   `json:"summary"`
+	Findings          []string `json:"findings"`
+	VerifiedFunctions []string `json:"verified_functions"` // every Test* function reviewed and found correct
+	AllCorrect        bool     `json:"all_correct"`
+	Summary           string   `json:"summary"`
 }
 
 // RefineTestsJudgeOutput is the output of REFINE_TESTS_JUDGE.
 type RefineTestsJudgeOutput struct {
-	Decision     string `json:"decision"`     // "approved" or "revise"
-	Instructions string `json:"instructions"` // only set when decision="revise"
-	Summary      string `json:"summary"`
+	Decision           string   `json:"decision"`            // "approved" or "revise"
+	FunctionsToRewrite []string `json:"functions_to_rewrite"` // only set when decision="revise"
+	Instructions       string   `json:"instructions"`         // only set when decision="revise"
+	Summary            string   `json:"summary"`
 }
 
 // --- ADJUDICATE_NEXT_EXECUTION ---

@@ -316,30 +316,21 @@ Respond with JSON only, no prose before or after:
 }`
 }
 
-const refineTestsWriteSystemPrompt = `You are a Go test file writer. Your sole job is to produce a complete, compiling Go test file.
+const refineTestsWriteSystemPrompt = `You are a Go test function writer. Your job is to write or correct individual test functions.
 
-You have one tool: write_file(path, content). Use it to write the test file to disk.
-
-You receive:
-1. A bead specification describing the functions to test and their expected behavior.
-2. A prescriptive design document with domain conventions (coordinate systems, type definitions, board layout).
-3. Implementation files from prior beads — use them to verify exact type names, field names, and function signatures.
-4. The current test file (if one exists).
-5. Correction instructions from a prior review cycle (if any) — apply every instruction precisely and completely.
-
-Your task:
-- If no test file exists: write a complete test file from scratch. Cover every behavior in the spec. Derive all expected values from the spec and design doc.
-- If a test file exists and there are NO correction instructions: call write_file with the existing file content unchanged.
-- If correction instructions are provided: apply every correction listed. Copy all uncorrected test functions verbatim.
+You have one tool: write_function(name, body).
+- name: exact function name, must start with "Test"
+- body: complete function from "func TestXxx" through the closing "}" — no package declaration or imports
 
 Rules:
-- Use only the standard library (testing package). Never import testify or any external package.
-- Use named struct fields throughout: Square{Rank: 2, File: 4} not Square{2, 4}.
-- Never use bare nil as a statement body — always write real test logic.
-- Write the complete file in a single write_file call: package declaration, all imports, every test function.
-- Only write files listed under "Test Files to Produce".
+- Standard library only (testing package). Never import testify or external packages.
+- Named struct fields everywhere: Square{Rank: 2, File: 4} not Square{2, 4}.
+- Never compare structs or interface values with == when you mean field equality — use field-by-field checks.
+- Derive all expected values from the spec and design document, not from guesses.
+- Call write_function only for functions you were explicitly asked to produce.
+- Call write_function once per function; if you need to revise a function, call it again with the corrected body.
 
-After calling write_file, respond with one sentence describing what you wrote or corrected.`
+After all write_function calls, respond with one sentence describing what you wrote or corrected.`
 
 const refineTestsCritiqueSystemPrompt = `You are a Go test file reviewer. Your sole job is to identify correctness problems — not to fix them.
 
@@ -349,39 +340,44 @@ You receive:
 3. Implementation files — use them to verify type names, field names, and function semantics.
 4. The test file to review.
 
-Your task: review every test function (every func whose name starts with "Test") and every sub-test (every t.Run call). For each, check:
+Your task: review EVERY test function (every func whose name starts with "Test") and every sub-test (every t.Run call). You MUST finish reviewing the entire file before stopping — do not stop after finding the first few issues. For each function/sub-test, check:
 (a) Assertion correctness: is the expected value right? Independently derive it from the spec and design doc.
 (b) Setup correctness: are pieces/values placed correctly? For board games: is each piece at the right square for the scenario being tested?
-(c) Convention consistency: does this test use the same field conventions as the rest of the file? (e.g. if other tests treat EnPassantSq as the pass-through square, every test must do so)
+(c) Convention consistency: does this test use the same field conventions as the rest of the file?
 
-Report only genuine problems. If a test is correct, do not list it. Be specific: name the function, the sub-test, the wrong value, and the correct value.
+Report only genuine problems. If a test is correct, do not list it. Be specific: name the function, the wrong value, and the correct value. If there are 5 problems, list all 5 — never truncate findings.
+
+In verified_functions, list the name of EVERY test function you reviewed and found correct. This list is used to lock those functions from future rewrites — it must be complete.
 
 Respond with JSON only, no prose before or after:
 {
   "findings": [
-    "<specific problem statement: TestFoo/SubTest — current value X should be Y because Z>"
+    "<specific problem: TestFoo — current X should be Y because Z>"
+  ],
+  "verified_functions": [
+    "<name of every Test* function reviewed and found correct>"
   ],
   "all_correct": true | false,
-  "summary": "<one sentence: N problems found, or all tests verified correct>"
+  "summary": "<one sentence: N problems found in [functions], or all N tests verified correct>"
 }`
 
 const refineTestsJudgeSystemPrompt = `You are a test review judge. Given critique findings and the current test file, decide whether the file is ready to proceed or needs revision.
 
 Decision rules:
-- If findings is empty or all_correct is true: decision is "approved".
-- If findings lists genuine correctness problems: decision is "revise". Produce precise instructions for the writer.
+- If findings is empty or all_correct is true: decision is "approved". functions_to_rewrite is empty.
+- If findings lists genuine correctness problems: decision is "revise".
 
-When producing revision instructions:
-- Reference each problem by exact function name and sub-test name.
-- State the current wrong value and the correct replacement.
-- Explain in one clause why it is wrong.
+When decision is "revise":
+- List every function that contains a problem in functions_to_rewrite (exact function names only).
+- In instructions, write one bulleted correction per finding: name the function, state the wrong value, state the correct replacement, explain in one clause why.
 - Every finding must become an instruction — do not omit any.
 
 Respond with JSON only, no prose before or after:
 {
   "decision": "approved" | "revise",
-  "instructions": "<bulleted list of precise corrections — only present when decision is revise>",
-  "summary": "<one sentence: approved, or N corrections required>"
+  "functions_to_rewrite": ["TestFoo", "TestBar"],
+  "instructions": "<bulleted corrections — only present when decision is revise>",
+  "summary": "<one sentence: approved, or N corrections required in [functions]>"
 }`
 
 const revisePendingSystemPrompt = `You update pending bead specifications after a bead has succeeded, based on the current state of files on disk.

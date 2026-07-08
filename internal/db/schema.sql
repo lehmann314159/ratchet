@@ -176,17 +176,18 @@ CREATE TABLE IF NOT EXISTS certifications (
   created_at            TIMESTAMP NOT NULL
 );
 
--- One row per REFINE_TESTS turn (per bead). Tracks the symmetric peer loop
--- that certifies test files before EXECUTE_BEAD runs.
+-- One row per REFINE_TESTS turn (per bead). Tracks the Write→Critique→Judge
+-- cycle that certifies test files before EXECUTE_BEAD runs.
 CREATE TABLE IF NOT EXISTS test_refinements (
   id          INTEGER PRIMARY KEY,
   project_id  INTEGER NOT NULL REFERENCES projects(id),
   bead_id     INTEGER NOT NULL REFERENCES beads(id),
   cycle_id    INTEGER NOT NULL DEFAULT 1,  -- incremented on requeue (scopes cap and consensus checks)
   turn        INTEGER NOT NULL,
-  verb        TEXT    NOT NULL CHECK (verb IN ('REFINE_TESTS_A', 'REFINE_TESTS_B')),
+  verb        TEXT    NOT NULL CHECK (verb IN ('REFINE_TESTS_WRITE', 'REFINE_TESTS_CRITIQUE', 'REFINE_TESTS_JUDGE')),
   changed     INTEGER NOT NULL,   -- 0 or 1
   summary     TEXT,
+  decision    TEXT    NOT NULL DEFAULT '',
   created_at  TIMESTAMP NOT NULL
 );
 

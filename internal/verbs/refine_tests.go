@@ -14,11 +14,12 @@ import (
 
 	"ratchet/internal/db"
 	"ratchet/internal/ollama"
+	"ratchet/internal/splice"
 )
 
 // refinementCycleCap is the maximum number of write-critique-judge cycles
 // per bead before escalating to the user.
-const refinementCycleCap = 3
+const refinementCycleCap = 5
 
 // refinementWriteAttempts is the maximum number of chat rounds within a single
 // REFINE_TESTS_WRITE call to fix compile errors before giving up.
@@ -110,22 +111,6 @@ func runCompile(ctx context.Context, folderPath string) (ok bool, output string)
 	return err == nil, strings.TrimSpace(string(out))
 }
 
-func writeTestFiles(folderPath string, files []RefineTestsFile) {
-	for _, tf := range files {
-		if !strings.HasSuffix(tf.Path, "_test.go") {
-			slog.Warn("REFINE_TESTS: skipping non-test file in output", "path", tf.Path)
-			continue
-		}
-		fullPath := filepath.Join(folderPath, tf.Path)
-		if mkErr := os.MkdirAll(filepath.Dir(fullPath), 0o755); mkErr != nil {
-			slog.Error("REFINE_TESTS: mkdir", "path", fullPath, "error", mkErr)
-			continue
-		}
-		if wErr := os.WriteFile(fullPath, []byte(tf.Content), 0o644); wErr != nil {
-			slog.Error("REFINE_TESTS: write file", "path", fullPath, "error", wErr)
-		}
-	}
-}
 
 func cycleID(job *db.HandoffJob) int64 {
 	if job.RefinementCycleID.Valid {
@@ -150,29 +135,32 @@ type RefineTestsWrite struct{}
 
 func (h *RefineTestsWrite) Verb() string { return db.VerbRefineTestsWrite }
 
-// writeFileTool is the sole tool available to REFINE_TESTS_WRITE.
-var writeFileTool = ollama.Tool{
+// writeFunctionTool is the sole tool available to REFINE_TESTS_WRITE.
+// The model writes one test function per call; Ratchet assembles/splices.
+var writeFunctionTool = ollama.Tool{
 	Type: "function",
 	Function: ollama.ToolFunction{
-		Name:        "write_file",
-		Description: "Create or overwrite a test file in the project directory.",
+		Name:        "write_function",
+		Description: "Submit a test function. Call once per function. Do not include package declarations or imports.",
 		Parameters: ollama.ToolParameters{
 			Type: "object",
 			Properties: map[string]ollama.ToolProperty{
-				"path":    {Type: "string", Description: "File path relative to project root (must end in _test.go)"},
-				"content": {Type: "string", Description: "Complete file content"},
+				"name": {Type: "string", Description: "Exact function name, must start with 'Test'"},
+				"body": {Type: "string", Description: "Complete function from 'func TestXxx' through the closing '}'"},
 			},
-			Required: []string{"path", "content"},
+			Required: []string{"name", "body"},
 		},
 	},
 }
 
 func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client, job *db.HandoffJob) (string, error) {
-	bead, project, folderPath, implContext, testFilePaths, currentTestContent, err := loadRefineContext(ctx, d, job)
+	bead, _, folderPath, implContext, testFilePaths, _, err := loadRefineContext(ctx, d, job)
 	if err != nil {
 		return "", err
 	}
-	_ = project
+	if len(testFilePaths) == 0 {
+		return "", fmt.Errorf("no test file paths for bead %d", job.BeadID.Int64)
+	}
 
 	model, err := loadVerbModel(ctx, d, job.ProjectID, h.Verb())
 	if err != nil {
@@ -180,21 +168,42 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	}
 
 	cid := cycleID(job)
+	beadID := job.BeadID.Int64
+	testPath := filepath.Join(folderPath, testFilePaths[0])
 
-	// Fetch correction instructions from the most recent JUDGE revise turn.
-	var instructions string
-	if cid > 1 {
-		_ = d.QueryRowContext(ctx, `
-			SELECT summary FROM test_refinements
-			WHERE bead_id = ? AND verb = ? AND decision = 'revise'
-			ORDER BY cycle_id DESC LIMIT 1`,
-			job.BeadID.Int64, db.VerbRefineTestsJudge,
-		).Scan(&instructions)
+	// Save original file content before any writes (needed for verified-function lock).
+	var originalSrc string
+	if origBytes, rerr := os.ReadFile(testPath); rerr == nil {
+		originalSrc = string(origBytes)
 	}
 
-	userMsg := buildBaseUserMsg(bead, folderPath, implContext, currentTestContent, testFilePaths)
-	if instructions != "" {
-		userMsg += "\n\n## Correction Instructions (from prior review cycle — apply every item)\n\n" + instructions
+	// Cycle 1: write all functions from scratch.
+	// Cycle 2+: only rewrite functions flagged by the prior JUDGE.
+	var allowedFuncs map[string]bool // nil = unrestricted (cycle 1)
+	var userMsg string
+
+	if cid == 1 {
+		userMsg = buildFirstWriteMsg(bead, folderPath, implContext)
+	} else {
+		judgeOut, jErr := loadPriorJudgeOutput(ctx, d, beadID, cid-1)
+		if jErr != nil {
+			return "", fmt.Errorf("load judge output for cycle %d: %w", cid-1, jErr)
+		}
+		allowedFuncs = make(map[string]bool, len(judgeOut.FunctionsToRewrite))
+		for _, name := range judgeOut.FunctionsToRewrite {
+			allowedFuncs[name] = true
+		}
+
+		// Extract the current bodies of broken functions from disk.
+		brokenBodies := make(map[string]string)
+		if originalSrc != "" {
+			if fm, fmErr := splice.FuncMap(originalSrc); fmErr == nil {
+				for name := range allowedFuncs {
+					brokenBodies[name] = fm[name]
+				}
+			}
+		}
+		userMsg = buildRevisionWriteMsg(bead, folderPath, implContext, brokenBodies, judgeOut.Instructions)
 	}
 
 	messages := []ollama.Message{
@@ -202,77 +211,210 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		{Role: "user", Content: userMsg},
 	}
 
-	tools := []ollama.Tool{writeFileTool}
+	// writtenFuncs collects accepted function bodies; funcOrder preserves
+	// insertion order for cycle-1 assembly (Go maps are unordered).
+	writtenFuncs := make(map[string]string)
+	var funcOrder []string
 	var summary string
 
 	for turn := 1; turn <= refinementWriteAttempts; turn++ {
-		msg, toolErr := oc.ChatWithTools(ctx, model, messages, tools, nil, nil)
+		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{writeFunctionTool}, nil, nil)
 		if toolErr != nil {
 			return "", toolErr
 		}
-
-		// Collect text content as potential summary.
 		if strings.TrimSpace(msg.Content) != "" {
 			summary = strings.TrimSpace(msg.Content)
 		}
-
 		if len(msg.ToolCalls) == 0 {
-			// Model declared done (no more tool calls).
 			break
 		}
 
-		// Execute tool calls and build reply messages.
 		messages = append(messages, msg)
 		for _, tc := range msg.ToolCalls {
 			var result string
-			if tc.Function.Name == "write_file" {
-				path, _ := tc.Function.Arguments["path"].(string)
-				content, _ := tc.Function.Arguments["content"].(string)
-				if path == "" {
-					result = "error: write_file requires a 'path' argument"
-				} else if !strings.HasSuffix(path, "_test.go") {
-					result = fmt.Sprintf("error: %q is not a _test.go file — only test files may be written here", path)
-				} else {
-					fullPath := filepath.Join(folderPath, path)
-					if mkErr := os.MkdirAll(filepath.Dir(fullPath), 0o755); mkErr != nil {
-						result = fmt.Sprintf("error: mkdir: %v", mkErr)
-					} else if wErr := os.WriteFile(fullPath, []byte(content), 0o644); wErr != nil {
-						result = fmt.Sprintf("error: write: %v", wErr)
-					} else {
-						result = fmt.Sprintf("ok: wrote %d bytes to %s", len(content), path)
-						slog.Info("REFINE_TESTS_WRITE: file written", "path", path, "bytes", len(content))
-					}
-				}
+			if tc.Function.Name != "write_function" {
+				result = fmt.Sprintf("error: unknown tool %q — only write_function is available", tc.Function.Name)
 			} else {
-				result = fmt.Sprintf("error: unknown tool %q", tc.Function.Name)
+				name, _ := tc.Function.Arguments["name"].(string)
+				body, _ := tc.Function.Arguments["body"].(string)
+				switch {
+				case !strings.HasPrefix(name, "Test"):
+					result = fmt.Sprintf("error: name %q must start with 'Test'", name)
+				case cid > 1 && !allowedFuncs[name]:
+					allowed := make([]string, 0, len(allowedFuncs))
+					for k := range allowedFuncs {
+						allowed = append(allowed, k)
+					}
+					result = fmt.Sprintf("error: %q is not in the list of functions to rewrite; allowed: %s", name, strings.Join(allowed, ", "))
+				case !strings.HasPrefix(strings.TrimSpace(body), "func "):
+					result = "error: body must begin with 'func '"
+				default:
+					if _, exists := writtenFuncs[name]; !exists {
+						funcOrder = append(funcOrder, name)
+					}
+					writtenFuncs[name] = body
+					result = fmt.Sprintf("ok: accepted %s (%d bytes)", name, len(body))
+					slog.Info("REFINE_TESTS_WRITE: function accepted", "name", name, "bytes", len(body))
+				}
 			}
 			messages = append(messages, ollama.Message{Role: "tool", Content: result})
 		}
 
-		// After each write, compile check. If passing, no need to continue.
+		// Assemble or splice, write to disk, compile check.
+		if len(writtenFuncs) == 0 {
+			continue
+		}
+		var fileContent string
+		if cid == 1 {
+			funcs := make([]string, 0, len(funcOrder))
+			for _, name := range funcOrder {
+				funcs = append(funcs, writtenFuncs[name])
+			}
+			fileContent, _ = splice.Assemble(splice.DetectPackage(folderPath), funcs)
+		} else {
+			fileContent = originalSrc
+			for name, body := range writtenFuncs {
+				fileContent, _ = splice.Replace(fileContent, name, body)
+			}
+		}
+		if err := os.WriteFile(testPath, []byte(fileContent), 0o644); err != nil {
+			return "", fmt.Errorf("write test file: %w", err)
+		}
+
 		ok, compileOut := runCompile(ctx, folderPath)
 		if ok {
-			slog.Info("REFINE_TESTS_WRITE: compile passed", "bead_id", job.BeadID.Int64, "turn", turn)
+			slog.Info("REFINE_TESTS_WRITE: compile passed", "bead_id", beadID, "turn", turn)
 			if summary == "" {
-				summary = "Test file written and compiling."
+				summary = "Test functions written and compiling."
 			}
 			break
 		}
-		slog.Error("REFINE_TESTS_WRITE: compile failed", "bead_id", job.BeadID.Int64, "turn", turn, "output", compileOut)
+		slog.Error("REFINE_TESTS_WRITE: compile failed", "bead_id", beadID, "turn", turn, "output", compileOut)
 		if turn < refinementWriteAttempts {
 			messages = append(messages, ollama.Message{
 				Role:    "user",
-				Content: "The file failed to compile:\n```\n" + compileOut + "\n```\nFix every error. Call write_file again with the corrected complete file.",
+				Content: "Compile failed:\n```\n" + compileOut + "\n```\nFix the errors in the affected function(s). Call write_function again with the corrected body.",
 			})
 		}
 	}
 
-	if summary == "" {
-		summary = "Test file write attempted."
+	// Verified-function lock: restore any verified functions WRITE changed.
+	// This is a safety net — the tool constraint should prevent writes to
+	// verified functions, but belt-and-suspenders is cheap here.
+	if cid > 1 && originalSrc != "" {
+		verifiedSet, _ := loadVerifiedFunctionSet(ctx, d, beadID)
+		if len(verifiedSet) > 0 {
+			currentBytes, _ := os.ReadFile(testPath)
+			currentSrc := string(currentBytes)
+			origFuncs, _ := splice.FuncMap(originalSrc)
+			restoredAny := false
+			for name := range verifiedSet {
+				if origBody, ok := origFuncs[name]; ok {
+					restored, rErr := splice.Replace(currentSrc, name, origBody)
+					if rErr == nil && restored != currentSrc {
+						currentSrc = restored
+						restoredAny = true
+						slog.Warn("REFINE_TESTS_WRITE: restored verified function", "name", name)
+					}
+				}
+			}
+			if restoredAny {
+				_ = os.WriteFile(testPath, []byte(currentSrc), 0o644)
+			}
+		}
 	}
-	// Return a minimal JSON that Validate() can parse.
+
+	if summary == "" {
+		summary = "Test function write attempted."
+	}
 	out, _ := json.Marshal(RefineTestsWriteOutput{Summary: summary})
 	return string(out), nil
+}
+
+// buildFirstWriteMsg builds the user message for WRITE on cycle 1 (no existing file).
+func buildFirstWriteMsg(bead *beadState, folderPath, implContext string) string {
+	msg := "## Bead Specification\n\n" + bead.FullText
+	if prescriptive, rerr := os.ReadFile(filepath.Join(folderPath, "design_doc_prescriptive.md")); rerr == nil {
+		msg += "\n\n## Prescriptive Design Document\n\n" + string(prescriptive)
+	}
+	if implContext != "" {
+		msg += "\n\n## Implementation Files (prior beads — types and conventions)\n\n" + strings.TrimSpace(implContext)
+	}
+	msg += "\n\n## Task\n\nWrite test functions covering every behavior required by the spec above. " +
+		"Call write_function once per test function. " +
+		"Do not write package declarations, import statements, or helper functions — only Test* functions."
+	return msg
+}
+
+// buildRevisionWriteMsg builds the user message for WRITE on cycle 2+ (rewriting broken functions).
+func buildRevisionWriteMsg(bead *beadState, folderPath, implContext string, brokenBodies map[string]string, instructions string) string {
+	msg := "## Functions to Rewrite\n\n"
+	for name, body := range brokenBodies {
+		msg += fmt.Sprintf("### %s (current body)\n\n```go\n%s\n```\n\n", name, body)
+	}
+	msg += "## Fix Instructions\n\n" + instructions
+	if prescriptive, rerr := os.ReadFile(filepath.Join(folderPath, "design_doc_prescriptive.md")); rerr == nil {
+		msg += "\n\n## Reference: Prescriptive Design Document\n\n" + string(prescriptive)
+	}
+	if implContext != "" {
+		msg += "\n\n## Reference: Implementation Files\n\n" + strings.TrimSpace(implContext)
+	}
+	msg += "\n\n## Reference: Bead Specification\n\n" + bead.FullText
+	msg += "\n\n## Task\n\nRewrite only the functions listed above, applying every fix instruction. " +
+		"Call write_function exactly once per function listed. Do not write any other function."
+	return msg
+}
+
+// loadPriorJudgeOutput fetches the validated JUDGE raw output for the given
+// bead and cycle from handoff_attempts.
+func loadPriorJudgeOutput(ctx context.Context, d *db.DB, beadID, cid int64) (*RefineTestsJudgeOutput, error) {
+	var raw string
+	err := d.QueryRowContext(ctx, `
+		SELECT ha.raw_output FROM handoff_attempts ha
+		JOIN handoff_jobs hj ON hj.id = ha.job_id
+		WHERE hj.bead_id = ? AND hj.verb = ? AND hj.refinement_cycle_id = ?
+		  AND ha.validation_result = 'valid'
+		ORDER BY ha.id DESC LIMIT 1`,
+		beadID, db.VerbRefineTestsJudge, cid,
+	).Scan(&raw)
+	if err != nil {
+		return nil, fmt.Errorf("query judge output bead=%d cycle=%d: %w", beadID, cid, err)
+	}
+	var out RefineTestsJudgeOutput
+	if err := json.Unmarshal([]byte(ollama.ExtractJSON(raw)), &out); err != nil {
+		return nil, fmt.Errorf("parse judge output: %w", err)
+	}
+	return &out, nil
+}
+
+// loadVerifiedFunctionSet unions all verified_functions reported by CRITIQUE
+// across all cycles for beadID.
+func loadVerifiedFunctionSet(ctx context.Context, d *db.DB, beadID int64) (map[string]bool, error) {
+	rows, err := d.QueryContext(ctx, `
+		SELECT ha.raw_output FROM handoff_attempts ha
+		JOIN handoff_jobs hj ON hj.id = ha.job_id
+		WHERE hj.bead_id = ? AND hj.verb = ? AND ha.validation_result = 'valid'
+		ORDER BY ha.id ASC`,
+		beadID, db.VerbRefineTestsCritique)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[string]bool)
+	for rows.Next() {
+		var raw string
+		if rows.Scan(&raw) != nil {
+			continue
+		}
+		var out RefineTestsCritiqueOutput
+		if json.Unmarshal([]byte(ollama.ExtractJSON(raw)), &out) != nil {
+			continue
+		}
+		for _, name := range out.VerifiedFunctions {
+			result[name] = true
+		}
+	}
+	return result, rows.Err()
 }
 
 func (h *RefineTestsWrite) Validate(rawOutput string) (string, any) {
@@ -440,6 +582,9 @@ func (h *RefineTestsJudge) Validate(rawOutput string) (string, any) {
 	}
 	if out.Decision == "revise" && strings.TrimSpace(out.Instructions) == "" {
 		return "malformed: decision is 'revise' but instructions is empty", nil
+	}
+	if out.Decision == "revise" && len(out.FunctionsToRewrite) == 0 {
+		return "malformed: decision is 'revise' but functions_to_rewrite is empty", nil
 	}
 	return "valid", out
 }
