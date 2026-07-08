@@ -550,25 +550,9 @@ Guidance on choosing between execute_as_is and execute_revised when bead_spec_fi
     when the spec is technically correct, a more prescriptive spec can unblock an
     agent that cannot infer the right approach from a high-level description.
 
-Orientation-only (fast path): ONLY apply this fast path when the mechanical findings contain
-the exact text "[Fast path — orientation only]". Do NOT infer this condition from the trace
-content or the number of orientation commands observed — if that text is absent, do not use
-this fast path even if the trace appears to show only ls or go build calls.
-
-When the text IS present: the agent ran only read-only commands and wrote no files — it did
-not begin the task. Do not analyze trend or bead_spec_fit further. Issue execute_revised
-immediately with trend=same, bead_spec_fit=execution_capability_problem, execution_budget
-doubled, and prepend exactly one sentence to the existing full_text:
-"Begin writing to output_files immediately; do not re-run ls or other orientation commands
-before starting implementation."
-If the existing full_text already begins with that sentence, do not prepend it again.
-Make no other changes to the spec — the content is not the problem.
-
-Exception — do NOT apply this fast path when the mechanical findings also contain
-"[REFINE_TESTS bead]" and the compressed history shows the same test functions failing
-identically across multiple attempts. In that case the agent is running tests because the
-tests themselves are broken, not because it is avoiding implementation. Evaluate re_refine
-instead.
+Fast paths: if a "[Fast path — ...]" block appears in the mechanical findings, follow the
+Action instruction in that block exactly. The action specifies trend, bead_spec_fit, the
+decision, and the exact spec change to make — no separate analysis is needed.
 
 Compile error in previously-written file (repair guidance): when the mechanical findings
 include a compile error in a file that was written in a prior attempt (e.g.,
@@ -579,16 +563,6 @@ corruption. Instead, prepend: "Before rewriting <filename>, call read_file on <f
 first to get the exact on-disk content, then write the complete file with only the
 targeted fix applied — do not regenerate any section from memory."
 Replace <filename> with the actual file name containing the compile error.
-
-Missing write_file path (fast path): if the mechanical findings contain "[Fast path — missing
-write_file path]", the agent generated correct content but called write_file without a path
-argument and no file was written. Do not analyze trend or bead_spec_fit further. Issue
-execute_revised immediately with trend=same, bead_spec_fit=execution_capability_problem,
-the same execution_budget, and prepend exactly one sentence to the existing full_text:
-"Your previous attempt generated correct content but called write_file without a path
-argument — begin immediately by calling write_file with an explicit path= argument naming
-the output file; do not re-read files or regenerate content from scratch."
-Make no other changes to the spec.
 
 Budget guidance for execute_revised:
   - execution_budget and monitor_override must be explicitly stated, not inherited silently.

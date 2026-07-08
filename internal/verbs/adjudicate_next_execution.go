@@ -132,7 +132,12 @@ func vacuousPassNote(bead *beadState, mechanicalFindings string) string {
 // Returns a note to inject into mechanical findings so ADJUDICATE can apply the
 // orientation-only fast path without having to infer the pattern from field names
 // that do not appear in the mechanical findings output.
+// Not emitted for REFINE_TESTS beads — for those, the [REFINE_TESTS bead] note
+// already covers the case and re_refine is the appropriate path when tests repeat.
 func orientationOnlyNote(ctx context.Context, d *db.DB, beadID int64) string {
+	if beadHasRefinements(ctx, d, beadID) {
+		return ""
+	}
 	var tracePath, terminationCause string
 	err := d.QueryRowContext(ctx, `
 		SELECT trace_path, termination_cause FROM executions
@@ -153,7 +158,12 @@ func orientationOnlyNote(ctx context.Context, d *db.DB, beadID int64) string {
 	}
 	return "[Fast path — orientation only] The previous attempt ran only read-only commands " +
 		"(ls, read_file, etc.) and made no write_file calls before terminating. The agent did " +
-		"not begin the task. The content of the bead spec is not the problem."
+		"not begin the task. The content of the bead spec is not the problem.\n\n" +
+		"Action: issue execute_revised immediately. Set trend=same, " +
+		"bead_spec_fit=execution_capability_problem, execution_budget doubled. Prepend exactly " +
+		"one sentence to the existing full_text: \"Begin writing to output_files immediately; " +
+		"do not re-run ls or other orientation commands before starting implementation.\" " +
+		"If that sentence is already present, do not prepend it again. Make no other changes to the spec."
 }
 
 // partialProgressNote checks whether some (but not all) output_files for the
@@ -347,7 +357,13 @@ func missingPathNote(ctx context.Context, d *db.DB, beadID int64) string {
 	}
 	return "[Fast path — missing write_file path] The previous attempt generated correct " +
 		"content but called write_file without a path argument. No file was written. " +
-		"The content itself is not the problem."
+		"The content itself is not the problem.\n\n" +
+		"Action: issue execute_revised immediately. Set trend=same, " +
+		"bead_spec_fit=execution_capability_problem, same execution_budget. Prepend exactly " +
+		"one sentence to the existing full_text: \"Your previous attempt generated correct " +
+		"content but called write_file without a path argument — begin immediately by calling " +
+		"write_file with an explicit path= argument naming the output file; do not re-read " +
+		"files or regenerate content from scratch.\" Make no other changes to the spec."
 }
 
 type AdjudicateNextExecution struct {
