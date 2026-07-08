@@ -329,6 +329,7 @@ Rules:
 - Derive all expected values from the spec and design document, not from guesses.
 - Call write_function only for functions you were explicitly asked to produce.
 - Call write_function once per function; if you need to revise a function, call it again with the corrected body.
+- Independent state per sub-scenario: within a t.Run block, create a fresh state object for each distinct sub-scenario rather than accumulating mutations on a shared object across multiple assertions.
 
 After all write_function calls, respond with one sentence describing what you wrote or corrected.`
 
@@ -342,7 +343,7 @@ You receive:
 
 Your task: review EVERY test function (every func whose name starts with "Test") and every sub-test (every t.Run call). You MUST finish reviewing the entire file before stopping — do not stop after finding the first few issues. For each function/sub-test, check:
 (a) Assertion correctness: is the expected value right? Independently derive it from the spec and design doc.
-(b) Setup correctness: are pieces/values placed correctly? For board games: is each piece at the right square for the scenario being tested?
+(b) Assertion satisfiability: for each assertion, trace the cumulative state of the data structure at that moment — walk every assignment, append, and nil-out since the start of the enclosing scope and determine what the structure actually contains when the assertion fires. Then ask: given a correct implementation, can this assertion ever pass? If prior mutations make the expected result impossible (e.g., a blocking piece was placed and never removed, leaving the path obstructed), that is a bug.
 (c) Convention consistency: does this test use the same field conventions as the rest of the file?
 
 Report only genuine problems. If a test is correct, do not list it. Be specific: name the function, the wrong value, and the correct value. If there are 5 problems, list all 5 — never truncate findings.
@@ -506,11 +507,11 @@ consistency against your reasoning. For declare_success, both must be "not_appli
   trend: "same"           — the failure mode this attempt is the same as or a recurrence of the previous one
          "narrower"       — the same root area but the failure scope has meaningfully narrowed
          "unrelated"      — a genuinely different failure mode from the previous attempt
-         "not_applicable" — use only when decision is "declare_success"
+         "not_applicable" — use only when decision is "declare_success", "test_reject", or "re_refine"
 
   bead_spec_fit: "bead_problem"                — the Bead specification is wrong, ambiguous, or missing detail
                  "execution_capability_problem" — the spec is correct but execution failed to implement it
-                 "not_applicable"              — use only when decision is "declare_success"
+                 "not_applicable"              — use only when decision is "declare_success", "test_reject", or "re_refine"
 
 If your declared trend or bead_spec_fit contradicts your own reasoning (on retry/stop decisions),
 the output is treated as invalid.
@@ -528,6 +529,16 @@ decision:
                       or established convention). Set trend and bead_spec_fit to "not_applicable".
                       Only valid when the mechanical findings contain MISMATCH entries from
                       "[Test-first verification]".
+  "re_refine"       — the REFINE_TESTS-written test file contains logically incorrect assertions
+                      that no correct implementation can satisfy. The existing tests are preserved;
+                      only the broken functions will be rewritten. Include re_refine_guidance with
+                      a bulleted diagnosis: for each broken assertion, name the test function and
+                      sub-test, state the impossible expectation, and explain why a correct
+                      implementation cannot satisfy it. Set trend and bead_spec_fit to
+                      "not_applicable". Use this when the same test functions fail identically
+                      across multiple attempts and the implementation logic appears correct — not
+                      as a first resort. Only valid when "[REFINE_TESTS bead]" appears in the
+                      mechanical findings.
 
 Guidance on choosing between execute_as_is and execute_revised when bead_spec_fit is
 "execution_capability_problem":
@@ -618,7 +629,7 @@ Respond with JSON only, no prose before or after:
   "trend": "same" | "narrower" | "unrelated" | "not_applicable",
   "bead_spec_fit": "bead_problem" | "execution_capability_problem" | "not_applicable",
   "reasoning": "<your reasoning — for retry/stop decisions must be consistent with trend and bead_spec_fit>",
-  "decision": "execute_as_is" | "execute_revised" | "full_stop" | "declare_success" | "test_reject",
+  "decision": "execute_as_is" | "execute_revised" | "full_stop" | "declare_success" | "test_reject" | "re_refine",
   "revised_bead": {
     "title": "...",
     "full_text": "...",
@@ -627,5 +638,6 @@ Respond with JSON only, no prose before or after:
     "output_files": ["<file>", ...],
     "exit_criteria": ["<runnable check>", ...]
   },
-  "test_rejection_guidance": "<bulleted corrections — only when decision is test_reject>"
+  "test_rejection_guidance": "<bulleted corrections — only when decision is test_reject>",
+  "re_refine_guidance": "<bulleted diagnosis of impossible assertions — only when decision is re_refine>"
 }`

@@ -439,6 +439,14 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 	if note := missingPathNote(ctx, d, beadID); note != "" {
 		findings += "\n\n" + note
 	}
+	if beadHasRefinements(ctx, d, beadID) {
+		findings += "\n\n[REFINE_TESTS bead] This bead's tests were written by REFINE_TESTS. " +
+			"If the same test functions fail identically across multiple attempts and the " +
+			"implementation logic appears correct, consider re_refine: the tests themselves " +
+			"may contain logically impossible assertions. re_refine_guidance should identify " +
+			"each broken assertion, why it cannot be satisfied by a correct implementation, " +
+			"and which function contains it."
+	}
 	userMsg := buildAdjudicateUserMsg(currentBead, revLog, findings, compressedHistory, diffSignal)
 	return oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: guidance.InjectForVerbPath(adjudicateNextExecutionSystemPrompt, project.FolderPath, db.VerbAdjudicateNextExecution, "")},
@@ -543,9 +551,9 @@ func (h *AdjudicateNextExecution) Validate(raw string) (string, any) {
 		return "malformed: reasoning is empty", nil
 	}
 
-	validDecisions := map[string]bool{"execute_as_is": true, "execute_revised": true, "full_stop": true, "declare_success": true, "test_reject": true}
+	validDecisions := map[string]bool{"execute_as_is": true, "execute_revised": true, "full_stop": true, "declare_success": true, "test_reject": true, "re_refine": true}
 	if !validDecisions[out.Decision] {
-		return fmt.Sprintf("malformed: decision must be \"execute_as_is\", \"execute_revised\", \"full_stop\", \"declare_success\", or \"test_reject\", got %q", out.Decision), nil
+		return fmt.Sprintf("malformed: decision must be \"execute_as_is\", \"execute_revised\", \"full_stop\", \"declare_success\", \"test_reject\", or \"re_refine\", got %q", out.Decision), nil
 	}
 
 	if out.Decision == "execute_revised" {
@@ -569,8 +577,15 @@ func (h *AdjudicateNextExecution) Validate(raw string) (string, any) {
 		}
 	}
 
-	if out.Decision == "declare_success" || out.Decision == "test_reject" {
-		// declare_success and test_reject require both classification fields to be "not_applicable".
+	if out.Decision == "re_refine" {
+		if strings.TrimSpace(out.ReRefineGuidance) == "" {
+			return "malformed: decision is re_refine but re_refine_guidance is absent or empty", nil
+		}
+	}
+
+	terminalDecisions := out.Decision == "declare_success" || out.Decision == "test_reject" || out.Decision == "re_refine"
+	if terminalDecisions {
+		// These decisions require both classification fields to be "not_applicable".
 		if out.Trend != "not_applicable" {
 			return fmt.Sprintf("malformed: decision is %q but trend is %q — must be \"not_applicable\"", out.Decision, out.Trend), nil
 		}
@@ -581,10 +596,10 @@ func (h *AdjudicateNextExecution) Validate(raw string) (string, any) {
 		// For retry/stop decisions, "not_applicable" is forbidden and the consistency
 		// check applies (zero-strike tolerance — a mismatch is a validation failure).
 		if out.Trend == "not_applicable" {
-			return "malformed: trend \"not_applicable\" is only valid when decision is \"declare_success\" or \"test_reject\"", nil
+			return "malformed: trend \"not_applicable\" is only valid when decision is \"declare_success\", \"test_reject\", or \"re_refine\"", nil
 		}
 		if out.BeadSpecFit == "not_applicable" {
-			return "malformed: bead_spec_fit \"not_applicable\" is only valid when decision is \"declare_success\" or \"test_reject\"", nil
+			return "malformed: bead_spec_fit \"not_applicable\" is only valid when decision is \"declare_success\", \"test_reject\", or \"re_refine\"", nil
 		}
 		if ok, reason := checkConsistency(out.BeadSpecFit, out.Reasoning); !ok {
 			return "malformed: consistency check failed: " + reason, nil
@@ -758,6 +773,52 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
 			VALUES (?, ?, ?, 'pending', ?, ?)`,
 			job.ProjectID, db.VerbExecuteBead, beadID, now, now)
+		return err
+
+	case "re_refine":
+		// Determine the next refinement cycle (max existing + 1).
+		var maxCycle int64
+		_ = tx.QueryRowContext(ctx, `
+			SELECT COALESCE(MAX(refinement_cycle_id), 0) FROM handoff_jobs
+			WHERE bead_id = ? AND verb = ?`, beadID, db.VerbRefineTestsWrite,
+		).Scan(&maxCycle)
+		nextCycle := maxCycle + 1
+
+		if nextCycle > refinementCycleCap {
+			slog.Error("ESCALATION — re_refine: refinement cycle cap reached",
+				"bead_id", beadID, "next_cycle", nextCycle, "cap", refinementCycleCap)
+			_, err := tx.ExecContext(ctx,
+				`UPDATE handoff_jobs SET status = 'escalated', updated_at = ? WHERE id = ?`, now, job.ID)
+			return err
+		}
+
+		// Inject ADJUDICATE's diagnosis as CRITIQUE findings via test_refinements so JUDGE
+		// can read it via its fallback query. JUDGE will produce functions_to_rewrite +
+		// instructions, and enqueue WRITE in revision mode to fix only the broken functions.
+		if err := insertRefinement(ctx, tx, job.ProjectID, beadID, nextCycle,
+			db.VerbRefineTestsCritique, out.ReRefineGuidance, ""); err != nil {
+			return fmt.Errorf("inject re_refine guidance into test_refinements: %w", err)
+		}
+
+		// Grant a fresh set of execution attempts so the fixed tests get a fair run.
+		var currentExecCount, maxAttempts int
+		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM executions WHERE bead_id = ?`, beadID).Scan(&currentExecCount)
+		_ = tx.QueryRowContext(ctx, `SELECT max_execution_attempts FROM projects WHERE id = ?`, job.ProjectID).Scan(&maxAttempts)
+		if maxAttempts == 0 {
+			maxAttempts = 5
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE beads SET execution_attempts_override = ? WHERE id = ?`,
+			currentExecCount+maxAttempts, beadID); err != nil {
+			return fmt.Errorf("grant re_refine execution attempts: %w", err)
+		}
+
+		// Enqueue JUDGE (not WRITE) at nextCycle — it reads the injected diagnosis and
+		// produces functions_to_rewrite + instructions, then enqueues WRITE for cycle+1.
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, refinement_cycle_id, created_at, updated_at)
+			VALUES (?, ?, ?, 'pending', ?, ?, ?)`,
+			job.ProjectID, db.VerbRefineTestsJudge, beadID, nextCycle, now, now)
 		return err
 
 	case "full_stop":

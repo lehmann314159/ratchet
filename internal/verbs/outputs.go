@@ -165,4 +165,7 @@ type AdjudicateNextExecutionOutput struct {
 	// TestRejectionGuidance is present only when Decision == "test_reject".
 	// Lists corrections to apply when rewriting the test files.
 	TestRejectionGuidance string `json:"test_rejection_guidance,omitempty"`
+	// ReRefineGuidance is present only when Decision == "re_refine".
+	// Diagnosis of which test assertions are logically impossible and why.
+	ReRefineGuidance string `json:"re_refine_guidance,omitempty"`
 }
