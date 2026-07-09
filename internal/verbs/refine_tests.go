@@ -167,6 +167,12 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		return "", err
 	}
 
+	// Restore any missing implementation files as scaffold stubs so the compile
+	// check succeeds. Handles the case where rewind-bead deleted impl files.
+	if restoreErr := restoreMissingScaffolds(ctx, d, job.ProjectID, folderPath, bead.OutputFiles); restoreErr != nil {
+		return "", fmt.Errorf("restore missing scaffolds: %w", restoreErr)
+	}
+
 	cid := cycleID(job)
 	beadID := job.BeadID.Int64
 	testPath := filepath.Join(folderPath, testFilePaths[0])

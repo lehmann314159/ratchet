@@ -1,6 +1,7 @@
 package verbs
 
 import (
+	"context"
 	"fmt"
 	"go/ast"
 	"go/format"
@@ -12,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+
+	"ratchet/internal/db"
 )
 
 // stdlibPkgToImport maps unqualified package names to their standard library
@@ -108,6 +111,51 @@ func scaffoldGoProject(pkg, module, folderPath string, files []SurveyManifestFil
 	}
 
 	return nil
+}
+
+// WriteScaffoldStubs writes scaffold stub implementations for all non-test
+// output files, always overwriting existing content. Used by rewind-bead to
+// restore the VERIFY_MANIFEST baseline state before re-running EXECUTE_BEAD.
+func WriteScaffoldStubs(ctx context.Context, d *db.DB, projectID int64, folderPath string, outputFiles []string) error {
+	manifest, err := latestSurveyManifest(ctx, d, projectID)
+	if err != nil {
+		return fmt.Errorf("load survey manifest: %w", err)
+	}
+	needed := make(map[string]bool)
+	for _, f := range outputFiles {
+		if !strings.HasSuffix(f, "_test.go") {
+			needed[f] = true
+		}
+	}
+	for _, mf := range manifest.Files {
+		if !needed[mf.Path] {
+			continue
+		}
+		content := buildGoFile(manifest.Package, mf.Declarations)
+		if err := os.WriteFile(filepath.Join(folderPath, mf.Path), []byte(content), 0644); err != nil {
+			return fmt.Errorf("write scaffold %s: %w", mf.Path, err)
+		}
+	}
+	return nil
+}
+
+// restoreMissingScaffolds writes scaffold stubs only for non-test output files
+// that are absent from disk. Called at the start of REFINE_TESTS_WRITE so the
+// compile step succeeds even when impl files are missing.
+func restoreMissingScaffolds(ctx context.Context, d *db.DB, projectID int64, folderPath string, outputFiles []string) error {
+	var missing []string
+	for _, f := range outputFiles {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(folderPath, f)); os.IsNotExist(err) {
+			missing = append(missing, f)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return WriteScaffoldStubs(ctx, d, projectID, folderPath, missing)
 }
 
 // buildGoFile prepends the package declaration, infers imports from the
