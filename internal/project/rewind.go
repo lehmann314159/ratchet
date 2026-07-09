@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"ratchet/internal/db"
@@ -163,14 +164,19 @@ func RunRewindBeadMain(args []string) {
 		os.Exit(1)
 	}
 
-	// Delete all output files after the DB transaction commits.
-	var deleted []string
+	// Delete only test files. Implementation files stay as a compilation substrate
+	// for REFINE_TESTS_WRITE — EXECUTE_BEAD will overwrite them from scratch anyway.
+	var deleted, kept []string
 	for _, f := range outputFiles {
-		path := filepath.Join(projectFolder, f)
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			slog.Warn("rewind-bead: delete file", "path", path, "error", err)
+		if strings.HasSuffix(f, "_test.go") {
+			path := filepath.Join(projectFolder, f)
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				slog.Warn("rewind-bead: delete file", "path", path, "error", err)
+			} else {
+				deleted = append(deleted, f)
+			}
 		} else {
-			deleted = append(deleted, f)
+			kept = append(kept, f)
 		}
 	}
 
@@ -181,8 +187,14 @@ func RunRewindBeadMain(args []string) {
 	fmt.Printf("  attempt budget: %d → %d\n", existingExecutions, newAttemptCap)
 	fmt.Printf("  next verb:      REFINE_TESTS_WRITE (cycle 1)\n")
 	if len(deleted) > 0 {
-		fmt.Printf("  files deleted:\n")
+		fmt.Printf("  test files deleted:\n")
 		for _, f := range deleted {
+			fmt.Printf("    %s\n", f)
+		}
+	}
+	if len(kept) > 0 {
+		fmt.Printf("  impl files kept (compile substrate for REFINE_TESTS):\n")
+		for _, f := range kept {
 			fmt.Printf("    %s\n", f)
 		}
 	}
