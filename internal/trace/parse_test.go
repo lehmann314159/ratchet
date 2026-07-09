@@ -310,7 +310,7 @@ func TestGenerateMechanicalFindings_Basic(t *testing.T) {
 		"Termination cause: success",
 		"Monitor fired: no",
 		"go build ./...",
-		"exit: 0",
+		"→ exit 0",
 		"go test ./...",
 		"ok  fib/fib  0.488s",
 		"## Exit Criteria",

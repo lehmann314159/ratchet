@@ -75,8 +75,10 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		mechanicalFindings += "\n\n" + undeclared
 	}
 
-	if testErr := checkGoTestCompilation(ctx, folderPath); testErr != "" {
-		mechanicalFindings += "\n\n" + testErr
+	if compileErr := checkGoTestCompilation(ctx, folderPath); compileErr != "" {
+		mechanicalFindings += "\n\n" + compileErr
+	} else if testOut := checkGoTestOutput(ctx, folderPath); testOut != "" {
+		mechanicalFindings += "\n\n" + testOut
 	}
 
 	if pkgErr := checkPackageMain(folderPath, beadSpec.OutputFiles); pkgErr != "" {
@@ -345,6 +347,44 @@ func checkGoTestCompilation(ctx context.Context, folderPath string) string {
 		return ""
 	}
 	return "go test -c -o /dev/null ./... (compile-only check) failed:\n" + strings.TrimSpace(string(out))
+}
+
+// checkGoTestOutput runs "go test ./..." after execution and returns the output
+// as a structured finding. Only runs when test files are present and compilation
+// has already been confirmed clean. Provides ADJUDICATE with the authoritative
+// post-execution test result — exact failure messages, not trace-embedded output.
+func checkGoTestOutput(ctx context.Context, folderPath string) string {
+	if _, err := os.Stat(filepath.Join(folderPath, "go.mod")); err != nil {
+		return ""
+	}
+	entries, err := os.ReadDir(folderPath)
+	if err != nil {
+		return ""
+	}
+	hasTests := false
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), "_test.go") {
+			hasTests = true
+			break
+		}
+	}
+	if !hasTests {
+		return ""
+	}
+	tctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(tctx, "go", "test", "./...")
+	cmd.Dir = folderPath
+	out, runErr := cmd.CombinedOutput()
+	output := strings.TrimSpace(string(out))
+	if runErr == nil {
+		return "Post-execution test run (go test ./...): all tests passed"
+	}
+	const maxBytes = 4000
+	if len(output) > maxBytes {
+		output = output[:maxBytes] + "\n[truncated]"
+	}
+	return "Post-execution test run (go test ./...):\n" + output
 }
 
 // isPostTestFirstState returns true when the bead has *_test.go files that

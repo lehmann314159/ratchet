@@ -60,17 +60,20 @@ func GenerateMechanicalFindings(
 		}
 	}
 
-	// All commands run (chronological)
+	// All commands run (chronological) — one line per success, output expanded on failure
 	if len(pt.Commands) > 0 {
 		sb.WriteString("\n## All Commands Run (chronological)\n")
 		for _, cr := range pt.Commands {
-			fmt.Fprintf(&sb, "\nTurn %d: %s\n", cr.Turn, cr.Command)
-			fmt.Fprintf(&sb, "  exit: %s\n", cr.ExitRaw)
-			if cr.Stdout != "" {
-				fmt.Fprintf(&sb, "  stdout:\n%s\n", indentLines(cr.Stdout, "    "))
-			}
-			if cr.Stderr != "" {
-				fmt.Fprintf(&sb, "  stderr:\n%s\n", indentLines(cr.Stderr, "    "))
+			if cr.ExitCode == 0 {
+				fmt.Fprintf(&sb, "\nTurn %d: %s → exit 0\n", cr.Turn, cr.Command)
+			} else {
+				fmt.Fprintf(&sb, "\nTurn %d: %s → %s\n", cr.Turn, cr.Command, cr.ExitRaw)
+				if cr.Stdout != "" {
+					fmt.Fprintf(&sb, "  stdout:\n%s\n", indentLines(cr.Stdout, "    "))
+				}
+				if cr.Stderr != "" {
+					fmt.Fprintf(&sb, "  stderr:\n%s\n", indentLines(cr.Stderr, "    "))
+				}
 			}
 		}
 	} else {
