@@ -67,6 +67,11 @@ func (h *CompressAnalysis) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	cleaned := sanitizeJSON(ollama.ExtractJSON(raw))
 	if err := json.Unmarshal([]byte(cleaned), &out); err == nil {
 		out.CompressedText = injectResolvedTags(out.CompressedText, analysis.MechanicalFindings)
+		// Fallback: stripping rules can reduce a clean success to empty. Synthesize
+		// a minimal entry so Validate never rejects a successful execution.
+		if strings.TrimSpace(out.CompressedText) == "" {
+			out.CompressedText = synthesizeMinimalEntry(history, analysis.MechanicalFindings)
+		}
 		updated, _ := json.Marshal(out)
 		return string(updated), nil
 	}
@@ -163,6 +168,22 @@ func extractFailureSignals(line string) []string {
 		}
 	}
 	return sigs
+}
+
+// synthesizeMinimalEntry builds a one-line compressed history entry when the
+// model strips a clean execution down to empty. It infers the attempt number
+// from the existing history and the termination cause from mechanical findings.
+func synthesizeMinimalEntry(history, mechanicalFindings string) string {
+	n := strings.Count(history, "Attempt ") + 1
+	cause := "unknown"
+	for _, line := range strings.Split(mechanicalFindings, "\n") {
+		if strings.HasPrefix(line, "Termination cause: ") {
+			cause = strings.TrimPrefix(line, "Termination cause: ")
+			cause = strings.TrimSpace(cause)
+			break
+		}
+	}
+	return fmt.Sprintf("Attempt %d (%s): no failures to record.", n, cause)
 }
 
 // injectResolvedTags post-processes the model's compressed_text: for each line
