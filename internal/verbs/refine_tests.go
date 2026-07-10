@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -16,6 +17,49 @@ import (
 	"ratchet/internal/ollama"
 	"ratchet/internal/splice"
 )
+
+// requiredTestFuncRe matches grep -q 'func TestXxx' patterns (single or double quotes)
+// in exit criteria strings to extract required test function names.
+var requiredTestFuncRe = regexp.MustCompile(`grep\s+-q\s+['"]func\s+(Test\w+)['"]`)
+
+// extractRequiredTestFuncs returns the unique ordered list of Test* function names
+// that the exit criteria require to be present in the test file.
+func extractRequiredTestFuncs(exitCriteria []string) []string {
+	seen := map[string]bool{}
+	var names []string
+	for _, c := range exitCriteria {
+		for _, m := range requiredTestFuncRe.FindAllStringSubmatch(c, -1) {
+			if !seen[m[1]] {
+				seen[m[1]] = true
+				names = append(names, m[1])
+			}
+		}
+	}
+	return names
+}
+
+// missingRequiredFuncs returns which names from required are absent from testPath.
+// If the file cannot be read or parsed, all names are returned as missing.
+func missingRequiredFuncs(testPath string, required []string) []string {
+	if len(required) == 0 {
+		return nil
+	}
+	src, err := os.ReadFile(testPath)
+	if err != nil {
+		return required
+	}
+	present, err := splice.FuncMap(string(src))
+	if err != nil {
+		return required
+	}
+	var missing []string
+	for _, name := range required {
+		if _, ok := present[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
 
 // refinementCycleCap is the maximum number of write-critique-judge cycles
 // per bead before escalating to the user.
@@ -176,6 +220,7 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	cid := cycleID(job)
 	beadID := job.BeadID.Int64
 	testPath := filepath.Join(folderPath, testFilePaths[0])
+	requiredFuncs := extractRequiredTestFuncs(bead.ExitCriteria)
 
 	// Save original file content before any writes (needed for verified-function lock).
 	var originalSrc string
@@ -289,6 +334,18 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 
 		ok, compileOut := runCompile(ctx, folderPath)
 		if ok {
+			// Completeness check: verify all required Test* functions are present.
+			if missing := missingRequiredFuncs(testPath, requiredFuncs); len(missing) > 0 && turn < refinementWriteAttempts {
+				slog.Warn("REFINE_TESTS_WRITE: compile passed but required functions missing",
+					"bead_id", beadID, "turn", turn, "missing", missing)
+				messages = append(messages, ollama.Message{
+					Role: "user",
+					Content: "Compile passed, but the following required test functions are still missing: " +
+						strings.Join(missing, ", ") +
+						". Call write_function once for each missing function.",
+				})
+				continue
+			}
 			slog.Info("REFINE_TESTS_WRITE: compile passed", "bead_id", beadID, "turn", turn)
 			if summary == "" {
 				summary = "Test functions written and compiling."
@@ -349,6 +406,12 @@ func buildFirstWriteMsg(bead *beadState, folderPath, implContext string) string 
 	msg += "\n\n## Task\n\nWrite test functions covering every behavior required by the spec above. " +
 		"Call write_function once per test function. " +
 		"Do not write package declarations, import statements, or helper functions — only Test* functions."
+	if required := extractRequiredTestFuncs(bead.ExitCriteria); len(required) > 0 {
+		msg += "\n\nYou MUST write ALL of the following functions (one write_function call each):\n"
+		for _, name := range required {
+			msg += fmt.Sprintf("- %s\n", name)
+		}
+	}
 	return msg
 }
 
