@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -67,22 +68,96 @@ func Replace(src, name, newFunc string) (string, error) {
 
 // Assemble builds a complete Go test file from a package name and an ordered
 // list of function body strings. Each entry must be a complete function
-// declaration. Import "testing" is added automatically; the result is
-// gofmt-formatted.
+// declaration. Imports are detected automatically from the function bodies by
+// scanning for pkg.Func selector expressions and mapping them to known import
+// paths; "testing" is always included. The result is gofmt-formatted.
 func Assemble(pkg string, funcs []string) (string, error) {
+	// Build body section first so we can detect what packages are used.
+	var body strings.Builder
+	for _, f := range funcs {
+		body.WriteString(strings.TrimSpace(f))
+		body.WriteString("\n\n")
+	}
+	imports := detectImports("package " + pkg + "\n\n" + body.String())
+
 	var sb strings.Builder
 	sb.WriteString("package ")
 	sb.WriteString(pkg)
-	sb.WriteString("\n\nimport \"testing\"\n\n")
-	for _, body := range funcs {
-		sb.WriteString(strings.TrimSpace(body))
-		sb.WriteString("\n\n")
+	sb.WriteString("\n\nimport (\n")
+	for _, imp := range imports {
+		sb.WriteString("\t")
+		sb.WriteString(fmt.Sprintf("%q", imp))
+		sb.WriteString("\n")
 	}
+	sb.WriteString(")\n\n")
+	sb.WriteString(body.String())
+
 	formatted, err := format.Source([]byte(sb.String()))
 	if err != nil {
 		return sb.String(), fmt.Errorf("format: %w", err)
 	}
 	return string(formatted), nil
+}
+
+// detectImports parses src (a syntactically complete Go source fragment) and
+// returns a sorted list of import paths for every pkg.Func selector expression
+// found whose package name appears in the known-packages table. "testing" is
+// always included.
+func detectImports(src string) []string {
+	// Well-known package name → import path.
+	known := map[string]string{
+		"atomic":   "sync/atomic",
+		"bufio":    "bufio",
+		"bytes":    "bytes",
+		"context":  "context",
+		"errors":   "errors",
+		"filepath": "path/filepath",
+		"fmt":      "fmt",
+		"http":     "net/http",
+		"httptest": "net/http/httptest",
+		"io":       "io",
+		"json":     "encoding/json",
+		"log":      "log",
+		"math":     "math",
+		"os":       "os",
+		"rand":     "math/rand",
+		"regexp":   "regexp",
+		"sort":     "sort",
+		"strconv":  "strconv",
+		"strings":  "strings",
+		"sync":     "sync",
+		"testing":  "testing",
+		"time":     "time",
+		"unicode":  "unicode",
+		"url":      "net/url",
+		"utf8":     "unicode/utf8",
+	}
+
+	used := map[string]bool{"testing": true}
+
+	fset := token.NewFileSet()
+	f, _ := parser.ParseFile(fset, "", src, parser.AllErrors)
+	if f != nil {
+		ast.Inspect(f, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if id, ok := sel.X.(*ast.Ident); ok {
+				used[id.Name] = true
+			}
+			return true
+		})
+	}
+
+	var imports []string
+	for name, path := range known {
+		if used[name] {
+			imports = append(imports, path)
+		}
+	}
+	sort.Strings(imports)
+	return imports
 }
 
 // DetectPackage reads non-test .go files in dir and returns the package name

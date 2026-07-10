@@ -21,10 +21,14 @@ import (
 // It resets an escalated (or stuck) bead to a clean state:
 //   - spec rolled back to revision 1
 //   - execution attempt budget extended by max_execution_attempts
+//   - test files deleted and test_refinements cleared
 //   - impl files replaced with scaffold stubs (always compilable baseline)
-//   - if last adjudication was test_reject/re_refine, or no adjudications exist,
-//     or test files are missing: delete test files + re-enqueue REFINE_TESTS_WRITE
-//   - otherwise (tests are vetted): keep test files + re-enqueue EXECUTE_BEAD
+//   - re-enqueues REFINE_TESTS_WRITE to regenerate tests from scratch
+//
+// Rewind always restarts from REFINE_TESTS_WRITE. If the impl just needed more
+// attempts, extending the budget is sufficient — rewind is reserved for cases
+// where something went wrong enough to warrant human intervention, and in those
+// cases the tests must be re-examined too.
 func RunRewindBeadMain(args []string) {
 	flags := flag.NewFlagSet("rewind-bead", flag.ExitOnError)
 	dbPath := flags.String("db", "ratchet.db", "path to SQLite database")
@@ -100,12 +104,6 @@ func RunRewindBeadMain(args []string) {
 		os.Exit(1)
 	}
 
-	// Determine the target verb by examining the last adjudication decision.
-	// If the last decision flagged the tests themselves as wrong (test_reject /
-	// re_refine), or there are no adjudications at all, we must redo REFINE_TESTS.
-	// Otherwise the tests are vetted and we can skip straight to EXECUTE_BEAD.
-	targetVerb, keepTests := resolveTarget(ctx, d, *beadID, projectFolder, outputFiles)
-
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	tx, err := d.BeginTx(ctx, nil)
@@ -136,32 +134,20 @@ func RunRewindBeadMain(args []string) {
 		os.Exit(1)
 	}
 
-	// Clear test_refinements only when re-running REFINE_TESTS_WRITE.
-	if targetVerb == "REFINE_TESTS_WRITE" {
-		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM test_refinements WHERE bead_id = ?`, *beadID,
-		); err != nil {
-			_ = tx.Rollback()
-			slog.Error("rewind-bead: clear test_refinements", "error", err)
-			os.Exit(1)
-		}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM test_refinements WHERE bead_id = ?`, *beadID,
+	); err != nil {
+		_ = tx.Rollback()
+		slog.Error("rewind-bead: clear test_refinements", "error", err)
+		os.Exit(1)
 	}
 
-	// Enqueue the target verb.
-	var insertSQL string
-	var insertArgs []any
-	if targetVerb == "REFINE_TESTS_WRITE" {
-		insertSQL = `INSERT INTO handoff_jobs
-		   (project_id, verb, bead_id, status, created_at, updated_at, refinement_cycle_id)
-		 VALUES (?, 'REFINE_TESTS_WRITE', ?, 'pending', ?, ?, 1)`
-		insertArgs = []any{projectID, *beadID, now, now}
-	} else {
-		insertSQL = `INSERT INTO handoff_jobs
-		   (project_id, verb, bead_id, status, created_at, updated_at)
-		 VALUES (?, 'EXECUTE_BEAD', ?, 'pending', ?, ?)`
-		insertArgs = []any{projectID, *beadID, now, now}
-	}
-	if _, err := tx.ExecContext(ctx, insertSQL, insertArgs...); err != nil {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO handoff_jobs
+		  (project_id, verb, bead_id, status, created_at, updated_at, refinement_cycle_id)
+		VALUES (?, 'REFINE_TESTS_WRITE', ?, 'pending', ?, ?, 1)`,
+		projectID, *beadID, now, now,
+	); err != nil {
 		_ = tx.Rollback()
 		slog.Error("rewind-bead: enqueue job", "error", err)
 		os.Exit(1)
@@ -184,17 +170,14 @@ func RunRewindBeadMain(args []string) {
 		os.Exit(1)
 	}
 
-	// Delete test files when redoing REFINE_TESTS.
 	var deletedTests []string
-	if !keepTests {
-		for _, f := range outputFiles {
-			if strings.HasSuffix(f, "_test.go") {
-				path := filepath.Join(projectFolder, f)
-				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-					slog.Warn("rewind-bead: delete test file", "path", path, "error", err)
-				}
-				deletedTests = append(deletedTests, f)
+	for _, f := range outputFiles {
+		if strings.HasSuffix(f, "_test.go") {
+			path := filepath.Join(projectFolder, f)
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				slog.Warn("rewind-bead: delete test file", "path", path, "error", err)
 			}
+			deletedTests = append(deletedTests, f)
 		}
 	}
 
@@ -216,10 +199,8 @@ func RunRewindBeadMain(args []string) {
 	fmt.Printf("  project-id:     %d\n", projectID)
 	fmt.Printf("  spec reset to:  revision 1\n")
 	fmt.Printf("  attempt budget: %d → %d\n", existingExecutions, newAttemptCap)
-	fmt.Printf("  next verb:      %s\n", targetVerb)
-	if keepTests {
-		fmt.Printf("  test files:     kept (tests are vetted)\n")
-	} else if len(deletedTests) > 0 {
+	fmt.Printf("  next verb:      REFINE_TESTS_WRITE\n")
+	if len(deletedTests) > 0 {
 		fmt.Printf("  test files deleted:\n")
 		for _, f := range deletedTests {
 			fmt.Printf("    %s\n", f)
@@ -233,42 +214,3 @@ func RunRewindBeadMain(args []string) {
 	}
 }
 
-// resolveTarget inspects the last adjudication decision and the presence of test
-// files on disk to decide whether to re-run REFINE_TESTS_WRITE or jump straight
-// to EXECUTE_BEAD.
-func resolveTarget(ctx context.Context, d *db.DB, beadID int64, projectFolder string, outputFiles []string) (verb string, keepTests bool) {
-	var lastDecision string
-	err := d.QueryRowContext(ctx,
-		`SELECT decision FROM adjudications WHERE bead_id = ? ORDER BY id DESC LIMIT 1`,
-		beadID,
-	).Scan(&lastDecision)
-
-	// No adjudications at all: bead never completed REFINE_TESTS.
-	if err == sql.ErrNoRows {
-		return "REFINE_TESTS_WRITE", false
-	}
-	if err != nil {
-		slog.Warn("rewind-bead: query adjudication", "error", err)
-		return "REFINE_TESTS_WRITE", false
-	}
-
-	// Tests were flagged as wrong: must redo REFINE_TESTS.
-	if lastDecision == "test_reject" || lastDecision == "re_refine" {
-		return "REFINE_TESTS_WRITE", false
-	}
-
-	// Tests are vetted (execute_revised / execute_as_is). Keep them only if they
-	// actually exist on disk.
-	for _, f := range outputFiles {
-		if strings.HasSuffix(f, "_test.go") {
-			if _, err := os.Stat(filepath.Join(projectFolder, f)); err == nil {
-				// At least one test file is present; proceed to EXECUTE_BEAD.
-				return "EXECUTE_BEAD", true
-			}
-		}
-	}
-
-	// Test files are missing even though adjudications say they were valid.
-	// Fall back to REFINE_TESTS_WRITE.
-	return "REFINE_TESTS_WRITE", false
-}
