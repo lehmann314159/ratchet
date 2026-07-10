@@ -200,21 +200,22 @@ func TestAdjudicateNextExecutionValidate(t *testing.T) {
 			`{"trend":"same","bead_spec_fit":"bead_problem","reasoning":"x","decision":"execute_revised","revised_bead":{"title":"B01","full_text":"x","execution_budget":60,"monitor_override":"maybe"}}`,
 			false,
 		},
-		// declare_success: trend and bead_spec_fit must both be "not_applicable".
+		// declare_success: trend and bead_spec_fit may be "not_applicable" or any valid value —
+		// they are not used downstream on terminal paths, so we don't enforce a specific value.
 		{
-			"valid declare_success",
+			"valid declare_success with not_applicable",
 			`{"trend":"not_applicable","bead_spec_fit":"not_applicable","reasoning":"All exit criteria confirmed met: TestDeterminism, TestBoundary, TestStateAdvancement all passed.","decision":"declare_success"}`,
 			true,
 		},
 		{
-			"declare_success: trend not not_applicable",
+			"valid declare_success with meaningful trend",
 			`{"trend":"same","bead_spec_fit":"not_applicable","reasoning":"exit criteria met","decision":"declare_success"}`,
-			false,
+			true,
 		},
 		{
-			"declare_success: bead_spec_fit not not_applicable",
+			"valid declare_success with meaningful bead_spec_fit",
 			`{"trend":"not_applicable","bead_spec_fit":"bead_problem","reasoning":"exit criteria met","decision":"declare_success"}`,
-			false,
+			true,
 		},
 		{
 			"not_applicable trend without declare_success",

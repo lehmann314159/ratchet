@@ -511,7 +511,9 @@ Two classification fields are required on every output:
   "bead_problem"                 — the spec is wrong, ambiguous, or missing detail
   "execution_capability_problem" — the spec is correct but execution failed to implement it
 
-Terminal decisions (declare_success, test_reject, re_refine): set both to "not_applicable".
+Terminal decisions (declare_success, test_reject, re_refine): trend and bead_spec_fit
+are not used downstream on these paths. You may set them to "not_applicable" or to
+meaningful values that reflect your analysis — both are accepted.
 Retry/stop decisions (execute_as_is, execute_revised, full_stop): set both meaningfully —
 "not_applicable" is invalid here, and a mismatch with your reasoning makes the output invalid.
 

@@ -601,23 +601,18 @@ func (h *AdjudicateNextExecution) Validate(raw string) (string, any) {
 		}
 	}
 
-	terminalDecisions := out.Decision == "declare_success" || out.Decision == "test_reject" || out.Decision == "re_refine"
-	if terminalDecisions {
-		// These decisions require both classification fields to be "not_applicable".
-		if out.Trend != "not_applicable" {
-			return fmt.Sprintf("malformed: decision is %q but trend is %q — must be \"not_applicable\"", out.Decision, out.Trend), nil
-		}
-		if out.BeadSpecFit != "not_applicable" {
-			return fmt.Sprintf("malformed: decision is %q but bead_spec_fit is %q — must be \"not_applicable\"", out.Decision, out.BeadSpecFit), nil
-		}
-	} else {
-		// For retry/stop decisions, "not_applicable" is forbidden and the consistency
-		// check applies (zero-strike tolerance — a mismatch is a validation failure).
+	// For retry/stop decisions, "not_applicable" is forbidden and the consistency
+	// check applies. Terminal decisions (declare_success, test_reject, re_refine)
+	// may use any valid value — trend/bead_spec_fit are not used downstream on those
+	// paths, so enforcing "not_applicable" only causes spurious validation failures
+	// when a model correctly chooses a terminal decision but also records its analysis.
+	isTerminal := out.Decision == "declare_success" || out.Decision == "test_reject" || out.Decision == "re_refine"
+	if !isTerminal {
 		if out.Trend == "not_applicable" {
-			return "malformed: trend \"not_applicable\" is only valid when decision is \"declare_success\", \"test_reject\", or \"re_refine\"", nil
+			return "malformed: trend \"not_applicable\" is only valid for terminal decisions (declare_success, test_reject, re_refine)", nil
 		}
 		if out.BeadSpecFit == "not_applicable" {
-			return "malformed: bead_spec_fit \"not_applicable\" is only valid when decision is \"declare_success\", \"test_reject\", or \"re_refine\"", nil
+			return "malformed: bead_spec_fit \"not_applicable\" is only valid for terminal decisions (declare_success, test_reject, re_refine)", nil
 		}
 		if ok, reason := checkConsistency(out.BeadSpecFit, out.Reasoning); !ok {
 			return "malformed: consistency check failed: " + reason, nil
