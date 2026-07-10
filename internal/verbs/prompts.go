@@ -528,14 +528,19 @@ decision:
                       or established convention). Only valid when the mechanical findings contain
                       MISMATCH entries from "[Test-first verification]".
   "re_refine"       — the REFINE_TESTS-written test file contains logically incorrect assertions
-                      that no correct implementation can satisfy. The existing tests are preserved;
-                      only the broken functions will be rewritten. Include re_refine_guidance with
-                      a bulleted diagnosis: for each broken assertion, name the test function and
-                      sub-test, state the impossible expectation, and explain why a correct
-                      implementation cannot satisfy it. Use this when the same test functions fail
-                      identically across multiple attempts and the implementation logic appears
-                      correct — not as a first resort. Only valid when "[REFINE_TESTS bead]"
-                      appears in the mechanical findings.
+                      that no correct implementation can satisfy. Only valid when "[REFINE_TESTS bead]"
+                      appears in the mechanical findings. The existing tests are preserved; only the
+                      broken functions will be rewritten. Include re_refine_guidance with a bulleted
+                      diagnosis: for each broken assertion, name the test function and sub-test,
+                      state the impossible expectation, and explain why a correct implementation
+                      cannot satisfy it.
+                      Threshold: when the same test function(s) fail with identical assertions
+                      across 2 or more attempts AND the implementation is structurally correct
+                      (correct algorithm, no compile errors), re_refine is the expected decision.
+                      execute_revised without altering the failing assertion cannot improve the
+                      outcome. Before issuing execute_revised on a REFINE_TESTS bead, ask: "Is
+                      there any spec change that would cause this specific assertion to pass with
+                      a correct implementation?" If not, use re_refine.
 
 Guidance on choosing between execute_as_is and execute_revised when bead_spec_fit is
 "execution_capability_problem":

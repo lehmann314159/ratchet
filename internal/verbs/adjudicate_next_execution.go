@@ -458,10 +458,12 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 	if beadHasRefinements(ctx, d, beadID) {
 		findings += "\n\n[REFINE_TESTS bead] This bead's tests were written by REFINE_TESTS. " +
 			"If the same test functions fail identically across multiple attempts and the " +
-			"implementation logic appears correct, consider re_refine: the tests themselves " +
-			"may contain logically impossible assertions. re_refine_guidance should identify " +
-			"each broken assertion, why it cannot be satisfied by a correct implementation, " +
-			"and which function contains it."
+			"implementation logic appears correct, use re_refine after 2 or more identical " +
+			"failures — the tests themselves may contain logically impossible assertions. " +
+			"Before issuing execute_revised, ask: can any spec change cause the failing " +
+			"assertion to pass with a correct implementation? If not, use re_refine. " +
+			"re_refine_guidance should identify each broken assertion, why it cannot be " +
+			"satisfied by a correct implementation, and which function contains it."
 	}
 	userMsg := buildAdjudicateUserMsg(currentBead, revLog, findings, compressedHistory, diffSignal)
 	return oc.Chat(ctx, model, []ollama.Message{
