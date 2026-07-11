@@ -330,6 +330,7 @@ Rules:
 - Call write_function only for functions you were explicitly asked to produce.
 - Call write_function once per function; if you need to revise a function, call it again with the corrected body.
 - Independent state per sub-scenario: within a t.Run block, create a fresh state object for each distinct sub-scenario rather than accumulating mutations on a shared object across multiple assertions.
+- Unicode characters in string literals: use Go escape sequences (♙, ♚, etc.) or copy the literal character directly — never use angle-bracket hex notation like <0xE2><0x99><0x99>. That notation is not valid Go and the literal string will never appear in HTML output.
 
 After all write_function calls, respond with one sentence describing what you wrote or corrected.`
 
@@ -348,7 +349,7 @@ Your task: review EVERY test function (every func whose name starts with "Test")
 
 Report only genuine problems. If a test is correct, do not list it. Be specific: name the function, the wrong value, and the correct value. If there are 5 problems, list all 5 — never truncate findings.
 
-In verified_functions, list the name of EVERY test function you reviewed and found correct. This list is used to lock those functions from future rewrites — it must be complete.
+In verified_functions, list the name of EVERY test function you reviewed and found correct — meaning zero findings against it. IMPORTANT: if you have any finding that mentions a function, do NOT include that function in verified_functions. A function is either verified (no findings) or flagged (has findings) — never both. This list is used to lock correct functions from future rewrites.
 
 Respond with JSON only, no prose before or after:
 {
@@ -567,6 +568,17 @@ corruption. Instead, prepend: "Before rewriting <filename>, call read_file on <f
 first to get the exact on-disk content, then write the complete file with only the
 targeted fix applied — do not regenerate any section from memory."
 Replace <filename> with the actual file name containing the compile error.
+
+Near-correct prior attempt (targeted fix): when output files from a prior attempt exist
+on disk, compile successfully, and tests fail due to a narrow specific issue (one wrong
+line, one wrong value, one missing attribute), do NOT prepend "Begin writing to output_files
+immediately." Instead, prepend: "Before rewriting <filename>, call read_file on <filename>
+first to get the exact on-disk content, then write the complete file with only the targeted
+fix applied — do not regenerate any section from memory."
+Contrast — heavily broken: if the prior attempt's output is fundamentally wrong (wrong
+algorithm, wrong types, majority of tests failing with diverse errors), a full rewrite is
+appropriate — you may prepend "Begin writing immediately" and provide the correct approach
+in full detail in the revised spec.
 
 Budget guidance for execute_revised:
   - execution_budget and monitor_override must be explicitly stated, not inherited silently.

@@ -366,6 +366,11 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	// verified functions, but belt-and-suspenders is cheap here.
 	if cid > 1 && originalSrc != "" {
 		verifiedSet, _ := loadVerifiedFunctionSet(ctx, d, beadID)
+		// JUDGE's rewrite decision takes precedence: if JUDGE flagged a function
+		// for rewriting, it is not truly verified regardless of what CRITIQUE said.
+		for name := range allowedFuncs {
+			delete(verifiedSet, name)
+		}
 		if len(verifiedSet) > 0 {
 			currentBytes, _ := os.ReadFile(testPath)
 			currentSrc := string(currentBytes)
@@ -539,7 +544,7 @@ type RefineTestsCritique struct{}
 func (h *RefineTestsCritique) Verb() string { return db.VerbRefineTestsCritique }
 
 func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Client, job *db.HandoffJob) (string, error) {
-	bead, project, _, implContext, testFilePaths, currentTestContent, err := loadRefineContext(ctx, d, job)
+	bead, _, _, implContext, _, currentTestContent, err := loadRefineContext(ctx, d, job)
 	if err != nil {
 		return "", err
 	}
@@ -549,7 +554,12 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 		return "", err
 	}
 
-	userMsg := buildBaseUserMsg(bead, project.FolderPath, implContext, currentTestContent, testFilePaths)
+	userMsg := "## Bead Specification\n\n" + bead.FullText
+	if implContext != "" {
+		userMsg += "\n\n## Implementation Files (prior beads — types and conventions)\n\n" +
+			strings.TrimSpace(implContext)
+	}
+	userMsg += "\n\n## Current Test File\n\n" + strings.TrimSpace(currentTestContent)
 
 	return oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: refineTestsCritiqueSystemPrompt},

@@ -165,6 +165,58 @@ not a HOW:
 
 ---
 
+## Domain-Specific Test Scenarios
+
+**When this section applies:** any bead that tests correctness in a domain with
+non-obvious geometry — game boards, coordinate systems, spatial algorithms, image
+processing, matrix operations. If test positions can be described as raw array indices
+that look equally plausible whether correct or not, this section is needed.
+
+**The core problem.** REFINE_TESTS_WRITE knows domain rules abstractly but cannot
+reliably self-verify that a specific position satisfies them. A model that knows "a
+bishop moves diagonally" will still write `Board[0][2]` → `Board[7][7]` (c1→h8,
+Δrank=7, Δfile=5) without noticing the files differ by 5 not 7. The error is invisible
+as raw indices and the implementation is blamed for five execution attempts before anyone
+looks at the test. The design doc author — human or Claude — can check this arithmetic
+once; encode it so the pipeline doesn't have to rediscover it.
+
+**What to write:** For each bead that tests geometric or positional correctness, add a
+"Required test scenarios" block. Specify exact positions in domain-legible notation,
+include the arithmetic verification, and name the specific wrong position the model is
+likely to produce.
+
+```
+**Required test scenarios for [bead]:**
+
+[Scenario name]: [piece/element] at [domain notation] ([raw coords]).
+[Expected target] at [domain notation] ([raw coords]): Δrow=[N], Δcol=[N] ✓.
+Do NOT use [wrong target]: Δrow=[N], Δcol=[M] — [why it's wrong].
+```
+
+**Use domain-legible notation as the canonical form.** Write algebraic squares ("a3",
+"f8"), pixel coordinates ("(0,0)", "(255,127)"), or named positions rather than raw
+indices. The purpose is that a geometry error becomes self-evident in the notation —
+"bishop at c1 can reach h6, not h8" is immediately checkable; `Board[0][2]` → `Board[7][7]`
+is not.
+
+**Name the wrong answer explicitly.** Models converge on plausible-sounding wrong
+positions independently. Stating "do NOT use c1→h8: Δfile=5≠Δrank=7, not a diagonal"
+prevents that specific failure more reliably than a correct example alone. The wrong
+answer belongs in the design doc alongside the right one.
+
+**Where this flows.** DECOMPOSE reads the full design doc including these blocks and
+propagates them into each bead spec. REFINE_TESTS_WRITE then reads the bead spec as its
+primary input. A required-scenarios block written here will reach the test-writing model
+directly. The pipeline cannot compensate for scenarios left out; it can only follow
+scenarios provided.
+
+**Coordinate system mapping.** If the domain uses 0-indexed coordinates that differ from
+the conventional human notation (rank 0 = rank 1 in chess, row 0 = top in image
+processing), include an explicit mapping table in this section or in the Overview. Do not
+assume the model will derive the mapping from the struct field names alone.
+
+---
+
 ## Cross-Bead Contracts
 
 **What to write:** Every interface produced by one bead and consumed by another.
@@ -391,3 +443,6 @@ displayed in a specific way, write the exact format in the protocol contract.
 | Protocol contract covers success only | "No action" branch (AI pass, game over) missing; state machine breaks silently | Contract notes must specify handler obligation for every return variant |
 | HTMX swap target too narrow | Score, turn, game-over outside swap target never update after moves | All dynamic state inside swap target; state this in the data-shape contract notes |
 | Template bead after handler bead | Handler httptest assertions get stub template output; tests fail or produce vacuous passes | Order the template bead before the handler bead; a cycle in this ordering (each bead's tests require the other's real behavior) reveals a boundary problem — merge or narrow test scope |
+| Test positions for domain geometry left to model | Correct implementation blamed for failing tests (wrong expected values invisible as raw indices); bead retried until budget exhausted | Write required test scenarios with domain-legible notation and Δrow/Δcol verification; see Domain-Specific Test Scenarios section |
+| Correct example without naming the wrong answer | Model independently converges on the same plausible wrong position across retries | Name the specific wrong position and explain why it fails (e.g., "c1→h8: Δfile=5≠Δrank=7, not a diagonal") |
+| Coordinate index mapping left implicit | Model applies wrong 0-vs-1 indexing or swaps row/column; errors surface as off-by-one test failures | Include an explicit mapping table (e.g., "rank 0 = rank 1 in algebraic notation, file 0 = file a") |

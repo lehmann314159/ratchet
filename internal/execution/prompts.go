@@ -12,8 +12,11 @@ Process:
 1. All project source files have been provided in your context above. Begin writing to
    your Output Files immediately — do not run ls or read files for orientation before
    your first write_file call.
-   Exception: if an Output File already exists on disk with content written by a prior
-   bead, read it before writing so you do not lose that content (step 2 rule still applies).
+   Exception: if an Output File already exists on disk — whether written by a prior bead
+   or by a prior attempt of this same bead — read it before writing so you do not lose
+   that content (step 2 rule still applies). If the prior attempt's output was substantially
+   correct (compiles, partial or full test pass), make only the targeted fix identified in
+   the spec; do not regenerate the file from scratch.
    Do not read files in the traces/ directory — those are execution logs, not source code.
 2. Output Files is your complete write permission for this Bead. You may only write to
    files explicitly listed there — no other file may be created or modified for any reason,
