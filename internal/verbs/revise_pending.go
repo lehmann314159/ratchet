@@ -44,9 +44,19 @@ func (h *RevisePending) Run(ctx context.Context, d *db.DB, oc *ollama.Client, jo
 		return "", err
 	}
 
-	fileContents, err := readProjectSourceFiles(project.FolderPath)
-	if err != nil {
-		return "", fmt.Errorf("read project files: %w", err)
+	// Read only the trigger bead's non-test output files. Pending bead specs
+	// already incorporate everything prior REVISE_PENDING runs knew about
+	// earlier beads, so sending the full project source is redundant and
+	// inflates the prompt unboundedly as the project grows.
+	fileContents := make(map[string]string)
+	for _, f := range triggerBead.OutputFiles {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		data, rerr := os.ReadFile(filepath.Join(project.FolderPath, f))
+		if rerr == nil {
+			fileContents[f] = string(data)
+		}
 	}
 
 	model, err := loadVerbModelOrFallback(ctx, d, job.ProjectID, db.VerbRevisePending, db.VerbAuditDecomposition)
@@ -207,31 +217,6 @@ func (h *RevisePending) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJ
 	return enqueueBeadExecution(ctx, tx, job.ProjectID, nextBeadID, now)
 }
 
-// readProjectSourceFiles reads .go and .mod source files from the project root.
-// Only top-level files are included; subdirectories (e.g. traces/) are skipped.
-func readProjectSourceFiles(folderPath string) (map[string]string, error) {
-	entries, err := os.ReadDir(folderPath)
-	if err != nil {
-		return nil, fmt.Errorf("read dir: %w", err)
-	}
-	out := make(map[string]string)
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		ext := filepath.Ext(name)
-		if ext != ".go" && ext != ".mod" {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(folderPath, name))
-		if err != nil {
-			continue
-		}
-		out[name] = string(data)
-	}
-	return out, nil
-}
 
 func buildRevisePendingUserMsg(triggerBead *beadState, fileContents map[string]string, pendingBeads []beadState) string {
 	var sb strings.Builder

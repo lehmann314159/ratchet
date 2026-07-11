@@ -429,29 +429,7 @@ func verifyTestExpectations(ctx context.Context, oc *ollama.Client, model, folde
 		return ""
 	}
 
-	// Inject all non-test .go files from the project folder so the verifier has
-	// the same implementation context the test author had: type definitions,
-	// coordinate systems, and domain logic (e.g. piece movement rules in moves.go).
-	var implContext strings.Builder
-	if entries, rdErr := os.ReadDir(folderPath); rdErr == nil {
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			name := entry.Name()
-			if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-				continue
-			}
-			if content, rerr := os.ReadFile(filepath.Join(folderPath, name)); rerr == nil {
-				fmt.Fprintf(&implContext, "### %s\n\n```go\n%s\n```\n\n", name, string(content))
-			}
-		}
-	}
-
 	userMsg := "## Bead Specification\n\n" + beadFullText
-	if implContext.Len() > 0 {
-		userMsg += "\n\n## Implementation Files (prior beads — use for domain-specific verification)\n\n" + strings.TrimSpace(implContext.String())
-	}
 	userMsg += "\n\n## Test File\n\n" + strings.TrimSpace(testContent.String())
 
 	raw, err := oc.Chat(ctx, model, []ollama.Message{
