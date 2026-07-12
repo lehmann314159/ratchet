@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -366,6 +368,84 @@ func missingPathNote(ctx context.Context, d *db.DB, beadID int64) string {
 		"files or regenerate content from scratch.\" Make no other changes to the spec."
 }
 
+// reFailedTestName matches "--- FAIL: <name>" lines from `go test` output,
+// which includes the "/" for subtests (e.g. "TestPlaceStone/KoCreation").
+var reFailedTestName = regexp.MustCompile(`(?m)^\s*--- FAIL: (\S+)`)
+
+// recurringTestFailureNote detects the pattern behind the [REFINE_TESTS bead]
+// guidance below: the same named subtest failing identically across the last
+// two attempts that actually revised the implementation. That guidance was
+// prose-only and ADJUDICATE was not reliably acting on it — it kept revising
+// the bead spec instead of recognizing a test the implementation cannot
+// satisfy. This makes the "2 or more identical failures" threshold mechanical
+// rather than left to the model's judgment.
+//
+// Only counts executions where a non-test output file was actually written
+// (excludes orientation-only or compile-failure attempts, which produce no
+// meaningful --- FAIL lines or share stub-vs-stub failures that aren't
+// evidence the test itself is broken).
+func recurringTestFailureNote(ctx context.Context, d *db.DB, beadID int64) string {
+	rows, err := d.QueryContext(ctx, `
+		SELECT e.trace_path, a.mechanical_findings
+		FROM executions e
+		JOIN analyses a ON a.execution_id = e.id
+		WHERE e.bead_id = ? AND e.infra_failure = 0 AND e.test_first_attempt = 0
+		ORDER BY e.id DESC LIMIT 5`, beadID)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+
+	var failNames []map[string]bool
+	for rows.Next() && len(failNames) < 2 {
+		var tracePath, findings string
+		if err := rows.Scan(&tracePath, &findings); err != nil {
+			return ""
+		}
+		data, err := os.ReadFile(tracePath)
+		if err != nil {
+			continue
+		}
+		pt := trace.Parse(data)
+		wroteImpl := false
+		for _, wf := range pt.WriteFiles {
+			if wf.Succeeded && !strings.HasSuffix(wf.Path, "_test.go") {
+				wroteImpl = true
+				break
+			}
+		}
+		if !wroteImpl {
+			continue // orientation-only attempt; not evidence about the test
+		}
+		names := map[string]bool{}
+		for _, m := range reFailedTestName.FindAllStringSubmatch(findings, -1) {
+			names[m[1]] = true
+		}
+		failNames = append(failNames, names)
+	}
+	if err := rows.Err(); err != nil || len(failNames) < 2 {
+		return ""
+	}
+
+	var shared []string
+	for name := range failNames[0] {
+		if strings.Contains(name, "/") && failNames[1][name] {
+			shared = append(shared, name)
+		}
+	}
+	if len(shared) == 0 {
+		return ""
+	}
+	sort.Strings(shared)
+
+	return "[Fast path — recurring test failure] The following subtest(s) failed identically " +
+		"across the last two attempts that revised the implementation: " + strings.Join(shared, ", ") +
+		". Revising the bead spec's implementation prose has not resolved this.\n\n" +
+		"Action: issue decision=re_refine, not execute_revised. In re_refine_guidance, explain " +
+		"for each listed subtest why its assertion cannot be satisfied by any correct " +
+		"implementation given how the test sets up its inputs, and what must change in the test."
+}
+
 type AdjudicateNextExecution struct {
 	budgetDefault int    // cached from Run for use in Commit
 	folderPath    string // cached from Run for use in Commit
@@ -464,6 +544,9 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 			"assertion to pass with a correct implementation? If not, use re_refine. " +
 			"re_refine_guidance should identify each broken assertion, why it cannot be " +
 			"satisfied by a correct implementation, and which function contains it."
+		if note := recurringTestFailureNote(ctx, d, beadID); note != "" {
+			findings += "\n\n" + note
+		}
 	}
 	userMsg := buildAdjudicateUserMsg(currentBead, revLog, findings, compressedHistory, diffSignal)
 	return oc.Chat(ctx, model, []ollama.Message{

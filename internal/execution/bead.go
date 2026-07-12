@@ -77,9 +77,10 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	var model string
 	var folderPath string
 	var beadID int64
+	var revisionID int64
 
 	if err := d.QueryRowContext(ctx, `
-		SELECT e.trace_path, br.execution_budget, br.full_text, vma.model, p.folder_path, e.bead_id
+		SELECT e.trace_path, br.execution_budget, br.full_text, vma.model, p.folder_path, e.bead_id, br.id
 		FROM executions e
 		JOIN bead_revisions br ON br.id = e.bead_revision_id
 		JOIN beads b ON b.id = e.bead_id
@@ -87,7 +88,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 		JOIN verb_model_assignments vma
 		  ON vma.project_id = e.project_id AND vma.verb = 'EXECUTE_BEAD'
 		WHERE e.id = ?`, execID,
-	).Scan(&tracePath, &budget, &beadFullTextJSON, &model, &folderPath, &beadID); err != nil {
+	).Scan(&tracePath, &budget, &beadFullTextJSON, &model, &folderPath, &beadID, &revisionID); err != nil {
 		return fmt.Errorf("load execution %d: %w", execID, err)
 	}
 
@@ -141,6 +142,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 
 	contextFiles := loadContextFiles(folderPath, parsedBead.OutputFiles)
 	priorHistory := loadPriorAttemptSummary(ctx, d, beadID)
+	resumeNote := sameRevisionResumeNote(ctx, d, beadID, revisionID, execID)
 
 	// Compute the files the model was instructed to write this attempt.
 	// test-first mode: tests absent → list only test files.
@@ -170,7 +172,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	tools := toolDefinitions()
 	messages := []ollama.Message{
 		{Role: "system", Content: guidance.InjectForVerbPath(executeBeadSystemPrompt, folderPath, db.VerbExecuteBead, "")},
-		{Role: "user", Content: buildBeadUserMsg(parsedBead.FullText, parsedBead.OutputFiles, parsedBead.ExitCriteria, contextFiles, priorHistory, folderPath)},
+		{Role: "user", Content: buildBeadUserMsg(parsedBead.FullText, parsedBead.OutputFiles, parsedBead.ExitCriteria, contextFiles, priorHistory, resumeNote, folderPath)},
 	}
 
 	var writeFileCount int
@@ -353,7 +355,7 @@ func stubLine(mode string, step int) string {
 // Files, and the exit criterion is replaced with a compile-only check. This causes
 // the model to write tests first so they can be independently verified before
 // implementation begins.
-func buildBeadUserMsg(specText string, outputFiles []string, exitCriteria []string, contextFiles, priorHistory, folderPath string) string {
+func buildBeadUserMsg(specText string, outputFiles []string, exitCriteria []string, contextFiles, priorHistory, resumeNote, folderPath string) string {
 	var msg string
 
 	testFirst := isTestFirstMode(folderPath, outputFiles)
@@ -425,6 +427,10 @@ func buildBeadUserMsg(specText string, outputFiles []string, exitCriteria []stri
 		for i, c := range exitCriteria {
 			msg += fmt.Sprintf("%d. %s\n", i+1, c)
 		}
+	}
+
+	if resumeNote != "" {
+		msg += "\n\n## Resuming a Prior Attempt\n\n" + resumeNote
 	}
 
 	if priorHistory != "" {
@@ -519,6 +525,31 @@ func loadPriorAttemptSummary(ctx context.Context, d *db.DB, beadID int64) string
 		return ""
 	}
 	return text
+}
+
+// sameRevisionResumeNote detects the case where this execution reuses a
+// bead_revision that an earlier execution for the same bead already ran
+// against. Normal retries (execute_revised) always write a fresh revision
+// before re-executing, so this only fires after a re_refine cycle: ADJUDICATE
+// diagnosed the *test* as broken and left the spec untouched, so the spec may
+// still describe output files as unwritten stubs even though a prior attempt
+// already wrote a real implementation for it. Returns "" when this is the
+// first execution against the revision.
+func sameRevisionResumeNote(ctx context.Context, d *db.DB, beadID, revisionID, execID int64) string {
+	var priorCount int
+	if err := d.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM executions
+		WHERE bead_id = ? AND bead_revision_id = ? AND id != ?`,
+		beadID, revisionID, execID,
+	).Scan(&priorCount); err != nil || priorCount == 0 {
+		return ""
+	}
+	return "This spec was already attempted in a prior execution against the current output files — " +
+		"only the test file was revised since then (the implementation was not judged to be the problem). " +
+		"Before making any changes, read the current Output Files below: if they already implement this " +
+		"spec correctly, make no changes and stop. Only edit them if something is actually wrong. Do not " +
+		"treat already-implemented functions as unwritten stubs just because the spec text describes them " +
+		"that way."
 }
 
 // buildNoWriteWarning returns a user-turn message injected when the model
