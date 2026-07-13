@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS adjudications (
   reasoning_text            TEXT    NOT NULL,
   attempt_budget_cost       REAL    NOT NULL,
   monitor_escalation_status INTEGER NOT NULL,  -- BOOLEAN: 0/1
-  decision                  TEXT    NOT NULL CHECK (decision IN ('execute_as_is', 'execute_revised', 'full_stop', 'declare_success')),
+  decision                  TEXT    NOT NULL CHECK (decision IN ('execute_as_is', 'execute_revised', 'full_stop', 'declare_success', 'test_reject', 're_refine')),
   created_at                TIMESTAMP NOT NULL
 );
 

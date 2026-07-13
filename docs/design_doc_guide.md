@@ -14,7 +14,7 @@ The design doc passes through three pipeline stages, each of which reads it diff
 create, what types and function signatures to declare, and how to name things. SURVEY
 outputs declaration text (types, stubs, signatures) — no package statements, no imports,
 no build files. A separate scaffolding step generates complete `.go` files, `go.mod`, and
-`api_check_test.go` mechanically from those declarations. Your design doc's Data Types and
+`do_not_use_this_test.go` mechanically from those declarations. Your design doc's Data Types and
 Behavioral Specification sections are SURVEY's primary input.
 
 **DECOMPOSE_SPEC** reads the design doc plus the `survey.md` document that SURVEY produced.
@@ -36,6 +36,88 @@ The quality of your design doc is the single largest factor in how many attempts
 takes. A complete, precise doc produces a decomposition that AUDIT passes in one round with
 no findings. An incomplete doc produces beads with wrong signatures, missing contracts, or
 underspecified exit criteria — each a potential multi-attempt failure.
+
+---
+
+## Writing for small models
+
+The design doc is typically written by a frontier model or an experienced human. The
+execution model that implements each bead is smaller — often 24B–31B parameters. This
+creates a systematic blind spot: **the author will not naturally see what the implementer
+will get wrong**, because the author cannot make those mistakes themselves.
+
+A frontier model writing "Group uses BFS flood fill" knows exactly what that means and
+would implement it correctly on the first try. It has no felt sense that the execution
+model will pre-load the starting element before the loop and then append it again on
+dequeue. That error is invisible to the author because it requires thinking like a model
+that knows the algorithm's name but not its pitfalls.
+
+This is not a gap that careful re-reading will close. The author re-reading their own
+description sees a correct description. The failure only becomes visible by asking a
+different question: *what is the first plausible wrong implementation of this?*
+
+**The core principle:** for every algorithm in the behavioral specification, identify the
+most natural wrong implementation — the one a programmer who knows the algorithm name
+would write without thinking. If that implementation would fail your tests, the spec
+needs more detail. One sentence of pseudocode pinning the non-obvious choice is usually
+enough.
+
+### Specific patterns that need explicit guidance
+
+**Algorithm initialization.** Small models know BFS/DFS/flood-fill abstractly but
+frequently make the same initialization mistakes:
+- Pre-loading the starting element into the result before the loop, then adding it again
+  when dequeued — producing every result one element too large.
+- Using a set to track "enqueued" rather than "visited" — causing elements to be processed
+  multiple times if enqueued from different paths.
+
+When a function uses BFS or flood-fill, provide pseudocode that shows initialization order
+explicitly. The one load-bearing line is usually "result starts empty" or "mark visited
+when dequeuing, not when enqueuing." State it directly.
+
+**Step ordering with side-effect dependencies.** Small models implement steps in the
+stated order, but may not recognize that step N depends on step N−1's side effects.
+When this dependency exists and violating the order produces a wrong-but-plausible result,
+name it: *"Step 6 must occur after step 5 — captures in step 5 may free liberties that
+determine whether step 6 fires."*
+
+**"Enumerate all" vs "start from one."** A function that must process all members of a
+set (all empty regions, all connected components) requires an outer loop over all cells
+plus a visited set that persists across flood fills. Small models frequently call the
+inner function once from a single starting point. Write the outer loop explicitly in
+pseudocode rather than saying "find all X."
+
+**Loop-scoped variables.** When a variable must be re-initialized for each iteration
+(a scratch copy of game state, a per-trial accumulator), small models often declare it
+once before the loop. Name the required scope: *"Declare `scratch := *g` inside the
+loop body, not before it — each trial must start from the original game state."*
+
+**Don't pair a precise rule with a relative gloss for the same fact.** "Red moves
+toward lower row indices (up the board)" says the same thing twice — once precisely
+(a comparison the model can check) and once relatively (up/down, forward/backward,
+clockwise/counterclockwise, earlier/later — meaningless without recalling which
+entity it was assigned to). When two symmetric entities each get their own gloss,
+a model revising one of them later can recall the gloss but misattribute it to the
+other entity, reversing a rule that was originally correct while still sounding like
+a direct quote from the spec. This isn't specific to board orientation — the same
+risk applies to clock direction, sort order, timeline direction, or any other
+bidirectional relationship. State only the checkable form of the rule and drop the
+relative gloss; if it aids human readers, put it in a comment clearly separated from
+the normative sentence, never juxtaposed as an alternate phrasing of it.
+
+### How to find your blind spots
+
+Ask yourself: *if I removed every word from this section except the function signature,
+what would a programmer who knows the algorithm name write?* If the most natural
+implementation of "BFS flood fill" would fail your tests, add pseudocode. If the most
+natural reading of "steps 1–8" allows reordering, add an ordering constraint. The goal
+is not to write an implementation — it is to close the gap between what "everyone knows"
+and what the small model will actually produce.
+
+A useful check: after writing a behavioral description, identify the one decision a
+programmer would make implicitly (initialization order, step dependency, enumeration
+pattern, variable scope). Write that decision down explicitly. One sentence is usually
+enough.
 
 ---
 
@@ -63,18 +145,42 @@ load-bearing sentences.
 
 ## Architecture
 
-**What to write (optional):** A directory listing showing which file owns which concern.
+**What to write (optional):** A directory listing showing which file owns which concern,
+followed by explicit file-ownership rules for every function in the project.
 
-The Architecture section is informational context for DECOMPOSE — it helps the model
-understand the intended file organization. SURVEY makes the actual file decisions based on
-the design doc and its own structural judgment; DECOMPOSE reads the `survey.md` that SURVEY
-produces for the authoritative file list.
+The Architecture section is read by SURVEY to make file-placement decisions. A directory
+tree with short descriptions is helpful but not sufficient: SURVEY must also know which
+specific functions belong in each file. Without explicit attribution, SURVEY infers
+ownership from context — and will systematically misplace functions when two files have
+related concerns (e.g., templates and handlers in a web app).
+
+**For any project with ≥ 4 source files, add explicit file-ownership rules after the
+tree.** Name each function-to-file assignment, and name the wrong placement explicitly:
+
+```
+**File assignment rules (strict):**
+- `main.go` contains exactly: `var game *Game` and `func main()`. Nothing else.
+- `handlers.go` contains: toView helper and all HTTP handler functions
+  (HandleIndex, HandlePlace, HandlePass, HandleReset).
+- `templates.go` contains: InitTemplates, RenderIndex, RenderBoard. No handler
+  functions. No type declarations.
+- Do NOT put HandleIndex, HandlePlace, HandlePass, or HandleReset in templates.go.
+- Do NOT put GameView in templates.go — it belongs in game.go.
+```
+
+The "do NOT" lines matter as much as the positive assignments. Models converge on
+the same wrong placement independently across retries; naming it explicitly is the only
+reliable way to prevent it.
+
+**Also state `main.go` explicitly.** If `main.go` contains only `func main()` and one or
+two package-level variables, SURVEY may generate it with empty declarations (validation
+fails). List its contents explicitly even if minimal.
 
 If you omit this section, SURVEY will still produce a reasonable file layout. Include it
 when you have a strong opinion about file organization or when the project has a non-obvious
 structure (e.g., multiple packages, a cmd/ subdirectory).
 
-Note that `go.mod` and `api_check_test.go` are always generated automatically by the
+Note that `go.mod` and `do_not_use_this_test.go` are always generated automatically by the
 scaffolding step — do not list them as SURVEY outputs or include them in the manifest.
 
 ---
@@ -106,9 +212,9 @@ declarations output, which will then appear twice in the generated file.
 assertion lines in a dedicated subsection. These give SURVEY a concise, unambiguous
 specification of exact return types, especially in cases where the prose might be
 ambiguous (e.g., `Score() (int, int)` vs `Score() (black, white int)`). The scaffolder
-generates `api_check_test.go` from the exported symbols SURVEY declares, so these
+generates `do_not_use_this_test.go` from the exported symbols SURVEY declares, so these
 assertions also serve as a correctness check: if SURVEY declares the wrong signature, the
-generated `api_check_test.go` will carry a wrong assertion and the compile check will fail.
+generated `do_not_use_this_test.go` will carry a wrong assertion and the compile check will fail.
 
 ```go
 // Signatures
@@ -258,7 +364,7 @@ the **highest-risk gap for web applications.**
 
 A protocol contract is needed any time a handler bead calls a function from a logic bead
 in response to a user action. The function call is behavioral wiring — it doesn't appear
-in any type signature, so it won't be caught by `api_check_test.go`, and a unit test for
+in any type signature, so it won't be caught by `do_not_use_this_test.go`, and a unit test for
 the handler alone won't catch a missing call.
 
 **The question to ask for every handler bead:** "What functions from other beads does this
@@ -446,3 +552,9 @@ displayed in a specific way, write the exact format in the protocol contract.
 | Test positions for domain geometry left to model | Correct implementation blamed for failing tests (wrong expected values invisible as raw indices); bead retried until budget exhausted | Write required test scenarios with domain-legible notation and Δrow/Δcol verification; see Domain-Specific Test Scenarios section |
 | Correct example without naming the wrong answer | Model independently converges on the same plausible wrong position across retries | Name the specific wrong position and explain why it fails (e.g., "c1→h8: Δfile=5≠Δrank=7, not a diagonal") |
 | Coordinate index mapping left implicit | Model applies wrong 0-vs-1 indexing or swaps row/column; errors surface as off-by-one test failures | Include an explicit mapping table (e.g., "rank 0 = rank 1 in algebraic notation, file 0 = file a") |
+| Architecture file tree without explicit function attribution | SURVEY places functions in wrong files (handlers in templates.go, types in wrong module); CERTIFY loops requesting corrections | After the directory tree, add explicit file-ownership rules naming each function and its file; include "do NOT put X in Y" for likely wrong placements |
+| `main.go` contents unspecified | SURVEY generates `main.go` with empty declarations; validation fails with "missing declarations" error | Always list `main.go` contents explicitly, even if minimal (e.g., "var game *Game and func main() only") |
+| BFS/flood-fill described abstractly | Model pre-loads starting element before loop then appends it again on dequeue; every group/region is one element too large | Provide pseudocode with explicit "result starts empty; add when dequeuing"; see "Writing for small models" section |
+| Step ordering dependency unstated | Model implements steps in listed order but checks suicide before captures, incorrectly rejecting legal capture moves | When a step's correctness depends on a prior step's side effects, add: "must occur after step N — [reason]" |
+| "Find all regions" described as a single flood fill | Model calls flood-fill once from one starting point; only one region found; rest of board misclassified | Write the outer loop explicitly: "iterate every cell; for each unvisited empty cell, start a new flood fill" |
+| Loop-scoped scratch copy declared before the loop | Model reuses a modified scratch copy across trials; later trials see side effects of earlier ones | Name the required scope: "declare `scratch := *g` inside the loop body, not before it" |

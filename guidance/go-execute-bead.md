@@ -8,7 +8,7 @@ You are working on a Go project. Apply these language-specific rules:
   e.g.: package fib
 
 **Compile-time assertions:**
-Use these in api_check_test.go to lock function signatures at build time. Place at package
+Use these in do_not_use_this_test.go to lock function signatures at build time. Place at package
 scope — not inside any function:
 
   var _ func(n int) (int, error) = Fib

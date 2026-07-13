@@ -244,21 +244,28 @@ func (h *ReconcileDecomposition) applyFixes(ctx context.Context, tx *sql.Tx, pro
 		r := byTitle[title]
 
 		var beadID int64
-		var currentRevNum int
 		// Use r.UpdatedBead.Title (not r.BeadTitle) to find the bead to update.
 		// r.BeadTitle names the bead cited in the finding; the model sometimes
 		// sets it to the problematic bead rather than the bead being fixed, which
 		// are not always the same (e.g. a finding about "game-state" whose fix
 		// is to update "layout").
 		if err := tx.QueryRowContext(ctx, `
-			SELECT b.id, br.revision_number
+			SELECT b.id
 			FROM beads b
 			JOIN bead_revisions br ON br.id = b.current_revision_id
 			WHERE b.project_id = ?
 			  AND json_extract(br.full_text, '$.title') = ?`,
 			projectID, title,
-		).Scan(&beadID, &currentRevNum); err != nil {
+		).Scan(&beadID); err != nil {
 			return fmt.Errorf("find bead %q for fix: %w", title, err)
+		}
+		// Bead-wide max, not current revision + 1 — keeps revision numbering
+		// collision-free the same way as the ADJUDICATE/REVISE_PENDING insert sites.
+		var maxRevNum int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COALESCE(MAX(revision_number), 0) FROM bead_revisions WHERE bead_id = ?`, beadID,
+		).Scan(&maxRevNum); err != nil {
+			return fmt.Errorf("load max revision number for bead %q: %w", title, err)
 		}
 
 		applyMechanicalBeadFixes(lang, r.UpdatedBead)
@@ -269,7 +276,7 @@ func (h *ReconcileDecomposition) applyFixes(ctx context.Context, tx *sql.Tx, pro
 			  (project_id, bead_id, revision_number, full_text,
 			   execution_budget, monitor_override, created_by_verb, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			projectID, beadID, currentRevNum+1, string(fullText),
+			projectID, beadID, maxRevNum+1, string(fullText),
 			h.budgetDefault, r.UpdatedBead.MonitorOverride,
 			db.VerbReconcileDecomposition, now)
 		if err != nil {

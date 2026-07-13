@@ -116,7 +116,7 @@ func applyMechanicalBeadFixes(lang string, bead *ParsedBead) bool {
 
 // goFixBeadSpec fixes Go-specific structural violations in-place:
 //
-//   - If a bead owns api_check_test.go, strengthen any "go build ./..." exit
+//   - If a bead owns apiCheckTestFilename, strengthen any "go build ./..." exit
 //     criterion with a grep check that verifies package-level blank-identifier
 //     assertions. go build passes whether assertions are at file scope or inside
 //     a function body; grep -q '^var _' enforces the structural requirement.
@@ -135,12 +135,12 @@ func applyMechanicalBeadFixes(lang string, bead *ParsedBead) bool {
 func goFixBeadSpec(bead *ParsedBead) bool {
 	fixed := false
 
-	// When api_check_test.go is owned by this bead, ensure the exit criterion
+	// When apiCheckTestFilename is owned by this bead, ensure the exit criterion
 	// uses go test -c (not go build) and carries the grep guard for package-scope
 	// var_ assertions. go build cannot compile test files, so type errors in
-	// api_check_test.go are silently missed. go test -c compiles all *_test.go
+	// apiCheckTestFilename are silently missed. go test -c compiles all *_test.go
 	// files and exits 0/1 without executing any tests.
-	if hasNamedFile(bead.OutputFiles, "api_check_test.go") {
+	if hasNamedFile(bead.OutputFiles, apiCheckTestFilename) {
 		apiPath := apiCheckTestFilePath(bead.OutputFiles)
 		grepSuffix := " && grep -q '^var _' " + apiPath
 		for i, c := range bead.ExitCriteria {
@@ -183,8 +183,13 @@ func goFixBeadSpec(bead *ParsedBead) bool {
 
 	// Add grep guard for specific -run TestFoo criteria when the bead owns a
 	// test file. This makes the criterion exit 1 when the test function has not
-	// been written, instead of silently exiting 0 ("no tests to run").
-	if hasTestGoFile(bead.OutputFiles) {
+	// been written, instead of silently exiting 0 ("no tests to run"). A bead
+	// that owns only apiCheckTestFilename (no behavioral test file) still takes
+	// this path and returns below — it already got its own treatment in the
+	// api-check block above, and must not fall through to the "derive a missing
+	// test file" logic near the bottom of this function, which is for beads
+	// that actually need a behavioral test file.
+	if hasTestGoFile(bead.OutputFiles) || hasNamedFile(bead.OutputFiles, apiCheckTestFilename) {
 		for i, c := range bead.ExitCriteria {
 			if guarded, ok := addGrepGuard(c, bead.OutputFiles); ok {
 				bead.ExitCriteria[i] = guarded
@@ -322,11 +327,11 @@ func addGrepGuard(criterion string, outputFiles []string) (string, bool) {
 // testFileForName returns the *_test.go file in outputFiles most likely to
 // contain testName, by checking whether the file's base (without _test.go)
 // appears as a substring of the lowercased test name. Falls back to the first
-// *_test.go that is not api_check_test.go.
+// *_test.go that is not apiCheckTestFilename.
 func testFileForName(testName string, outputFiles []string) string {
 	lower := strings.ToLower(testName)
 	for _, f := range outputFiles {
-		if !strings.HasSuffix(f, "_test.go") || filepath.Base(f) == "api_check_test.go" {
+		if !strings.HasSuffix(f, "_test.go") || filepath.Base(f) == apiCheckTestFilename {
 			continue
 		}
 		base := strings.ToLower(strings.TrimSuffix(filepath.Base(f), "_test.go"))
@@ -335,7 +340,7 @@ func testFileForName(testName string, outputFiles []string) string {
 		}
 	}
 	for _, f := range outputFiles {
-		if strings.HasSuffix(f, "_test.go") && filepath.Base(f) != "api_check_test.go" {
+		if strings.HasSuffix(f, "_test.go") && filepath.Base(f) != apiCheckTestFilename {
 			return f
 		}
 	}
@@ -356,15 +361,15 @@ func isSimpleTestName(name string) bool {
 	return true
 }
 
-// apiCheckTestFilePath returns the path of api_check_test.go as listed in
+// apiCheckTestFilePath returns the path of apiCheckTestFilename as listed in
 // output_files, preserving any subdirectory prefix, or the bare filename as fallback.
 func apiCheckTestFilePath(files []string) string {
 	for _, f := range files {
-		if filepath.Base(f) == "api_check_test.go" {
+		if filepath.Base(f) == apiCheckTestFilename {
 			return f
 		}
 	}
-	return "api_check_test.go"
+	return apiCheckTestFilename
 }
 
 // deriveTestFileName picks the *_test.go filename to add when a bead has go
@@ -414,9 +419,14 @@ func extractRunTestName(criterion string) string {
 	return ""
 }
 
+// hasTestGoFile reports whether files contains a _test.go file that a bead
+// should go through REFINE_TESTS for. apiCheckTestFilename is excluded: it's
+// mechanically regenerated from the SURVEY_SPEC manifest (see
+// writeAPICheckTest) and never holds hand-written behavioral tests, so a bead
+// whose only _test.go output is that file must skip straight to EXECUTE_BEAD.
 func hasTestGoFile(files []string) bool {
 	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") {
+		if strings.HasSuffix(f, "_test.go") && filepath.Base(f) != apiCheckTestFilename {
 			return true
 		}
 	}

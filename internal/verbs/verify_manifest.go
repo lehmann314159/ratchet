@@ -66,7 +66,7 @@ func (h *VerifyManifest) Run(ctx context.Context, d *db.DB, _ *ollama.Client, jo
 		violations = append(violations, "file_presence: "+f+" missing after scaffolding")
 	}
 
-	// Check 2: no behavioral test files other than api_check_test.go.
+	// Check 2: no behavioral test files other than apiCheckTestFilename.
 	badTests := checkNoBehavioralTests(project.FolderPath)
 	out.NoBehavioralTestsPass = len(badTests) == 0
 	for _, f := range badTests {
@@ -80,7 +80,7 @@ func (h *VerifyManifest) Run(ctx context.Context, d *db.DB, _ *ollama.Client, jo
 		violations = append(violations, "compile: "+compileErr)
 	}
 
-	// Check 4: api_check_test.go contains package-level var _ lines.
+	// Check 4: apiCheckTestFilename contains package-level var _ lines.
 	apiErr := verifyAPICheck(project.FolderPath)
 	out.APICheckPass = apiErr == ""
 	if apiErr != "" {
@@ -162,7 +162,7 @@ func checkFilePresence(folderPath string, manifest *SurveySpecOutput) []string {
 }
 
 // checkNoBehavioralTests returns paths of *_test.go files (other than
-// api_check_test.go) found anywhere in folderPath.
+// apiCheckTestFilename) found anywhere in folderPath.
 func checkNoBehavioralTests(folderPath string) []string {
 	var bad []string
 	_ = filepath.WalkDir(folderPath, func(path string, de os.DirEntry, err error) error {
@@ -178,7 +178,7 @@ func checkNoBehavioralTests(folderPath string) []string {
 		}
 		rel, _ := filepath.Rel(folderPath, path)
 		base := filepath.Base(rel)
-		if strings.HasSuffix(base, "_test.go") && base != "api_check_test.go" {
+		if strings.HasSuffix(base, "_test.go") && base != apiCheckTestFilename {
 			bad = append(bad, rel)
 		}
 		return nil
@@ -200,13 +200,13 @@ func verifyCompile(ctx context.Context, folderPath string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// verifyAPICheck returns "" if api_check_test.go contains at least one
+// verifyAPICheck returns "" if apiCheckTestFilename contains at least one
 // package-level var _ line, or an error string otherwise.
 func verifyAPICheck(folderPath string) string {
-	apiPath := filepath.Join(folderPath, "api_check_test.go")
+	apiPath := filepath.Join(folderPath, apiCheckTestFilename)
 	content, err := os.ReadFile(apiPath)
 	if err != nil {
-		return fmt.Sprintf("read api_check_test.go: %v", err)
+		return fmt.Sprintf("read %s: %v", apiCheckTestFilename, err)
 	}
 	for _, line := range strings.Split(string(content), "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -214,7 +214,7 @@ func verifyAPICheck(folderPath string) string {
 			return ""
 		}
 	}
-	return "api_check_test.go contains no var _ assertions"
+	return apiCheckTestFilename + " contains no var _ assertions"
 }
 
 

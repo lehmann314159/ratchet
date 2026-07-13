@@ -142,6 +142,19 @@ func RunRewindBeadMain(args []string) {
 		os.Exit(1)
 	}
 
+	// Clear the rolling COMPRESS_ANALYSIS summary too — it's fed back to the
+	// model on every future COMPRESS_ANALYSIS call as "Existing Compressed
+	// History", so left alone it keeps narrating pre-rewind attempts (e.g.
+	// "TestPlaceStone/KoCreation [RECURRING x5]") against a test file that no
+	// longer exists after this rewind.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM compressed_history WHERE bead_id = ?`, *beadID,
+	); err != nil {
+		_ = tx.Rollback()
+		slog.Error("rewind-bead: clear compressed_history", "error", err)
+		os.Exit(1)
+	}
+
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO handoff_jobs
 		  (project_id, verb, bead_id, status, created_at, updated_at, refinement_cycle_id)

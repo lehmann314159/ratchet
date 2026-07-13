@@ -55,20 +55,20 @@ func (db *DB) SetVerbModelAssignment(ctx context.Context, projectID int64, verb,
 // constraints.
 func SeedVerbModelAssignments(ctx context.Context, tx *sql.Tx, projectID int64) error {
 	assignments := map[string]string{
-		VerbSurveySpec:              "mistral-small3.2:24b",
-		VerbCertifyManifest:         "gemma4:31b",
-		VerbDecomposeSpec:           "mistral-small3.2:24b",
-		VerbAuditDecomposition:      "gemma4:31b",
-		VerbReconcileDecomposition:  "mistral-small3.2:24b",
-		VerbExecuteBead:             "mistral-small3.2:24b",
+		VerbSurveySpec:              "gemma4:31b",
+		VerbCertifyManifest:         "qwen3:32b",
+		VerbDecomposeSpec:           "gemma4:31b",
+		VerbAuditDecomposition:      "qwen3:32b",
+		VerbReconcileDecomposition:  "gemma4:31b",
+		VerbExecuteBead:             "gemma4:31b",
 		VerbMonitorExecution:        "mistral-small3.2:24b",
-		VerbAnalyzeExecution:        "gemma4:31b",
-		VerbCompressAnalysis:        "gemma4:31b",
+		VerbAnalyzeExecution:        "qwen3:32b",
+		VerbCompressAnalysis:        "mistral-small3.2:24b",
 		VerbAdjudicateNextExecution: "gemma4:31b",
-		VerbRevisePending:           "gemma4:31b",
-		VerbRefineTestsWrite:        "gemma4:31b",         // writer
-		VerbRefineTestsCritique:     "mistral-small3.2:24b", // critic
-		VerbRefineTestsJudge:        "gemma4:31b",         // judge
+		VerbRevisePending:           "qwen3:32b",
+		VerbRefineTestsWrite:        "gemma4:31b",
+		VerbRefineTestsCritique:     "qwen3:32b",
+		VerbRefineTestsJudge:        "gemma4:31b",
 	}
 
 	// Validate constraints before writing anything.

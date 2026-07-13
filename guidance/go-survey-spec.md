@@ -26,8 +26,8 @@ then Piece, Color, and CastlingRights must each appear as a type declaration in 
 Write `var templates *template.Template`, not `vartemplates *template.Template`.
 The `var` keyword and the variable name are always separated by a space.
 
-**Compile-time assertions (api_check_test.go):**
-The api_check_test.go file locks exported function signatures at compile time using
+**Compile-time assertions (do_not_use_this_test.go):**
+The do_not_use_this_test.go file locks exported function signatures at compile time using
 package-level blank-identifier assignments:
 
   var _ func(n int) (int, error) = Fib

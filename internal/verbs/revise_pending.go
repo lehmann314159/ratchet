@@ -175,12 +175,21 @@ func (h *RevisePending) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJ
 			return fmt.Errorf("marshal updated bead %d: %w", p.beadID, err)
 		}
 
+		// Bead-wide max, not p.revNum+1 — a bead can have been rewind-bead'd while
+		// still pending (current_revision_id reset to 1, but higher-numbered stale
+		// revisions remain in the table), which would otherwise produce a collision.
+		var maxRevNum int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COALESCE(MAX(revision_number), 0) FROM bead_revisions WHERE bead_id = ?`, p.beadID,
+		).Scan(&maxRevNum); err != nil {
+			return fmt.Errorf("load max revision number for bead %d: %w", p.beadID, err)
+		}
 		res, err := tx.ExecContext(ctx, `
 			INSERT INTO bead_revisions
 			  (project_id, bead_id, revision_number, full_text,
 			   execution_budget, monitor_override, created_by_verb, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			job.ProjectID, p.beadID, p.revNum+1, string(newFullText),
+			job.ProjectID, p.beadID, maxRevNum+1, string(newFullText),
 			p.execBudget, p.monitorOverride, db.VerbRevisePending, now)
 		if err != nil {
 			return fmt.Errorf("insert revised bead_revision for bead %d: %w", p.beadID, err)

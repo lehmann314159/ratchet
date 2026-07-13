@@ -587,6 +587,15 @@ func buildAdjudicateUserMsg(bead *beadState, revLog []revisionEntry, mechanicalF
 // the failure category ANALYZE_EXECUTION reports on subsequent attempts."
 // Test-ID correspondence is the primary signal.
 func buildDiffSignal(ctx context.Context, d *db.DB, beadID int64) (string, error) {
+	// Restrict to the current lineage — otherwise a rewound bead's diff signal
+	// keeps citing pre-rewind attempts (e.g. Ko-rule failures against a test
+	// file that no longer exists) as if they were still relevant. See
+	// currentLineageRevisionIDs.
+	lineageIDs, err := currentLineageRevisionIDs(ctx, d, beadID)
+	if err != nil {
+		return "(no execution history yet)", nil
+	}
+
 	rows, err := d.QueryContext(ctx, `
 		SELECT e.id, e.termination_cause, a.mechanical_findings,
 		       e.bead_revision_id, e.ended_at
@@ -610,6 +619,9 @@ func buildDiffSignal(ctx context.Context, d *db.DB, beadID int64) (string, error
 		var r execRow
 		if err := rows.Scan(&r.ExecID, &r.TerminationCause, &r.Findings, &r.RevID, &r.EndedAt); err != nil {
 			return "", err
+		}
+		if !lineageIDs[r.RevID] {
+			continue
 		}
 		execs = append(execs, r)
 	}
@@ -763,14 +775,17 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 		if atCap, err := h.atExecutionCap(ctx, tx, job.ProjectID, beadID, now, job.ID); err != nil || atCap {
 			return err
 		}
-		// Write a new bead_revision for the revised spec.
+		// Write a new bead_revision for the revised spec. Use the bead-wide max,
+		// not the current revision's number + 1: after rewind-bead resets
+		// current_revision_id back to revision 1, a naive current+1 collides with
+		// the pre-rewind revision 2 that's still in the table (see sameRevisionResumeNote
+		// commit history — rewound beads keep their old revisions for audit purposes,
+		// they're just no longer current).
 		var currentRevNum int
 		if err := tx.QueryRowContext(ctx, `
-			SELECT br.revision_number FROM beads b
-			JOIN bead_revisions br ON br.id = b.current_revision_id
-			WHERE b.id = ?`, beadID,
+			SELECT COALESCE(MAX(revision_number), 0) FROM bead_revisions WHERE bead_id = ?`, beadID,
 		).Scan(&currentRevNum); err != nil {
-			return fmt.Errorf("load current revision number: %w", err)
+			return fmt.Errorf("load max revision number: %w", err)
 		}
 
 		// Clamp execution_budget to at least the project default so ADJUDICATE
@@ -822,14 +837,13 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 		}
 		// Load the current bead revision so we can copy its spec and delete its test files.
 		var currentFullText string
-		var currentRevNum int
 		var currentBudget int
 		var currentMonitor string
 		if err := tx.QueryRowContext(ctx, `
-			SELECT br.full_text, br.revision_number, br.execution_budget, br.monitor_override
+			SELECT br.full_text, br.execution_budget, br.monitor_override
 			FROM beads b JOIN bead_revisions br ON br.id = b.current_revision_id
 			WHERE b.id = ?`, beadID,
-		).Scan(&currentFullText, &currentRevNum, &currentBudget, &currentMonitor); err != nil {
+		).Scan(&currentFullText, &currentBudget, &currentMonitor); err != nil {
 			return fmt.Errorf("load current bead for test_reject: %w", err)
 		}
 		var currentSpec ParsedBead
@@ -849,13 +863,22 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 			"with incorrect assertions. The test files have been deleted. Rewrite them with the " +
 			"following corrections applied:\n\n" + out.TestRejectionGuidance + "\n\n" +
 			currentSpec.FullText
+		// Bead-wide max, not currentRevNum+1 — see the execute_revised branch above
+		// for why (rewind-bead can leave a lower current revision number in place
+		// while higher-numbered stale revisions remain in the table).
+		var maxRevNum int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COALESCE(MAX(revision_number), 0) FROM bead_revisions WHERE bead_id = ?`, beadID,
+		).Scan(&maxRevNum); err != nil {
+			return fmt.Errorf("load max revision number: %w", err)
+		}
 		fullText, _ := json.Marshal(revisedSpec)
 		res, err := tx.ExecContext(ctx, `
 			INSERT INTO bead_revisions
 			  (project_id, bead_id, revision_number, full_text,
 			   execution_budget, monitor_override, created_by_verb, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			job.ProjectID, beadID, currentRevNum+1, string(fullText),
+			job.ProjectID, beadID, maxRevNum+1, string(fullText),
 			currentBudget, currentMonitor, db.VerbAdjudicateNextExecution, now)
 		if err != nil {
 			return fmt.Errorf("insert test_reject bead_revision: %w", err)
@@ -951,6 +974,7 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 			return fmt.Errorf("mark bead succeeded: %w", err)
 		}
 		report.WriteBead(ctx, tx, h.folderPath, beadID, "succeeded")
+		regenerateAPICheckTest(ctx, tx, job.ProjectID, h.folderPath)
 
 		var pendingCount int
 		if err := tx.QueryRowContext(ctx,
@@ -978,6 +1002,27 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 		return err
 	}
 	return nil
+}
+
+// regenerateAPICheckTest re-derives apiCheckTestFilename from the immutable
+// SURVEY_SPEC manifest after every bead success. writeAPICheckTest's output
+// depends only on that manifest, so this is idempotent by construction — it
+// self-heals apiCheckTestFilename back to pure compile-time assertions if
+// anything (a stray write, a future bug) ever pollutes it with hand-written
+// content, regardless of the source. Best-effort: a Go-only file, and not
+// worth failing bead completion over, so errors are logged and swallowed.
+func regenerateAPICheckTest(ctx context.Context, tx *sql.Tx, projectID int64, folderPath string) {
+	if _, err := os.Stat(filepath.Join(folderPath, apiCheckTestFilename)); os.IsNotExist(err) {
+		return // not a Go project (or scaffolding hasn't run) — nothing to heal.
+	}
+	manifest, err := latestSurveyManifestTx(ctx, tx, projectID)
+	if err != nil {
+		slog.Warn("regenerateAPICheckTest: load manifest failed", "project_id", projectID, "error", err)
+		return
+	}
+	if err := writeAPICheckTest(manifest.Package, folderPath, manifest.Files); err != nil {
+		slog.Warn("regenerateAPICheckTest: write failed", "project_id", projectID, "error", err)
+	}
 }
 
 // atExecutionCap returns true if the bead has reached the project's

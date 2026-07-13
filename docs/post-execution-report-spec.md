@@ -372,7 +372,7 @@ package main
 
 ...
 
-### api_check_test.go
+### do_not_use_this_test.go
 
 ...
 

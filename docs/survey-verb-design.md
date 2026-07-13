@@ -3,7 +3,7 @@
 ## Motivation
 
 The layout bead's role is to create stub files that establish the project's file structure,
-type definitions, and API contract (via `api_check_test.go`). In practice, the layout bead
+type definitions, and API contract (via `do_not_use_this_test.go`). In practice, the layout bead
 frequently over-implements: given a design doc that specifies exact types and function
 signatures, the execute model writes full implementations rather than stubs. Later beads
 then find the work already done and do nothing, producing incomplete or incorrect results.
@@ -100,7 +100,7 @@ A JSON file manifest:
   "files": [
     { "path": "go.mod",            "content": "module othello\n\ngo 1.22\n" },
     { "path": "game.go",           "content": "package main\n\n..." },
-    { "path": "api_check_test.go", "content": "package main\n\nimport ...\n\nvar _ ..." }
+    { "path": "do_not_use_this_test.go", "content": "package main\n\nimport ...\n\nvar _ ..." }
   ]
 }
 ```
@@ -108,8 +108,8 @@ A JSON file manifest:
 ### Files included
 
 SURVEY must produce stubs for every implementation file the project needs, plus `go.mod`
-and `api_check_test.go`. It must not produce any behavioral test files (`*_test.go` files
-other than `api_check_test.go`). Behavioral tests are written by implementation beads.
+and `do_not_use_this_test.go`. It must not produce any behavioral test files (`*_test.go` files
+other than `do_not_use_this_test.go`). Behavioral tests are written by implementation beads.
 
 ### Stub-purity rule
 
@@ -133,7 +133,7 @@ func NewGame() *Game { return &Game{} } // zero-value struct
 func Score() (int, int) { return 0, 0 }
 ```
 
-`api_check_test.go` is exempt from the stub-purity check (it contains `var _` declarations,
+`do_not_use_this_test.go` is exempt from the stub-purity check (it contains `var _` declarations,
 not function bodies with logic).
 
 ---
@@ -164,16 +164,16 @@ is absent, fall back to the base language file.
 
 **`go-survey.md`** (new runtime file, Go-specific SURVEY guidance):
 - Go stub body syntax and zero-value return examples
-- `api_check_test.go` format: package declaration, required imports, `var _` assertions
+- `do_not_use_this_test.go` format: package declaration, required imports, `var _` assertions
   for every exported function and package-level variable, blank-identifier assertion syntax
 - `go.mod` format: module line + go version
 - Stale file note: on retry, overwrite existing files rather than appending
 
 **`go.md`** (existing runtime file, updated for EXECUTE):
-- Remove: "Compile-time assertions" section — EXECUTE never writes `api_check_test.go`
+- Remove: "Compile-time assertions" section — EXECUTE never writes `do_not_use_this_test.go`
 - Remove: `go mod init` command — EXECUTE never creates `go.mod`
 - Add: "Stub files already exist on disk — implement logic into them; do not recreate stubs"
-- Add: "`api_check_test.go` is present and read-only — never modify it"
+- Add: "`do_not_use_this_test.go` is present and read-only — never modify it"
 
 **EXECUTE generic system prompt** (in `execution/prompts.go`):
 - No layout-bead-specific content exists here; no changes needed
@@ -204,10 +204,10 @@ via a `verbSkipsModelWarmup(verb string) bool` guard.
 
 1. **File presence**: Every file listed in the manifest exists on disk after
    materialization.
-2. **No behavioral test files**: No `*_test.go` files other than `api_check_test.go` are
+2. **No behavioral test files**: No `*_test.go` files other than `do_not_use_this_test.go` are
    present in the project folder.
 3. **Compile check**: `go test -c -o /dev/null ./...` exits 0.
-4. **api_check assertion check**: `grep -q '^var _' api_check_test.go`.
+4. **api_check assertion check**: `grep -q '^var _' do_not_use_this_test.go`.
 5. **Stub-purity check**: AST walk of all implementation `.go` files. Each function
    containing a blacklisted node is reported with file name, function name, and violation
    type (e.g., `handlers.go: InitTemplates contains ast.RangeStmt`).
@@ -336,7 +336,7 @@ Go AST parsing of the materialized files. Extracts:
   blocks)
 - All package-level variables with declared types, annotated with source file
 - All exported functions with exact signatures, grouped by file
-- Full content of `api_check_test.go`
+- Full content of `do_not_use_this_test.go`
 - Full stub content of every implementation file
 
 ### Survey document schema
@@ -359,7 +359,7 @@ package: <package name>
 ## Package-Level Variables
 [complete Go source for all package-level var declarations, annotated with source file]
 
-## api_check_test.go
+## do_not_use_this_test.go
 [full file content]
 
 ## File Contents
@@ -383,7 +383,7 @@ DECOMPOSE receives the design doc and the survey document. Its behavior changes 
 ways:
 
 1. **No layout bead.** DECOMPOSE does not produce a layout bead. The stub files already
-   exist on disk and `api_check_test.go` is already correct.
+   exist on disk and `do_not_use_this_test.go` is already correct.
 
 2. **Survey doc is ground truth.** For types, function signatures, package-level variables,
    and api_check assertions, DECOMPOSE treats the survey document as authoritative — not the
@@ -415,7 +415,7 @@ runtime mode detection is needed. The only changes remove obsolete layout-bead r
   beads; file overlap is always flagged.
 - **`buildAuditUserMsg`** — remove `[Layout Bead]` label from `beads[0]`. All beads are
   labeled by position only.
-- **`goMechanicalBeadChecks`** — remove the `i == 0` check requiring `api_check_test.go`
+- **`goMechanicalBeadChecks`** — remove the `i == 0` check requiring `do_not_use_this_test.go`
   in the first bead's output_files. VERIFY owns that check now.
 
 ---
@@ -423,7 +423,7 @@ runtime mode detection is needed. The only changes remove obsolete layout-bead r
 ## ANALYZE Changes
 
 `analyze_execution.go` contains `checkLayoutBeadOutput`, a short-circuit path that fires
-when a bead that owns `api_check_test.go` is missing or malformed assertions. In the new
+when a bead that owns `do_not_use_this_test.go` is missing or malformed assertions. In the new
 pipeline, VERIFY owns this check before any execution happens. Remove `checkLayoutBeadOutput`
 and its call site from `AnalyzeExecution.Run()`.
 

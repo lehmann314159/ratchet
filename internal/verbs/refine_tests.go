@@ -106,10 +106,13 @@ func loadRefineContext(ctx context.Context, d *db.DB, job *db.HandoffJob) (
 	}
 	implContext = implBuf.String()
 
-	// Collect current test file content.
+	// Collect current test file content. apiCheckTestFilename is mechanically
+	// owned by writeAPICheckTest (regenerated from the SURVEY_SPEC manifest,
+	// see scaffold_go.go) — it holds compile-time `var _ = X` assertions only,
+	// never hand-written behavioral tests, so REFINE_TESTS must not target it.
 	var testBuf strings.Builder
 	for _, f := range bead.OutputFiles {
-		if !strings.HasSuffix(f, "_test.go") {
+		if !strings.HasSuffix(f, "_test.go") || filepath.Base(f) == apiCheckTestFilename {
 			continue
 		}
 		testFilePaths = append(testFilePaths, f)

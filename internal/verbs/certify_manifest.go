@@ -265,9 +265,9 @@ func writeSurveyDoc(folderPath string, manifest *SurveySpecOutput) error {
 		sb.WriteString("\n```\n\n")
 	}
 
-	// api_check_test.go — read from the scaffolded file on disk.
-	if apiContent, err := os.ReadFile(filepath.Join(folderPath, "api_check_test.go")); err == nil {
-		sb.WriteString("## api_check_test.go\n\n```go\n")
+	// apiCheckTestFilename — read from the scaffolded file on disk.
+	if apiContent, err := os.ReadFile(filepath.Join(folderPath, apiCheckTestFilename)); err == nil {
+		sb.WriteString("## " + apiCheckTestFilename + "\n\n```go\n")
 		sb.WriteString(string(apiContent))
 		sb.WriteString("\n```\n\n")
 	}

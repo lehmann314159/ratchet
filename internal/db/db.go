@@ -134,6 +134,54 @@ func (db *DB) applyTableMigrations() error {
 	if err := db.migrateTestRefinementsVerbs(); err != nil {
 		return err
 	}
+	if err := db.migrateAdjudicationsDecision(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// migrateAdjudicationsDecision updates adjudications' decision CHECK constraint
+// to include 'test_reject' and 're_refine'. Those decisions were added to
+// ADJUDICATE_NEXT_EXECUTION's application logic (Validate already accepts
+// them) well before this migration existed, so any live database still has
+// the original 4-value constraint — every attempt where the model actually
+// chose test_reject or re_refine silently failed at commit (CHECK constraint
+// violation), rolling back the whole transaction and forcing a pointless
+// retry. No other table has a foreign key into adjudications, so this is a
+// plain rename+recreate+copy+drop, no legacy_alter_table needed.
+func (db *DB) migrateAdjudicationsDecision() error {
+	var createSQL string
+	if err := db.QueryRow(
+		`SELECT COALESCE(sql, '') FROM sqlite_master WHERE type='table' AND name='adjudications'`,
+	).Scan(&createSQL); err != nil {
+		return fmt.Errorf("query adjudications schema: %w", err)
+	}
+	if strings.Contains(createSQL, "re_refine") {
+		return nil
+	}
+	stmts := []string{
+		`ALTER TABLE adjudications RENAME TO _adjudications_old`,
+		`CREATE TABLE adjudications (
+		  id                        INTEGER PRIMARY KEY,
+		  project_id                INTEGER NOT NULL REFERENCES projects(id),
+		  bead_id                   INTEGER NOT NULL REFERENCES beads(id),
+		  execution_id              INTEGER NOT NULL REFERENCES executions(id),
+		  trend                     TEXT    NOT NULL CHECK (trend IN ('same', 'narrower', 'unrelated', 'not_applicable')),
+		  bead_spec_fit             TEXT    NOT NULL CHECK (bead_spec_fit IN ('bead_problem', 'execution_capability_problem', 'not_applicable')),
+		  reasoning_text            TEXT    NOT NULL,
+		  attempt_budget_cost       REAL    NOT NULL,
+		  monitor_escalation_status INTEGER NOT NULL,
+		  decision                  TEXT    NOT NULL CHECK (decision IN ('execute_as_is', 'execute_revised', 'full_stop', 'declare_success', 'test_reject', 're_refine')),
+		  created_at                TIMESTAMP NOT NULL
+		)`,
+		`INSERT INTO adjudications SELECT * FROM _adjudications_old`,
+		`DROP TABLE _adjudications_old`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("migrate adjudications (%s): %w", truncate(stmt, 40), err)
+		}
+	}
 	return nil
 }
 
