@@ -25,6 +25,10 @@ func (h *AuditDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.Clien
 	if err != nil {
 		return "", err
 	}
+	history, err := loadDebateHistory(ctx, d, job.ProjectID)
+	if err != nil {
+		return "", err
+	}
 	model, err := loadVerbModel(ctx, d, job.ProjectID, db.VerbAuditDecomposition)
 	if err != nil {
 		return "", err
@@ -34,7 +38,7 @@ func (h *AuditDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.Clien
 	if err != nil {
 		return "", err
 	}
-	userMsg := buildAuditUserMsg(doc, beads)
+	userMsg := buildAuditUserMsg(doc, beads, history)
 	raw, err := oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: auditDecompositionSystemPrompt(detectLang(project.FolderPath, beadOutputFiles(beads)))},
 		{Role: "user", Content: userMsg},
@@ -45,7 +49,7 @@ func (h *AuditDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.Clien
 	return injectMechanicalFindings(raw, project.FolderPath, beads), nil
 }
 
-func buildAuditUserMsg(doc string, beads []beadState) string {
+func buildAuditUserMsg(doc string, beads []beadState, history []debateRound) string {
 	var sb strings.Builder
 	sb.WriteString("## Design Document\n\n")
 	sb.WriteString(doc)
@@ -64,6 +68,22 @@ func buildAuditUserMsg(doc string, beads []beadState) string {
 			sb.WriteString("\n")
 		}
 	}
+
+	if len(history) > 0 {
+		sb.WriteString("## Previous Debate History\n\n")
+		sb.WriteString("You raised these findings in earlier rounds and RECONCILE already responded. ")
+		sb.WriteString("Do not re-raise a finding a prior round disputed unless the decomposition shown above still ")
+		sb.WriteString("has the disputed defect — check the current bead text/output_files/exit_criteria before repeating a claim.\n\n")
+		for _, r := range history {
+			fmt.Fprintf(&sb, "### Round %d (outcome: %s)\n\n", r.RoundNumber, r.Outcome)
+			sb.WriteString("**Your Critique:**\n\n")
+			sb.WriteString(r.CritiqueText)
+			sb.WriteString("\n\n**Reconcile Response:**\n\n")
+			sb.WriteString(formatReconcileResponses(r.Reconciliation))
+			sb.WriteString("\n\n")
+		}
+	}
+
 	return sb.String()
 }
 
