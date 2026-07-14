@@ -1,6 +1,7 @@
 package verbs
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -210,6 +211,106 @@ func TestDeriveTestFileName(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestForwardFileReferenceChecks(t *testing.T) {
+	t.Run("checkers-v6 bug: earlier bead references a later bead's subdirectory asset", func(t *testing.T) {
+		beads := []ParsedBead{
+			{
+				Title:        "http-handlers",
+				FullText:     `Implement InitServer: templates, err = template.ParseFiles("templates/index.html", "templates/board.html")`,
+				OutputFiles:  []string{"handlers.go", "main.go"},
+				ExitCriteria: []string{"go test -run TestHandlers ."},
+			},
+			{
+				Title:        "templates",
+				FullText:     "Create the HTML templates.",
+				OutputFiles:  []string{"templates/index.html", "templates/board.html"},
+				ExitCriteria: []string{"go build ./..."},
+			},
+		}
+		got := forwardFileReferenceChecks(beads)
+		if len(got) != 1 {
+			t.Fatalf("expected 1 violation, got %d: %v", len(got), got)
+		}
+		if !strings.Contains(got[0], "http-handlers") || !strings.Contains(got[0], "templates/index.html") || !strings.Contains(got[0], "templates") {
+			t.Errorf("violation message missing expected content: %q", got[0])
+		}
+	})
+
+	t.Run("correct order — templates bead first, no violation", func(t *testing.T) {
+		beads := []ParsedBead{
+			{
+				Title:        "templates",
+				FullText:     "Create the HTML templates.",
+				OutputFiles:  []string{"templates/index.html", "templates/board.html"},
+				ExitCriteria: []string{"go build ./..."},
+			},
+			{
+				Title:        "http-handlers",
+				FullText:     `Implement InitServer: templates, err = template.ParseFiles("templates/index.html", "templates/board.html")`,
+				OutputFiles:  []string{"handlers.go", "main.go"},
+				ExitCriteria: []string{"go test -run TestHandlers ."},
+			},
+		}
+		got := forwardFileReferenceChecks(beads)
+		if len(got) != 0 {
+			t.Errorf("expected no violations when the dependency bead runs first, got %v", got)
+		}
+	})
+
+	t.Run("bare same-level filename reference is not flagged (avoids false positives)", func(t *testing.T) {
+		beads := []ParsedBead{
+			{
+				Title:        "handlers",
+				FullText:     "As defined in main.go, the server starts on port 8080.",
+				OutputFiles:  []string{"handlers.go"},
+				ExitCriteria: []string{"go build ./..."},
+			},
+			{
+				Title:        "main",
+				FullText:     "Wire up the server.",
+				OutputFiles:  []string{"main.go"},
+				ExitCriteria: []string{"go build ./..."},
+			},
+		}
+		got := forwardFileReferenceChecks(beads)
+		if len(got) != 0 {
+			t.Errorf("bare filenames like main.go should not trigger the check, got %v", got)
+		}
+	})
+
+	t.Run("reference to an earlier or own bead's file is not flagged", func(t *testing.T) {
+		beads := []ParsedBead{
+			{
+				Title:        "templates",
+				FullText:     "Create templates/index.html.",
+				OutputFiles:  []string{"templates/index.html"},
+				ExitCriteria: []string{"go build ./..."},
+			},
+			{
+				Title:        "handlers",
+				FullText:     `Uses templates/index.html from the previous bead.`,
+				OutputFiles:  []string{"handlers.go"},
+				ExitCriteria: []string{"go build ./..."},
+			},
+		}
+		got := forwardFileReferenceChecks(beads)
+		if len(got) != 0 {
+			t.Errorf("referencing an earlier bead's own file should not be flagged, got %v", got)
+		}
+	})
+
+	t.Run("no beads reference any later file — no violations", func(t *testing.T) {
+		beads := []ParsedBead{
+			{Title: "a", FullText: "stuff", OutputFiles: []string{"a.go"}, ExitCriteria: []string{"go build ./..."}},
+			{Title: "b", FullText: "other stuff", OutputFiles: []string{"static/style.css"}, ExitCriteria: []string{"go build ./..."}},
+		}
+		got := forwardFileReferenceChecks(beads)
+		if len(got) != 0 {
+			t.Errorf("expected no violations, got %v", got)
+		}
+	})
 }
 
 func TestExtractRunTestName(t *testing.T) {

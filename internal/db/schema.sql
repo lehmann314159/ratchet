@@ -52,13 +52,16 @@ CREATE TABLE IF NOT EXISTS bead_revisions (
 );
 
 -- Full text on every round. A 2-round cap means this is not unbounded.
+-- 'redecompose' rows are written directly by DECOMPOSE_SPEC.Commit (never by
+-- RECONCILE) when forwardFileReferenceChecks finds a bead-ordering violation;
+-- reconciliation is always '' for those rows since no reconciliation ran.
 CREATE TABLE IF NOT EXISTS audit_reconcile_rounds (
   id             INTEGER PRIMARY KEY,
   project_id     INTEGER NOT NULL REFERENCES projects(id),
   round_number   INTEGER NOT NULL,
   critique_text  TEXT    NOT NULL,
   reconciliation TEXT    NOT NULL,
-  outcome        TEXT    NOT NULL CHECK (outcome IN ('converged', 'disagreed_continuing', 'escalated')),
+  outcome        TEXT    NOT NULL CHECK (outcome IN ('converged', 'disagreed_continuing', 'escalated', 'redecompose')),
   created_at     TIMESTAMP NOT NULL
 );
 

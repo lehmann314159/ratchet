@@ -104,6 +104,64 @@ func goMechanicalBeadChecks(beads []beadState) []AuditFinding {
 	return findings
 }
 
+// forwardFileReferenceChecks returns a human-readable violation message for
+// each bead whose full_text or exit_criteria reference a subdirectory asset
+// path (e.g. "templates/index.html") that only a LATER bead creates — i.e.
+// the bead cannot structurally pass no matter how many times it is executed,
+// because the file it depends on won't exist until after it runs. Checked
+// directly against DECOMPOSE_SPEC's own output before any bead row is
+// written, so DecomposeSpec.Commit can reject and retry with feedback
+// instead of wasting an execute→adjudicate cycle that can never succeed.
+//
+// Restricted to paths containing "/" (subdirectory assets like templates or
+// static files) rather than bare filenames: a bare name like "main.go" is a
+// common word that shows up incidentally in unrelated prose constantly,
+// while a distinctive subdirectory path is rarely mentioned except as a real
+// dependency. This trades recall (same-directory forward references go
+// undetected) for near-zero false positives.
+//
+// Real-world case this catches: checkers-v6 bead "http-handlers" called
+// template.ParseFiles("templates/index.html", "templates/board.html") but
+// those files were owned by the "templates" bead, ordered after it — three
+// full execute cycles were spent on nil-pointer panics before the actual
+// problem (bead ordering, not execution capability) was found.
+func forwardFileReferenceChecks(beads []ParsedBead) []string {
+	var violations []string
+	for i, b := range beads {
+		owned := map[string]bool{}
+		for _, o := range beads[:i+1] {
+			for _, f := range o.OutputFiles {
+				owned[f] = true
+			}
+		}
+		for j := i + 1; j < len(beads); j++ {
+			for _, laterFile := range beads[j].OutputFiles {
+				if !strings.Contains(laterFile, "/") || owned[laterFile] {
+					continue
+				}
+				if strings.Contains(b.FullText, laterFile) || containsSubstring(b.ExitCriteria, laterFile) {
+					violations = append(violations, fmt.Sprintf(
+						"bead %q references %q, which is only created by the later bead %q — "+
+							"reorder the decomposition so %q precedes %q, or move %q's file creation into %q.",
+						b.Title, laterFile, beads[j].Title, beads[j].Title, b.Title, laterFile, b.Title))
+					break
+				}
+			}
+		}
+	}
+	return violations
+}
+
+// containsSubstring reports whether needle appears in any element of haystack.
+func containsSubstring(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if strings.Contains(s, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 // applyMechanicalBeadFixes corrects structural violations in a ParsedBead before
 // it is written to the DB, so the problem never reaches AUDIT or RECONCILE.
 // Returns true if any fix was applied (caller may want to log this).

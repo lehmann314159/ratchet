@@ -137,6 +137,47 @@ func (db *DB) applyTableMigrations() error {
 	if err := db.migrateAdjudicationsDecision(); err != nil {
 		return err
 	}
+	if err := db.migrateAuditReconcileRoundsOutcome(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// migrateAuditReconcileRoundsOutcome updates audit_reconcile_rounds' outcome
+// CHECK constraint to include 'redecompose', written by DECOMPOSE_SPEC.Commit
+// when forwardFileReferenceChecks finds a bead-ordering violation (a bead
+// depends on a file only a later bead creates — see mechanical_checks.go).
+// No other table has a foreign key into audit_reconcile_rounds, so this is a
+// plain rename+recreate+copy+drop, no legacy_alter_table needed.
+func (db *DB) migrateAuditReconcileRoundsOutcome() error {
+	var createSQL string
+	if err := db.QueryRow(
+		`SELECT COALESCE(sql, '') FROM sqlite_master WHERE type='table' AND name='audit_reconcile_rounds'`,
+	).Scan(&createSQL); err != nil {
+		return fmt.Errorf("query audit_reconcile_rounds schema: %w", err)
+	}
+	if strings.Contains(createSQL, "redecompose") {
+		return nil
+	}
+	stmts := []string{
+		`ALTER TABLE audit_reconcile_rounds RENAME TO _audit_reconcile_rounds_old`,
+		`CREATE TABLE audit_reconcile_rounds (
+		  id             INTEGER PRIMARY KEY,
+		  project_id     INTEGER NOT NULL REFERENCES projects(id),
+		  round_number   INTEGER NOT NULL,
+		  critique_text  TEXT    NOT NULL,
+		  reconciliation TEXT    NOT NULL,
+		  outcome        TEXT    NOT NULL CHECK (outcome IN ('converged', 'disagreed_continuing', 'escalated', 'redecompose')),
+		  created_at     TIMESTAMP NOT NULL
+		)`,
+		`INSERT INTO audit_reconcile_rounds SELECT * FROM _audit_reconcile_rounds_old`,
+		`DROP TABLE _audit_reconcile_rounds_old`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("migrate audit_reconcile_rounds (%s): %w", truncate(stmt, 40), err)
+		}
+	}
 	return nil
 }
 
