@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS beads (
   id                  INTEGER PRIMARY KEY,
   project_id          INTEGER NOT NULL REFERENCES projects(id),
   status              TEXT    NOT NULL CHECK (status IN ('pending', 'executing', 'succeeded', 'full_stopped')),
-  current_revision_id INTEGER REFERENCES bead_revisions(id)
+  current_revision_id INTEGER REFERENCES bead_revisions(id),
+  rewound_at          TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS bead_revisions (

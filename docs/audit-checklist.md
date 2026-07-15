@@ -540,42 +540,133 @@ in July 4–10, all eventually recovered via what appears to be manual intervent
 rather than the built-in retry path). No fixes applied — pending user decision, per
 standing practice ([[feedback_propose_before_apply]]).
 
-## Stage 5 — Analysis & judgment: ANALYZE_EXECUTION / COMPRESS_ANALYSIS / ADJUDICATE_NEXT_EXECUTION
+## Stage 5 — Analysis & judgment: ANALYZE_EXECUTION / COMPRESS_ANALYSIS / ADJUDICATE_NEXT_EXECUTION — AUDITED 2026-07-14
 
 The largest and highest-stakes stage (`adjudicate_next_execution.go` alone is 1166
-lines). One real bug found and fixed here today (`declare_success` trusting narrative
-over mechanical ground truth) — audit the rest of this file with the same scrutiny,
-not just the one code path that was already fixed.
+lines). One real bug had already been found and fixed here before this stage's audit
+(`declare_success` trusting narrative over mechanical ground truth) — the rest of the
+file got the same scrutiny this session, not just that one code path.
 
-- [ ] `internal/verbs/analyze_execution.go` — mechanical findings generation,
-      `checkGoTestCompilation`/`checkGoTestOutput`/`checkUndeclaredFiles`/etc.
-      **Known, not-yet-fixed display bug**: `internal/trace/findings.go`'s "All
-      Commands Run" section suppresses stdout whenever `ExitCode == 0` — this is what
-      let a `cmd && echo Pass || echo Fail` self-check (always exits 0) hide its own
-      "Fail" output from the analyzer model. The `declare_success` gate makes this
-      moot for that one decision path; it's still live for every other decision this
-      stage's analyzer narrative feeds.
-- [ ] `internal/verbs/compress_analysis.go` — history compression, NEW/RECURRING/
-      [RESOLVED] tagging
-- [ ] `internal/verbs/adjudicate_next_execution.go` — every decision branch
-      (`execute_as_is`, `execute_revised`, `test_reject`, `re_refine`, `full_stop`,
-      `declare_success`), every note-injection helper (`vacuousPassNote`,
-      `orientationOnlyNote`, `partialProgressNote`, `stubImplNote`,
-      `testFirstCompleteNote`, `missingPathNote`, `recurringTestFailureNote`).
-      **Known, not-yet-fixed finding**: the `recurringTestFailureNote` fast path
-      concluded "the test assertions are logically impossible" on a recurring
-      failure in the checkers-v6 incident when the real cause was a Go template
-      scoping bug — it never checks *why* a test keeps failing, so it can't
-      distinguish "implementation produces wrong values" from "implementation
-      throws a runtime/template error." General finding, not yet fixed.
-      **New code from today, not yet independently audited**:
-      `verifyExitCriteriaMechanically` and its wiring into the `declare_success`
-      case — does the `atExecutionCap` interaction actually surface as an escalation
-      correctly when a bead is out of attempts and its own exit criteria still fail?
-      (Logic looks right, unit-tested in isolation, but never exercised end-to-end
-      against a bead that actually exhausts its attempt cap this way.)
-- [ ] Cross-check: does `regenerateAPICheckTest`'s self-healing interact badly with
-      anything the `declare_success` gate now does earlier in the same `Commit` call?
+- [x] `internal/verbs/analyze_execution.go` — read in full. No new bugs found in the
+      mechanical-findings generation itself. **Known, not-yet-fixed display bug,
+      confirmed still present**: `internal/trace/findings.go`'s "All Commands Run"
+      section suppresses stdout whenever `ExitCode == 0` — this is what let a
+      `cmd && echo Pass || echo Fail` self-check (always exits 0) hide its own "Fail"
+      output from the analyzer model. The `declare_success` mechanical gate makes
+      this moot for that one decision path; it's still live for every other decision
+      this stage's analyzer narrative feeds. Left unfixed — general finding, not
+      re-chased this session. **Minor, lower-confidence note (not fixed, not verified
+      live)**: `checkUndeclaredFiles`'s caller at line 73 swallows
+      `loadCurrentBeads`'s error (`allBeads, _ := ...`); on a DB error there, every
+      file in the project folder would be flagged "undeclared" in the findings text.
+      Requires a transient DB failure at exactly that moment to trigger — flagged for
+      visibility, not treated as a confirmed bug.
+- [x] `internal/verbs/compress_analysis.go` — read in full (`sanitizeJSON`,
+      `escapeControlCharsInStrings`, `injectResolvedTags`, `synthesizeMinimalEntry`).
+      Traced the two-pass JSON sanitizer and the RESOLVED-tag substring matching
+      against `checkGoTestOutput`'s real `go test` output format — consistent, no
+      defeat scenario found.
+- [x] `internal/verbs/adjudicate_next_execution.go` — every decision branch and every
+      note-injection helper read in full. Two confirmed bugs, both reproduced with
+      throwaway tests before fixing, both now fixed, tested, and left uncommitted:
+
+  **Bug 1 — `checkConsistency` is negation-blind, producing false-positive
+  "malformed" rejections of correct ADJUDICATE output.** It flags a contradiction
+  whenever a "counterpart phrase" appears anywhere in the reasoning text, with no
+  check for negation. A model correctly declaring `execution_capability_problem`
+  while reasoning *"This is not a spec problem, it's clearly an execution capability
+  problem..."* was rejected, because `"spec problem"` is a literal substring of
+  `"not a spec problem"`. The code had already patched one instance of exactly this
+  shape (a bare `"bead specification is"` phrase was deleted with a comment
+  explaining the false-positive it caused) but that was a point deletion, not a
+  general fix — the same defeat pattern remained live for most of the ~20 other
+  phrases across both `bead_problem`/`execution_capability_problem` lists.
+  Reproduced with a standalone test before fixing. Not yet observed live (checked
+  `handoff_attempts` in the live DB: zero `consistency check failed` rows exist),
+  but trivially reachable by construction — same bar as other stages' findings.
+  **FIXED 2026-07-14**: added `firstUnnegatedMatch`/`containsNegationCue` — before
+  flagging a matched phrase, scans the 24 characters immediately preceding it for a
+  negation cue (`not `, `no `, `never `, contractions like `isn't`/`doesn't`/`can't`,
+  etc.) and skips the match if one is found. Verified the original true-positive
+  fixture (Exp-5 GLM contradiction, unnegated "the specification is clear") still
+  fires correctly. Test added: `TestAdjudicateConsistencyNegatedPhraseFixture`
+  (`adjudicate_smoke_test.go`), reproducing the exact false-positive found.
+
+  **Bug 2 (more severe) — the rewind-lineage filter (`currentLineage`) has been dead
+  code since the commit that introduced it, because a sibling fix in that same
+  commit eliminated its only detection signal.** `currentLineage` inferred a rewind
+  boundary from `revision_number` failing to exceed the running max in creation
+  order. But commit `4fafc23` (2026-07-13) — the *same* commit — also changed every
+  `bead_revisions` insert site (ADJUDICATE's `execute_revised`/`test_reject`,
+  REVISE_PENDING, RECONCILE's `applyFixes`) to number new revisions via a bead-wide
+  `MAX(revision_number)+1`, specifically to avoid numbering collisions with stale
+  post-rewind rows. Since `rewind-bead` itself never inserts a `bead_revisions` row
+  (confirmed by reading `internal/project/rewind.go`: it only repoints
+  `current_revision_id` back to revision 1's id), every revision inserted after a
+  rewind is guaranteed to have a `revision_number` strictly greater than any prior
+  row — the exact condition `currentLineage`'s loop requires to declare "not a
+  rewind boundary." Reproduced with a standalone test mirroring realistic post-fix
+  data: `currentLineage` returned all 4 rows (full pre-rewind history included)
+  instead of the intended 2. This directly explains the "ADJUDICATE lineage-leak
+  wrinkle" flagged as still-open in the goban-v2 project memory — root-caused here.
+  Net effect: ADJUDICATE and COMPRESS_ANALYSIS have been seeing the full pre-rewind
+  revision history and execution/analysis records as if still live for every rewound
+  bead since 2026-07-13 (confirmed 8 rewound beads exist in the live DB across
+  projects 86/87/88/90/91, though all predate the 07-13 fix so their *own* data
+  happens to still be filterable by the old heuristic — the exposure is to any
+  rewind from 07-13 onward, none of which has landed yet). **FIXED 2026-07-14**:
+  added a persisted `beads.rewound_at` TIMESTAMP column (schema.sql +
+  `columnMigrations`, migrates existing DBs automatically — verified against a copy
+  of the live `ratchet.db`). `rewind-bead` now sets it in the same `UPDATE` that
+  resets `current_revision_id`/`execution_attempts_override`. `loadBeadRevisionLog`
+  now loads it and `currentLineage` filters on `revision_number == 1 ||
+  created_at >= rewound_at` instead of the dead revision-number heuristic — durable
+  across any number of rewinds on the same bead (lifting the old "only catches the
+  first rewind" documented limitation too, since `rewound_at` is overwritten fresh
+  on every rewind rather than inferred from data written for an unrelated purpose).
+  Tests added: `internal/verbs/inputs_test.go` (new file) —
+  `TestCurrentLineageFiltersPostRewind`/`TestCurrentLineageNeverRewound` (pure-logic)
+  and `TestLoadBeadRevisionLogFiltersPostRewind` (end-to-end against a real
+  in-memory DB, seeding revisions through the same bead-wide `MAX+1` pattern and the
+  same rewind `UPDATE` shape production code uses).
+  **Known, not-yet-fixed finding (separate, general)**: the `recurringTestFailureNote`
+  fast path concludes "the test assertions are logically impossible" on a recurring
+  failure without checking *why* the test keeps failing — the checkers-v6 incident
+  (real cause was a Go template scoping bug, not an impossible assertion) shows it
+  can't distinguish "implementation produces wrong values" from "implementation
+  throws a runtime/template error." Not re-chased this session.
+- [x] Cross-check: `verifyExitCriteriaMechanically`'s wiring into `declare_success`
+      traced end-to-end against `atExecutionCap` — when the mechanical gate fails and
+      the bead is at its attempt cap, `atExecutionCap` correctly escalates the job
+      (same code path `execute_as_is`/`execute_revised`/`test_reject` already use);
+      when under cap, the bead is correctly reset to `pending` and re-enqueued. No
+      bug found; matches the existing unit test's claim, now also confirmed by trace.
+- [x] Cross-check: `regenerateAPICheckTest`'s self-healing runs *after* the
+      `declare_success` mechanical gate has already passed and after the bead is
+      marked `succeeded`, so it cannot invalidate a decision that already committed.
+      The only residual risk is generic disk/tx non-atomicity (a file write inside a
+      `Commit()` that isn't rolled back if a later statement in the same `Commit`
+      fails) — shared by every other `Commit()` in this codebase that does disk I/O
+      (`report.WriteBead`, `os.Remove` in `test_reject`, etc.), not specific to this
+      pairing. No bug found.
+- [x] Test coverage check (Method item 6): `analyze_execution.go` and
+      `compress_analysis.go` had **zero** dedicated tests before this session — same
+      pattern as other stages before their audits, left as-is since no bug was found
+      in either file's own logic. `adjudicate_next_execution.go` had
+      `adjudicate_next_execution_test.go` (`verifyExitCriteriaMechanically`) and
+      `adjudicate_smoke_test.go` (two `checkConsistency` fixtures — one true-positive,
+      one true-negative) but neither exercised the negation-blindness false-positive
+      or any rewind-lineage scenario; both gaps now closed by the tests added above.
+
+**Session log (2026-07-14):** Two real, confirmed-by-reproduction bugs found and
+fixed (negation-blind consistency check; dead rewind-lineage filter — the latter
+traced to an unintended interaction between two fixes in the same prior commit, and
+root-causing a previously-flagged-but-unexplained goban-v2 memory item). Both
+verified: standalone reproduction test before the fix, passing regression test after,
+plus a full `go build ./...`/`go vet ./...`/`go test ./...` pass and a live-DB
+migration dry-run (copied the real `ratchet-projects/ratchet.db`, ran a real compiled
+binary against it, confirmed `rewound_at` added cleanly with existing data intact).
+Left uncommitted pending user review, per standing practice.
 
 ## Stage 6 — Cross-bead handoff: REVISE_PENDING, rewind-bead, bead lifecycle
 

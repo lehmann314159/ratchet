@@ -273,6 +273,7 @@ type revisionEntry struct {
 	ExecutionBudget int
 	MonitorOverride string
 	CreatedByVerb   string
+	CreatedAt       string
 }
 
 // latestSurveyManifest returns the parsed output of the most recent completed
@@ -486,25 +487,30 @@ func loadPendingBeads(ctx context.Context, d *db.DB, projectID int64) ([]beadSta
 // still live, which is both misleading (a stale "current" spec gets treated
 // as authoritative) and bloats the prompt unnecessarily.
 //
-// There's no explicit lineage/parent column, but a rewind is detectable from
-// revision_number alone: in creation order, revision_number normally strictly
-// increases. Any row whose revision_number does not exceed the running max
-// marks a rewind boundary — the lineage restarted there. Revision 1 (the row
-// rewind-bead always resets current_revision_id back to) is kept regardless,
-// since it's simultaneously the last row of the old lineage and the first row
-// of the new one.
-//
-// Known limitation: this only catches a bead's first rewind. Once revision
-// numbers are bead-wide monotonic (see the MAX(revision_number)+1 inserts in
-// adjudicate_next_execution.go / revise_pending.go / reconcile_decomposition.go),
-// every post-rewind revision number exceeds the pre-rewind max, so a *second*
-// rewind on the same bead produces numbers that keep strictly increasing —
-// indistinguishable from never having been rewound at all. Detecting that
-// durably would need a persisted rewind marker (e.g. a timestamp column),
-// which this intentionally avoids for now.
+// The lineage boundary is tracked explicitly via beads.rewound_at, set by
+// rewind-bead. An earlier version of this function tried to infer the
+// boundary from revision_number alone (a row whose number doesn't exceed the
+// running max), but every bead_revisions insert site (ADJUDICATE's
+// execute_revised/test_reject, REVISE_PENDING, RECONCILE) numbers new
+// revisions via a bead-wide MAX(revision_number)+1 specifically to avoid
+// collisions with stale post-rewind rows — which means revision_number is
+// always strictly increasing across the whole history, rewinds included, and
+// the old heuristic could never actually fire. Found during the stage-5 audit
+// (2026-07-14): confirmed by reproduction that the old currentLineage always
+// returned the full, unfiltered history. rewound_at fixes this durably and
+// also lifts the old "only catches the first rewind" limitation, since it's
+// overwritten on every rewind rather than inferred from data written for an
+// unrelated purpose.
 func loadBeadRevisionLog(ctx context.Context, d *db.DB, beadID int64) ([]revisionEntry, error) {
+	var rewoundAt sql.NullString
+	if err := d.QueryRowContext(ctx,
+		`SELECT rewound_at FROM beads WHERE id = ?`, beadID,
+	).Scan(&rewoundAt); err != nil {
+		return nil, fmt.Errorf("load rewound_at for bead %d: %w", beadID, err)
+	}
+
 	rows, err := d.QueryContext(ctx, `
-		SELECT id, revision_number, full_text, execution_budget, monitor_override, created_by_verb
+		SELECT id, revision_number, full_text, execution_budget, monitor_override, created_by_verb, created_at
 		FROM bead_revisions
 		WHERE bead_id = ?
 		ORDER BY id`, beadID)
@@ -516,7 +522,7 @@ func loadBeadRevisionLog(ctx context.Context, d *db.DB, beadID int64) ([]revisio
 	var all []revisionEntry
 	for rows.Next() {
 		var e revisionEntry
-		if err := rows.Scan(&e.ID, &e.RevisionNumber, &e.FullText, &e.ExecutionBudget, &e.MonitorOverride, &e.CreatedByVerb); err != nil {
+		if err := rows.Scan(&e.ID, &e.RevisionNumber, &e.FullText, &e.ExecutionBudget, &e.MonitorOverride, &e.CreatedByVerb, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		all = append(all, e)
@@ -524,34 +530,25 @@ func loadBeadRevisionLog(ctx context.Context, d *db.DB, beadID int64) ([]revisio
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return currentLineage(all), nil
+	return currentLineage(all, rewoundAt), nil
 }
 
 // currentLineage trims a bead's revisions (ordered by id, i.e. creation
-// order) down to the segment created since the most recent rewind, using the
-// boundary-detection rule described above loadBeadRevisionLog. Revision 1 is
-// always kept: it's simultaneously the last row of the old lineage and the
+// order) down to the segment created since the most recent rewind. Revision 1
+// is always kept: it's simultaneously the last row of the old lineage and the
 // first row of the new one, since rewind-bead repoints current_revision_id at
-// it rather than creating a fresh row.
-func currentLineage(all []revisionEntry) []revisionEntry {
-	lineageStart := 0
-	maxSeen := 0
-	for i, e := range all {
-		if i > 0 && e.RevisionNumber <= maxSeen {
-			lineageStart = i
-		}
-		if e.RevisionNumber > maxSeen {
-			maxSeen = e.RevisionNumber
-		}
-	}
-	if lineageStart == 0 {
+// it rather than creating a fresh row. A bead that was never rewound
+// (rewoundAt not valid) returns the full history unchanged.
+func currentLineage(all []revisionEntry, rewoundAt sql.NullString) []revisionEntry {
+	if !rewoundAt.Valid {
 		return all
 	}
-	lineage := make([]revisionEntry, 0, len(all)-lineageStart+1)
-	if all[0].RevisionNumber == 1 {
-		lineage = append(lineage, all[0])
+	lineage := make([]revisionEntry, 0, len(all))
+	for _, e := range all {
+		if e.RevisionNumber == 1 || e.CreatedAt >= rewoundAt.String {
+			lineage = append(lineage, e)
+		}
 	}
-	lineage = append(lineage, all[lineageStart:]...)
 	return lineage
 }
 

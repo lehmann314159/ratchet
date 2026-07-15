@@ -183,6 +183,31 @@ func TestAdjudicateConsistencyCleanFixture(t *testing.T) {
 	}
 }
 
+// TestAdjudicateConsistencyNegatedPhraseFixture reproduces a false-positive
+// found during the stage-5 audit (2026-07-14): checkConsistency matched
+// contradicting phrases as bare substrings with no negation awareness, so a
+// model correctly declaring execution_capability_problem while explicitly
+// denying a spec problem ("this is not a spec problem...") was rejected as
+// malformed — "spec problem" is a literal substring of "not a spec problem".
+func TestAdjudicateConsistencyNegatedPhraseFixture(t *testing.T) {
+	h := &AdjudicateNextExecution{}
+
+	negated := `{
+  "trend": "same",
+  "bead_spec_fit": "execution_capability_problem",
+  "reasoning": "This is not a spec problem, it's clearly an execution capability problem: the runner never called the write function despite the spec stating the requirement precisely.",
+  "decision": "execute_as_is"
+}`
+
+	result, parsed := h.Validate(negated)
+	if result != "valid" {
+		t.Fatalf("negated contradiction phrase falsely rejected: %q", result)
+	}
+	if parsed == nil {
+		t.Error("parsed is nil on valid output")
+	}
+}
+
 // TestAdjudicateLiveModelDP3 runs the full ADJUDICATE pipeline (Run →
 // Validate → Commit) against the real Gemma model using the Exp-5 DP-div-3
 // material. Gemma correctly classified this case in Exp-5; this test verifies

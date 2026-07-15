@@ -57,13 +57,11 @@ func checkConsistency(fit, reasoning string) (bool, string) {
 			"spec is unambiguous", "despite the spec", "unambiguous spec",
 			"clear specification", "specification is clear",
 		}
-		for _, p := range contradict {
-			if strings.Contains(lower, p) {
-				return false, fmt.Sprintf(
-					"declared bead_spec_fit=%q but reasoning contains contradicting phrase %q",
-					fit, p,
-				)
-			}
+		if p, ok := firstUnnegatedMatch(lower, contradict); ok {
+			return false, fmt.Sprintf(
+				"declared bead_spec_fit=%q but reasoning contains contradicting phrase %q",
+				fit, p,
+			)
 		}
 
 	case "execution_capability_problem":
@@ -80,16 +78,62 @@ func checkConsistency(fit, reasoning string) (bool, string) {
 			"ambiguous requirement", "unclear requirement",
 			"missing from the spec", "specification does not",
 		}
-		for _, p := range contradict {
-			if strings.Contains(lower, p) {
-				return false, fmt.Sprintf(
-					"declared bead_spec_fit=%q but reasoning contains contradicting phrase %q",
-					fit, p,
-				)
-			}
+		if p, ok := firstUnnegatedMatch(lower, contradict); ok {
+			return false, fmt.Sprintf(
+				"declared bead_spec_fit=%q but reasoning contains contradicting phrase %q",
+				fit, p,
+			)
 		}
 	}
 	return true, ""
+}
+
+// negationCues are words/contractions that, found shortly before a
+// contradicting phrase, flip its meaning (e.g. "not a spec problem" is
+// consistent with execution_capability_problem, not a contradiction of it).
+// Trailing spaces on multi-word cues avoid mid-word false hits (e.g. "not "
+// vs. "notable"); the contraction forms need none since they're unambiguous.
+var negationCues = []string{
+	"not ", "no ", "never ", "no longer ",
+	"isn't", "wasn't", "aren't", "weren't",
+	"doesn't", "didn't", "don't",
+	"can't", "cannot ", "won't", "wouldn't", "shouldn't", "couldn't",
+}
+
+// negationWindow is how many characters before a contradicting phrase to
+// scan for a negation cue — wide enough for "is not a spec problem" or
+// "doesn't look like a spec problem", narrow enough to avoid picking up
+// negations from an unrelated, earlier clause.
+const negationWindow = 24
+
+// firstUnnegatedMatch returns the first phrase in phrases that appears in
+// lower without being immediately preceded by a negation cue, and whether
+// one was found.
+func firstUnnegatedMatch(lower string, phrases []string) (string, bool) {
+	for _, p := range phrases {
+		idx := strings.Index(lower, p)
+		if idx == -1 {
+			continue
+		}
+		start := idx - negationWindow
+		if start < 0 {
+			start = 0
+		}
+		if containsNegationCue(lower[start:idx]) {
+			continue
+		}
+		return p, true
+	}
+	return "", false
+}
+
+func containsNegationCue(window string) bool {
+	for _, cue := range negationCues {
+		if strings.Contains(window, cue) {
+			return true
+		}
+	}
+	return false
 }
 
 // vacuousPassNote returns a non-empty structural note to inject into the

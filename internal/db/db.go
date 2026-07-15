@@ -30,6 +30,7 @@ var columnMigrations = []columnMigration{
 	{"handoff_jobs", "refinement_cycle_id", "INTEGER"},
 	{"test_refinements", "cycle_id", "INTEGER NOT NULL DEFAULT 1"},
 	{"test_refinements", "decision", "TEXT NOT NULL DEFAULT ''"},
+	{"beads", "rewound_at", "TIMESTAMP"},
 }
 
 //go:embed schema.sql

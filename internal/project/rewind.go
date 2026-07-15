@@ -123,11 +123,17 @@ func RunRewindBeadMain(args []string) {
 		os.Exit(1)
 	}
 
-	// Reset spec to revision 1 and grant a fresh execution budget.
+	// Reset spec to revision 1 and grant a fresh execution budget. rewound_at
+	// records the boundary so loadBeadRevisionLog/currentLineageRevisionIDs
+	// can tell pre-rewind revisions apart from post-rewind ones — revision_number
+	// alone can't do this anymore, since every bead_revisions insert site now
+	// uses a bead-wide MAX(revision_number)+1 to avoid numbering collisions,
+	// which means revision numbers never repeat or go backwards across a rewind
+	// for the lineage filter to detect (see currentLineage in inputs.go).
 	newAttemptCap := existingExecutions + maxAttempts
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE beads SET status = 'pending', current_revision_id = ?, execution_attempts_override = ? WHERE id = ?`,
-		firstRevisionID, newAttemptCap, *beadID,
+		`UPDATE beads SET status = 'pending', current_revision_id = ?, execution_attempts_override = ?, rewound_at = ? WHERE id = ?`,
+		firstRevisionID, newAttemptCap, now, *beadID,
 	); err != nil {
 		_ = tx.Rollback()
 		slog.Error("rewind-bead: reset bead", "error", err)
