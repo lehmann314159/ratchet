@@ -92,7 +92,8 @@ func queryExecutions(ctx context.Context, tx *sql.Tx, beadID int64) ([]execData,
 		           (julianday(e.ended_at) - julianday(e.started_at)) * 86400, 0
 		       ) AS INTEGER),
 		       e.trace_path,
-		       COALESCE(a.mechanical_findings, '')
+		       COALESCE(a.mechanical_findings, ''),
+		       COALESCE(e.infra_failure, 0)
 		FROM executions e
 		LEFT JOIN analyses a ON a.execution_id = e.id
 		WHERE e.bead_id = ?
@@ -104,12 +105,19 @@ func queryExecutions(ctx context.Context, tx *sql.Tx, beadID int64) ([]execData,
 	var out []execData
 	for rows.Next() {
 		var e execData
-		var monFired int
+		var monFired, infraFailure int
 		if err := rows.Scan(&e.ID, &e.TerminationCause, &monFired, &e.DurationS,
-			&e.TracePath, &e.MechFindings); err != nil {
+			&e.TracePath, &e.MechFindings, &infraFailure); err != nil {
 			return nil, err
 		}
 		e.MonitorFired = monFired != 0
+		// infra_failure executions are recorded with termination_cause='success'
+		// as a placeholder (the schema's CHECK constraint has no dedicated
+		// "crashed" value) — override the displayed cause so a crash-recovered
+		// execution isn't reported as an indistinguishable real success.
+		if infraFailure == 1 {
+			e.TerminationCause = "infra_failure"
+		}
 		out = append(out, e)
 	}
 	return out, rows.Err()

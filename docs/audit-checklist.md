@@ -790,28 +790,150 @@ on-disk test file is actually deleted rather than orphaned;
 `go build ./...`, `go vet ./...`, `go test ./...` all clean. Left uncommitted
 pending user review, per standing practice.
 
-## Stage 7 — Orchestrator: job queue, dispatch, recovery
+## Stage 7 — Orchestrator: job queue, dispatch, recovery — AUDITED 2026-07-15
 
-- [ ] `internal/orchestrator/queue.go` — `claimNextJob`'s FIFO-on-`created_at`
-      dispatch (confirmed today: NOT bead-ID-ordered — `rewind-bead` can make an
-      out-of-order bead run ahead of a stuck one; confirm this is still intentional
-      and doesn't cause a subtler problem than the one already found)
-- [ ] `internal/orchestrator/dispatch.go` — generic verb dispatch, strike/tolerance
-      handling, `EXECUTE_BEAD`'s special-casing. **Partial credit from Stage 2's
-      audit**: the `handler.Commit()`-error-wedges-the-job gap found there (generic
-      to every verb, not just RECONCILE) was fixed 2026-07-15 — see Stage 2's
-      `applyFixes` entry and `recordCommitFailure` in this file. **Partial credit
-      from Stage 4's audit**: the `EXECUTE_BEAD` branch's unconditional
-      `UPDATE handoff_jobs SET status = 'complete'` after `RunExecutionWindow`
-      returns `nil` clobbered `handleInfraFailure`'s own status write (`pending` or
-      `escalated`) on the infra-failure path — confirmed by reproduction and
-      **fixed 2026-07-14** (extracted to `completeExecuteBeadJob`, guarded on
-      `status = 'running'`). See Stage 4's `window.go` entry for the full writeup.
-      Rest of this stage (queue.go's FIFO ordering, EXECUTE_BEAD special-casing
-      beyond this one bug, orchestrator.go poll loop, lock.go) still genuinely
-      unaudited.
-- [ ] `internal/orchestrator/orchestrator.go`, `internal/orchestrator/lock.go` —
-      main poll loop, advisory locking, `recoverOrphanedExecutions` on startup
+- [x] `internal/orchestrator/queue.go` — read in full, including
+      `recoverOrphanedExecutions`/`resetStaleRunning`/`strikeCount`/
+      `commitAttempt`. `claimNextJob`'s FIFO-on-`created_at` dispatch: confirmed
+      still NOT bead-ID-ordered, and confirmed intentional after tracing
+      `rewind-bead`'s interaction with it — a rewound bead's fresh job gets
+      `created_at = now` (rewind time), which sorts it *behind* any already
+      in-flight later bead's job, not ahead. That means an in-flight later
+      bead's own job chain finishes (or fails) before the rewound earlier
+      bead's job is picked up, rather than being interrupted mid-execution —
+      traced through every `INSERT INTO handoff_jobs` call site (all insert at
+      most one job per call with the enqueue-time `now`, so no same-tick
+      ordering ambiguity exists in practice either). No additional problem
+      found beyond the already-documented "out-of-order relative to bead ID"
+      behavior, which turns out to be safe by construction. Also traced
+      `recoverOrphanedExecutions`'s `termination_cause = 'success'` placeholder
+      (used because the schema's CHECK constraint has no dedicated "crashed"
+      value) all the way through `analyze_execution.go`/
+      `adjudicate_next_execution.go` — confirmed intentional and safe for the
+      decision pipeline (an infra-failure/orphan row can never get an
+      `analyses` row, since `finalizeExecution` — the only place that enqueues
+      `ANALYZE_EXECUTION` — is never reached on that path), but found the
+      placeholder **was** leaking into human-facing display: see the
+      observability fix below.
+- [x] `internal/orchestrator/dispatch.go` — every branch read in full. **Partial
+      credit from Stage 2's audit**: the `handler.Commit()`-error-wedges-the-job
+      gap (generic to every verb) was fixed 2026-07-15 — see Stage 2's
+      `applyFixes` entry and `recordCommitFailure`. **Partial credit from Stage
+      4's audit**: `completeExecuteBeadJob`'s `status = 'running'` guard, fixed
+      2026-07-14 — see Stage 4's `window.go` entry. **Confirmed and fixed the
+      bug flagged for this stage in Stage 6's log**, plus two siblings of the
+      same shape found auditing the rest of `dispatch()`:
+
+  **Bug — three separate failure paths in `dispatch()` had zero strike/tolerance
+  accounting**, unlike every other failure path in this file (`recordRunFailure`
+  for `handler.Run`, `recordCommitFailure` for `handler.Commit`,
+  `completeExecuteBeadJob`'s guard for the infra-failure race):
+  1. Model-lookup failure before warmup (missing/unreadable
+     `verb_model_assignments` row) — `UPDATE ... SET status = 'pending'`
+     unconditionally, no attempt written.
+  2. Ollama warmup failure (`oc.Warmup`) — same.
+  3. `EXECUTE_BEAD`'s `RunExecutionWindow` returning an error — `UPDATE ...
+     SET status = 'failed_retry'` unconditionally, no attempt written. This is
+     exactly the gap Stage 6's log flagged and deliberately deferred:
+     *"generalizing further wasn't part of the confirmed reproduction chain;
+     flagged for whoever does the full Stage 7 pass."*
+
+  None of the three ever counted a strike or could escalate. A **non-transient**
+  failure — Ollama unreachable or a required model never pulled (fails every
+  warmup, forever), a persistent OS-level issue preventing `execute-bead` from
+  starting (disk full creating the trace file, fork/exec resource exhaustion),
+  or a bead whose `current_revision_id` query fails — would retry the same job
+  forever on the orchestrator's single execution slot, 2 seconds apart, with no
+  attempt record and no escalation ever firing, invisible to a human beyond log
+  spam. Checked the live DB (`ratchet-projects/ratchet.db`): no job is
+  currently stuck this way; found one genuine, recent orphan-recovery event
+  (execution 631, bead 630, same day) that happened to resolve cleanly on
+  retry — same "reachable by construction, not yet observed live" bar as
+  several other fixed bugs in this audit. **FIXED 2026-07-15**: all three paths
+  now route through the existing `recordRunFailure` helper (wrapping the
+  model-lookup and warmup errors with distinguishing context —
+  `"model lookup: %w"` / `"ollama warmup for model %s: %w"` — so the persisted
+  `validation_result` stays diagnostic even without a separate log line), so a
+  persisting failure now escalates after `tolerance` (2) like every other
+  failure class. `recordRunFailure`'s own log line now also includes
+  `bead_id`, since callers no longer log it themselves before delegating.
+  Tests added (`internal/orchestrator/dispatch_test.go`):
+  `TestDispatch_ModelLookupFailureAppliesStrikeAccounting`,
+  `TestDispatch_OllamaWarmupFailureAppliesStrikeAccounting` (real HTTP call to
+  an unreachable address — no mock needed, connection-refused is immediate),
+  `TestDispatch_ExecuteBeadRunErrorAppliesStrikeAccounting` (a bead with no
+  `current_revision_id`, so `RunExecutionWindow` fails on its first query with
+  no subprocess ever spawned) — all three exercise `dispatch()` itself end to
+  end, not just the already-tested `recordRunFailure` helper in isolation.
+- [x] `internal/orchestrator/orchestrator.go`, `internal/orchestrator/lock.go` —
+      read in full. Advisory locking (`acquireLock`/`releaseLock`) and the
+      poll loop (`tick`) are correct: the `INSERT ... ON CONFLICT ... WHERE
+      heartbeat_at < ?` upsert is a single atomic statement, so two instances
+      racing to acquire at once cannot both win (SQLite's write lock
+      serializes them, and the loser's conditional `UPDATE` affects zero
+      rows). **Found one real gap, lower likelihood than the dispatch.go bug
+      but genuine**: `runHeartbeat`'s heartbeat write was owner-scoped
+      (`WHERE id = 1 AND owner = ?`) but nothing ever checked whether it
+      actually still held the lock — if this instance's heartbeat lapsed past
+      `lockStaleAfter` (60s) while the process was still alive (a long
+      scheduler/GC stall, not a crash — the crash case is already handled by
+      `resetStaleRunning` at the *next* startup), another orchestrator
+      instance could steal the lock via `acquireLock` while the first kept
+      right on dispatching. `claimNextJob`'s atomic per-row `UPDATE` prevents
+      two instances from claiming the *same* job, but nothing stops them from
+      concurrently working *different* jobs of the same project — a
+      split-brain violating the package's documented "orchestrator is the
+      only process that writes to the DB" invariant. Needs an actual >60s
+      stall of a live process to trigger, not just a crash — narrower than
+      the dispatch.go bug, but the same "assumed invariant with no
+      continuous enforcement" shape as this audit's other findings. **FIXED
+      2026-07-15**: extracted the per-tick write into `heartbeatTick` (returns
+      whether `owner` still holds the lock); `runHeartbeat` now stops and sets
+      a `*atomic.Bool` when the write affects zero rows, and `Run`'s main loop
+      checks that flag every iteration, returning an error instead of
+      continuing to dispatch under a lock it no longer holds. Tests added
+      (`internal/orchestrator/lock_test.go`, new file — first tests for
+      `lock.go`): `TestAcquireLock_RejectsFreshLock`,
+      `TestAcquireLock_StealsStaleLock`, `TestHeartbeatTick_ReportsLockLoss`
+      (reproduces the exact steal-out-from-under scenario).
+- [x] Cross-check, surfaced by tracing `queue.go`'s `termination_cause =
+      'success'` placeholder (see above): **found a real observability gap,
+      outside this stage's own files but directly caused by it** —
+      `internal/ui/queries.go` (`queryBeadDetail`) and `internal/report/bead.go`
+      (`queryExecutions`) both display raw `termination_cause` with no
+      `infra_failure` check, so a crashed/orphaned execution renders as plain
+      `success` in the bead detail page and the audit report — indistinguishable
+      from a real completion to a human operator (confirmed live: execution 631
+      for bead 630 renders this way today). **FIXED 2026-07-15**: both queries
+      now also select `infra_failure` and override the displayed cause to the
+      synthetic label `"infra_failure"` when set (display-only — the
+      underlying schema/CHECK constraint and decision-pipeline behavior are
+      untouched). Added a `.status.infra_failure` CSS rule
+      (`internal/ui/templates/layout.html`) so it's visually distinct too.
+      Verified against a copy of the live DB: the query correctly relabels
+      execution 631 while leaving every genuine `success`/`timeout`/
+      `monitor_terminated` row unchanged.
+- [x] Test coverage check (Method item 6): `dispatch_test.go` already covered
+      `recordRunFailure`/`recordCommitFailure`/`completeExecuteBeadJob` in
+      isolation from prior stages, but nothing exercised `dispatch()` itself
+      for any of the three newly-fixed paths, and `lock.go` had zero tests at
+      all before this session — both gaps closed by the tests listed above.
+
+**Session log (2026-07-15):** One real bug (three call sites, same root
+shape) confirmed by construction and fixed — the EXECUTE_BEAD half was
+explicitly flagged as deferred-to-Stage-7 in Stage 6's log, and the two
+warmup-failure siblings were found auditing the rest of `dispatch()` with the
+same method. One lower-likelihood but genuine lock-liveness gap in
+`lock.go`/`orchestrator.go` also found and fixed. One observability gap
+(crashed executions displayed as `success` in the UI/report) found while
+tracing `queue.go`'s orphan-recovery placeholder value, fixed alongside.
+`queue.go`'s FIFO ordering checked and confirmed intentional, no bug. All
+fixes verified: `go build ./...`, `go vet ./...`, `go test ./...` all clean;
+new regression tests for every fix, including first-ever tests for
+`lock.go`; the UI/report query changes verified directly against a copy of
+the live `ratchet-projects/ratchet.db` (execution 631, bead 630 — a real
+orphan-recovery event from earlier today). Left uncommitted pending user
+review, per standing practice.
 
 ## Stage 8 — UI & CLI
 
@@ -920,3 +1042,25 @@ othello-v3-f (48), tasklist-v1 (49), chess-v1 (87), chess-v3 (89), goban-v2 (91)
   for a file (`rewind.go`) that had zero tests before this session. Left
   uncommitted pending user review, per standing practice. See
   `[[project_audit_stage6]]` memory.
+- 2026-07-15: Stage 7 done. Confirmed and fixed the bug Stage 6 explicitly
+  deferred here: three failure paths in `dispatch.go` (model-lookup,
+  Ollama-warmup, and `EXECUTE_BEAD`'s `RunExecutionWindow` error) had zero
+  strike/tolerance accounting — a persistent, non-transient failure in any of
+  them retried forever with no attempt recorded and no escalation, on the
+  orchestrator's single execution slot. All three now route through
+  `recordRunFailure`. Also found and fixed a lower-likelihood but genuine gap
+  in `lock.go`: `runHeartbeat` never checked whether it still held the lock,
+  so a >60s scheduler stall on a live process (not a crash) could let a
+  second orchestrator instance start concurrently — added lock-loss detection
+  that stops the main loop. Tracing `queue.go`'s `recoverOrphanedExecutions`
+  surfaced one more real gap outside this stage's own files: the UI and
+  report layers displayed a crashed/orphaned execution's placeholder
+  `termination_cause='success'` at face value, indistinguishable from a real
+  completion — fixed by checking `infra_failure` in both display queries.
+  `queue.go`'s FIFO-by-`created_at` ordering was checked against `rewind-bead`
+  and confirmed intentional, no bug. All fixes verified (`go build ./...`,
+  `go vet ./...`, `go test ./...` all clean; UI/report query changes checked
+  directly against a copy of the live `ratchet-projects/ratchet.db`). New
+  tests for every fix, including first-ever coverage for `lock.go`. Left
+  uncommitted pending user review, per standing practice. See
+  `[[project_audit_stage7]]` memory.

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"ratchet/internal/db"
@@ -33,7 +34,8 @@ func Run(ctx context.Context, d *db.DB, oc *ollama.Client) error {
 	if err := acquireLock(ctx, d, owner); err != nil {
 		return err
 	}
-	go runHeartbeat(ctx, d, owner)
+	var lockLost atomic.Bool
+	go runHeartbeat(ctx, d, owner, &lockLost)
 	defer releaseLock(context.Background(), d, owner)
 
 	// Recover executions orphaned by a previous crash before resetting jobs,
@@ -50,6 +52,9 @@ func Run(ctx context.Context, d *db.DB, oc *ollama.Client) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil // clean shutdown
+		}
+		if lockLost.Load() {
+			return fmt.Errorf("orchestrator lock lost — another instance is running")
 		}
 
 		if err := tick(ctx, d, oc, handlers); err != nil {

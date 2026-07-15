@@ -290,7 +290,8 @@ func queryBeadDetail(ctx context.Context, d *db.DB, beadID int64) (*beadDetailDa
 		       e.started_at,
 		       COALESCE(adj.decision, ''),
 		       COALESCE(adj.reasoning_text, ''),
-		       e.trace_path
+		       e.trace_path,
+		       e.infra_failure
 		FROM executions e
 		JOIN bead_revisions br ON br.bead_id = e.bead_id
 		  AND br.revision_number = (
@@ -307,14 +308,21 @@ func queryBeadDetail(ctx context.Context, d *db.DB, beadID int64) (*beadDetailDa
 	var attemptNum int
 	for rows.Next() {
 		var r ExecutionRow
-		var monitorFired int
+		var monitorFired, infraFailure int
 		if err := rows.Scan(&r.ID, &attemptNum, &r.TerminationCause,
 			&r.BudgetSeconds, &r.ElapsedSeconds, &monitorFired,
-			&r.StartedAt, &r.Decision, &r.DecisionReasoning, &r.TracePath); err != nil {
+			&r.StartedAt, &r.Decision, &r.DecisionReasoning, &r.TracePath, &infraFailure); err != nil {
 			return nil, err
 		}
 		r.AttemptNum = attemptNum
 		r.MonitorFired = monitorFired == 1
+		// infra_failure executions are recorded with termination_cause='success'
+		// as a placeholder (the schema's CHECK constraint has no dedicated
+		// "crashed" value) — override the displayed cause so a crash-recovered
+		// execution isn't shown as an indistinguishable real success.
+		if infraFailure == 1 {
+			r.TerminationCause = "infra_failure"
+		}
 		out.Executions = append(out.Executions, r)
 	}
 	if err := rows.Err(); err != nil {

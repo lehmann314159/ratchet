@@ -43,13 +43,9 @@ func dispatch(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[str
 	// EXECUTE_BEAD runs two subprocesses concurrently and manages its own
 	// lifecycle; it does not go through the one-shot Run/Validate/Commit path.
 	if job.Verb == db.VerbExecuteBead {
+		startedAt := time.Now().UTC()
 		if err := execution.RunExecutionWindow(ctx, d, oc.BaseURL, job); err != nil {
-			slog.Error("execution window failed",
-				"job_id", job.ID, "bead_id", job.BeadID, "error", err)
-			_, _ = d.ExecContext(ctx,
-				`UPDATE handoff_jobs SET status = 'failed_retry', updated_at = ? WHERE id = ?`,
-				time.Now().UTC().Format(time.RFC3339), job.ID)
-			return err
+			return recordRunFailure(ctx, d, job, startedAt, err)
 		}
 		return completeExecuteBeadJob(ctx, d, job.ID)
 	}
@@ -65,19 +61,16 @@ func dispatch(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[str
 	// instead of silently burning the full 30-minute job timeout.
 	// Model-free verbs (VERIFY_MANIFEST) skip this step entirely.
 	if !verbSkipsModelWarmup(job.Verb) {
+		warmupStartedAt := time.Now().UTC()
 		var model string
 		if err := d.QueryRowContext(ctx,
 			`SELECT model FROM verb_model_assignments WHERE project_id = ? AND verb = ?`,
 			job.ProjectID, job.Verb,
 		).Scan(&model); err != nil {
-			slog.Error("warmup: model lookup failed, will retry", "verb", job.Verb, "job_id", job.ID, "error", err)
-			_, _ = d.ExecContext(ctx, `UPDATE handoff_jobs SET status = 'pending' WHERE id = ? AND status = 'running'`, job.ID)
-			return err
+			return recordRunFailure(ctx, d, job, warmupStartedAt, fmt.Errorf("model lookup: %w", err))
 		}
 		if err := oc.Warmup(ctx, model); err != nil {
-			slog.Error("ollama warmup failed, will retry", "verb", job.Verb, "job_id", job.ID, "model", model, "error", err)
-			_, _ = d.ExecContext(ctx, `UPDATE handoff_jobs SET status = 'pending' WHERE id = ? AND status = 'running'`, job.ID)
-			return err
+			return recordRunFailure(ctx, d, job, warmupStartedAt, fmt.Errorf("ollama warmup for model %s: %w", model, err))
 		}
 		slog.Info("ollama warmup ok", "verb", job.Verb, "job_id", job.ID, "model", model)
 	}
@@ -190,7 +183,7 @@ func verbSkipsModelWarmup(verb string) bool {
 // unconditional 'pending' reset that retried forever with no attempt record
 // and no escalation path. Mirrors recordCommitFailure below.
 func recordRunFailure(ctx context.Context, d *db.DB, job *db.HandoffJob, startedAt time.Time, runErr error) error {
-	slog.Error("verb Run failed", "verb", job.Verb, "job_id", job.ID, "project_id", job.ProjectID, "error", runErr)
+	slog.Error("verb Run failed", "verb", job.Verb, "job_id", job.ID, "project_id", job.ProjectID, "bead_id", job.BeadID, "error", runErr)
 
 	strikes, err := strikeCount(ctx, d, job.ID)
 	if err != nil {
