@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS projects (
   max_execution_attempts      INTEGER NOT NULL DEFAULT 5,
   language                    TEXT    NOT NULL DEFAULT 'go',
   pause_after_reconcile       INTEGER NOT NULL DEFAULT 0,
+  pause_after_verb            TEXT,
+  pause_after_bead_id         INTEGER,
   created_at                  TIMESTAMP NOT NULL,
   updated_at                  TIMESTAMP NOT NULL
 );

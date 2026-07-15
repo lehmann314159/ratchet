@@ -33,7 +33,8 @@ func loadProject(ctx context.Context, d *db.DB, projectID int64) (*db.Project, e
 		       recovered_from_project_id,
 		       monitor_override_default, execution_budget_default,
 		       audit_reconcile_round_cap, max_execution_attempts,
-		       language, pause_after_reconcile, created_at, updated_at
+		       language, pause_after_reconcile, pause_after_verb, pause_after_bead_id,
+		       created_at, updated_at
 		FROM projects WHERE id = ?`, projectID)
 	p := &db.Project{}
 	var createdAt, updatedAt string
@@ -42,7 +43,8 @@ func loadProject(ctx context.Context, d *db.DB, projectID int64) (*db.Project, e
 		&p.RecoveredFromProjectID,
 		&p.MonitorOverrideDefault, &p.ExecutionBudgetDefault,
 		&p.AuditReconcileRoundCap, &p.MaxExecutionAttempts,
-		&p.Language, &p.PauseAfterReconcile, &createdAt, &updatedAt,
+		&p.Language, &p.PauseAfterReconcile, &p.PauseAfterVerb, &p.PauseAfterBeadID,
+		&createdAt, &updatedAt,
 	); err != nil {
 		return nil, fmt.Errorf("load project %d: %w", projectID, err)
 	}
@@ -385,6 +387,43 @@ func enqueueBeadExecution(ctx context.Context, tx *sql.Tx, projectID, beadID int
 			VALUES (?, ?, ?, 'pending', ?, ?)`,
 			projectID, verb, beadID, now, now)
 	}
+	return err
+}
+
+// shouldPauseAfterVerb reports whether projectID's pause_after_verb matches verb.
+// Callers must enqueue the verb's normal next handoff_job *before* calling this
+// and, if it returns true, call pauseProject instead of returning nil — the
+// orchestrator only polls status='active' projects, so a 'pending' job left
+// sitting in a paused project is inert until the project resumes.
+func shouldPauseAfterVerb(ctx context.Context, tx *sql.Tx, projectID int64, verb string) (bool, error) {
+	var pauseAfterVerb sql.NullString
+	if err := tx.QueryRowContext(ctx,
+		`SELECT pause_after_verb FROM projects WHERE id = ?`, projectID,
+	).Scan(&pauseAfterVerb); err != nil {
+		return false, fmt.Errorf("load pause_after_verb: %w", err)
+	}
+	return pauseAfterVerb.Valid && pauseAfterVerb.String == verb, nil
+}
+
+// shouldPauseAfterBead reports whether projectID's pause_after_bead_id matches
+// beadID. Same enqueue-then-check calling convention as shouldPauseAfterVerb.
+func shouldPauseAfterBead(ctx context.Context, tx *sql.Tx, projectID, beadID int64) (bool, error) {
+	var pauseAfterBeadID sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT pause_after_bead_id FROM projects WHERE id = ?`, projectID,
+	).Scan(&pauseAfterBeadID); err != nil {
+		return false, fmt.Errorf("load pause_after_bead_id: %w", err)
+	}
+	return pauseAfterBeadID.Valid && pauseAfterBeadID.Int64 == beadID, nil
+}
+
+// pauseProject sets projectID's status to 'paused'. Called after the normal
+// next handoff_job has already been enqueued, so resuming (a plain status
+// flip back to 'active') needs no reconstruction logic.
+func pauseProject(ctx context.Context, tx *sql.Tx, projectID int64, now string) error {
+	_, err := tx.ExecContext(ctx,
+		`UPDATE projects SET status = 'paused', updated_at = ? WHERE id = ?`,
+		now, projectID)
 	return err
 }
 

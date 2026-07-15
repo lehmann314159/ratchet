@@ -3,20 +3,16 @@ package project
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 	"time"
 
 	"ratchet/internal/db"
 )
 
 // RunResumeProjectMain is the entry point for the `ratchet resume-project` subcommand.
-// It transitions a paused project back to active and enqueues EXECUTE_BEAD for the
-// first bead, resuming bead execution after a --pause-after-reconcile halt.
 func RunResumeProjectMain(args []string) {
 	flags := flag.NewFlagSet("resume-project", flag.ExitOnError)
 	dbPath := flags.String("db", "ratchet.db", "path to SQLite database")
@@ -35,78 +31,9 @@ func RunResumeProjectMain(args []string) {
 	}
 	defer d.Close()
 
-	ctx := context.Background()
-
-	var label, status string
-	if err := d.QueryRowContext(ctx,
-		`SELECT label, status FROM projects WHERE id = ?`, *projectID,
-	).Scan(&label, &status); err == sql.ErrNoRows {
-		slog.Error("resume-project: project not found", "id", *projectID)
-		os.Exit(1)
-	} else if err != nil {
-		slog.Error("resume-project: query project", "error", err)
-		os.Exit(1)
-	}
-
-	if status != "paused" {
-		slog.Error("resume-project: project is not paused", "id", *projectID, "status", status)
-		os.Exit(1)
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
-
-	tx, err := d.BeginTx(ctx, nil)
+	label, nextVerb, nextBeadID, err := resumeProject(context.Background(), d, *projectID)
 	if err != nil {
-		slog.Error("resume-project: begin tx", "error", err)
-		os.Exit(1)
-	}
-
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE projects SET status = 'active', updated_at = ? WHERE id = ?`,
-		now, *projectID,
-	); err != nil {
-		_ = tx.Rollback()
-		slog.Error("resume-project: update status", "error", err)
-		os.Exit(1)
-	}
-
-	var beadID int64
-	var beadFullText string
-	if err := tx.QueryRowContext(ctx, `
-		SELECT b.id, br.full_text FROM beads b
-		JOIN bead_revisions br ON br.id = b.current_revision_id
-		WHERE b.project_id = ? ORDER BY b.id LIMIT 1`, *projectID,
-	).Scan(&beadID, &beadFullText); err != nil {
-		_ = tx.Rollback()
-		slog.Error("resume-project: find first bead", "error", err)
-		os.Exit(1)
-	}
-
-	firstVerb := db.VerbExecuteBead
-	if resumeBeadHasTestFiles(beadFullText) {
-		firstVerb = db.VerbRefineTestsWrite
-	}
-
-	var enqueueErr error
-	if firstVerb == db.VerbRefineTestsWrite {
-		_, enqueueErr = tx.ExecContext(ctx, `
-			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, refinement_cycle_id, created_at, updated_at)
-			VALUES (?, ?, ?, 'pending', 1, ?, ?)`,
-			*projectID, firstVerb, beadID, now, now)
-	} else {
-		_, enqueueErr = tx.ExecContext(ctx, `
-			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
-			VALUES (?, ?, ?, 'pending', ?, ?)`,
-			*projectID, firstVerb, beadID, now, now)
-	}
-	if enqueueErr != nil {
-		_ = tx.Rollback()
-		slog.Error("resume-project: enqueue first bead", "error", enqueueErr)
-		os.Exit(1)
-	}
-
-	if err := tx.Commit(); err != nil {
-		slog.Error("resume-project: commit", "error", err)
+		slog.Error("resume-project", "error", err)
 		os.Exit(1)
 	}
 
@@ -114,22 +41,70 @@ func RunResumeProjectMain(args []string) {
 	fmt.Printf("  id:        %d\n", *projectID)
 	fmt.Printf("  label:     %s\n", label)
 	fmt.Printf("  status:    active\n")
-	fmt.Printf("  next job:  %s (bead %d)\n", firstVerb, beadID)
+	switch {
+	case nextVerb == "":
+		fmt.Printf("  next job:  none pending — check handoff_jobs\n")
+	case nextBeadID.Valid:
+		fmt.Printf("  next job:  %s (bead %d)\n", nextVerb, nextBeadID.Int64)
+	default:
+		fmt.Printf("  next job:  %s\n", nextVerb)
+	}
 }
 
-// resumeBeadHasTestFiles returns true when the bead spec includes *_test.go
-// output files, indicating REFINE_TESTS should run before EXECUTE_BEAD.
-func resumeBeadHasTestFiles(fullText string) bool {
-	var spec struct {
-		OutputFiles []string `json:"output_files"`
+// resumeProject transitions a paused project back to active.
+//
+// Every pause point (pause_after_reconcile, pause_after_verb,
+// pause_after_bead_id) always enqueues its normal next handoff_job *before*
+// pausing — the job is left sitting 'pending' but inert, since the
+// orchestrator only dispatches jobs for status='active' projects. So resuming
+// is nothing more than this status flip: there is no next-job state to
+// reconstruct, regardless of which pause point the project stopped at.
+//
+// The returned nextVerb/nextBeadID are informational only (for the CLI
+// printout) — the pending job that was already enqueued right before the
+// project paused, found by querying rather than reconstructed.
+func resumeProject(ctx context.Context, d *db.DB, projectID int64) (label, nextVerb string, nextBeadID sql.NullInt64, err error) {
+	var status string
+	if err = d.QueryRowContext(ctx,
+		`SELECT label, status FROM projects WHERE id = ?`, projectID,
+	).Scan(&label, &status); err == sql.ErrNoRows {
+		return "", "", sql.NullInt64{}, fmt.Errorf("project not found: %d", projectID)
+	} else if err != nil {
+		return "", "", sql.NullInt64{}, fmt.Errorf("query project: %w", err)
 	}
-	if json.Unmarshal([]byte(fullText), &spec) != nil {
-		return false
+
+	if status != "paused" {
+		return "", "", sql.NullInt64{}, fmt.Errorf("project %d is not paused (status=%s)", projectID, status)
 	}
-	for _, f := range spec.OutputFiles {
-		if strings.HasSuffix(f, "_test.go") {
-			return true
-		}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return "", "", sql.NullInt64{}, fmt.Errorf("begin tx: %w", err)
 	}
-	return false
+
+	if _, err = tx.ExecContext(ctx,
+		`UPDATE projects SET status = 'active', updated_at = ? WHERE id = ?`,
+		now, projectID,
+	); err != nil {
+		_ = tx.Rollback()
+		return "", "", sql.NullInt64{}, fmt.Errorf("update project status: %w", err)
+	}
+
+	err = tx.QueryRowContext(ctx, `
+		SELECT verb, bead_id FROM handoff_jobs
+		WHERE project_id = ? AND status = 'pending'
+		ORDER BY created_at LIMIT 1`, projectID,
+	).Scan(&nextVerb, &nextBeadID)
+	if err != nil && err != sql.ErrNoRows {
+		_ = tx.Rollback()
+		return "", "", sql.NullInt64{}, fmt.Errorf("query next job: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return "", "", sql.NullInt64{}, fmt.Errorf("commit: %w", err)
+	}
+
+	return label, nextVerb, nextBeadID, nil
 }

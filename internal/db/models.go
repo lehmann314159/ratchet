@@ -57,6 +57,8 @@ type Project struct {
 	MaxExecutionAttempts     int
 	Language                 string // 'go' | 'python' | ... (default 'go')
 	PauseAfterReconcile      bool
+	PauseAfterVerb           sql.NullString
+	PauseAfterBeadID         sql.NullInt64
 	CreatedAt                time.Time
 	UpdatedAt                time.Time
 }

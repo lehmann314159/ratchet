@@ -2,6 +2,7 @@ package project_test
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -241,5 +242,111 @@ func TestCreateIgnoreMonitorOverride(t *testing.T) {
 		`SELECT monitor_override_default FROM projects WHERE id = ?`, projectID).Scan(&override)
 	if override != "ignore" {
 		t.Errorf("monitor_override_default = %q, want ignore", override)
+	}
+}
+
+func TestCreatePauseAfterVerbStored(t *testing.T) {
+	d := openTestDB(t)
+	folder, designDoc := seedFolder(t)
+	ctx := context.Background()
+
+	projectID, err := project.Create(ctx, d, project.Params{
+		Label:                "pause-after-verb test",
+		FolderPath:           folder,
+		DesignDocPath:        designDoc,
+		MonitorOverride:      "honor",
+		ExecutionBudget:      300,
+		MaxExecutionAttempts: 5,
+		PauseAfterVerb:       db.VerbCertifyManifest,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var pauseAfterVerb sql.NullString
+	if err := d.QueryRowContext(ctx,
+		`SELECT pause_after_verb FROM projects WHERE id = ?`, projectID).Scan(&pauseAfterVerb); err != nil {
+		t.Fatalf("read pause_after_verb: %v", err)
+	}
+	if !pauseAfterVerb.Valid || pauseAfterVerb.String != db.VerbCertifyManifest {
+		t.Errorf("pause_after_verb = %+v, want %q", pauseAfterVerb, db.VerbCertifyManifest)
+	}
+}
+
+func TestCreatePauseAfterVerbRejectsUngatedVerb(t *testing.T) {
+	d := openTestDB(t)
+	folder, designDoc := seedFolder(t)
+	ctx := context.Background()
+
+	// EXECUTE_BEAD is a real verb, but nothing checks pause_after_verb against
+	// it — only the 5 verbs in pausableVerbs do — so it must be rejected.
+	_, err := project.Create(ctx, d, project.Params{
+		Label:                "pause-after-verb invalid test",
+		FolderPath:           folder,
+		DesignDocPath:        designDoc,
+		MonitorOverride:      "honor",
+		ExecutionBudget:      300,
+		MaxExecutionAttempts: 5,
+		PauseAfterVerb:       db.VerbExecuteBead,
+	})
+	if err == nil {
+		t.Fatal("expected error for an ungated pause-after-verb value, got nil")
+	}
+}
+
+func TestCreatePauseAfterBeadIDStored(t *testing.T) {
+	d := openTestDB(t)
+	folder, designDoc := seedFolder(t)
+	ctx := context.Background()
+
+	projectID, err := project.Create(ctx, d, project.Params{
+		Label:                "pause-after-bead test",
+		FolderPath:           folder,
+		DesignDocPath:        designDoc,
+		MonitorOverride:      "honor",
+		ExecutionBudget:      300,
+		MaxExecutionAttempts: 5,
+		PauseAfterBeadID:     42,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var pauseAfterBeadID sql.NullInt64
+	if err := d.QueryRowContext(ctx,
+		`SELECT pause_after_bead_id FROM projects WHERE id = ?`, projectID).Scan(&pauseAfterBeadID); err != nil {
+		t.Fatalf("read pause_after_bead_id: %v", err)
+	}
+	if !pauseAfterBeadID.Valid || pauseAfterBeadID.Int64 != 42 {
+		t.Errorf("pause_after_bead_id = %+v, want 42", pauseAfterBeadID)
+	}
+}
+
+func TestCreateNoPauseFieldsDefaultToNull(t *testing.T) {
+	d := openTestDB(t)
+	folder, designDoc := seedFolder(t)
+	ctx := context.Background()
+
+	projectID, err := project.Create(ctx, d, project.Params{
+		Label:                "no pause fields test",
+		FolderPath:           folder,
+		DesignDocPath:        designDoc,
+		MonitorOverride:      "honor",
+		ExecutionBudget:      300,
+		MaxExecutionAttempts: 5,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var pauseAfterVerb sql.NullString
+	var pauseAfterBeadID sql.NullInt64
+	if err := d.QueryRowContext(ctx,
+		`SELECT pause_after_verb, pause_after_bead_id FROM projects WHERE id = ?`, projectID,
+	).Scan(&pauseAfterVerb, &pauseAfterBeadID); err != nil {
+		t.Fatalf("read pause fields: %v", err)
+	}
+	if pauseAfterVerb.Valid || pauseAfterBeadID.Valid {
+		t.Errorf("expected NULL defaults, got pause_after_verb=%+v pause_after_bead_id=%+v", pauseAfterVerb, pauseAfterBeadID)
 	}
 }

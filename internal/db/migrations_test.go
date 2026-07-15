@@ -329,3 +329,48 @@ func TestMigrateExecutionsTerminationCausePreservesData(t *testing.T) {
 	mustExec(t, d, `INSERT INTO executions (id,project_id,bead_id,bead_revision_id,trace_path,termination_cause,monitor_fired,monitor_honored,started_at,ended_at)
 	  VALUES (2,1,1,1,'/tmp/trace-2.log','no_write',0,1,'2026-01-01T00:00:00Z','2026-01-01T00:05:00Z')`)
 }
+
+// TestBackfillPauseColumns confirms applyMigrations adds pause_after_verb and
+// pause_after_bead_id to a projects table predating both columns, without
+// disturbing existing rows.
+func TestBackfillPauseColumns(t *testing.T) {
+	ctx := context.Background()
+	d := openRawTestDB(t)
+	mustExec(t, d, `CREATE TABLE projects (id INTEGER PRIMARY KEY, label TEXT)`)
+	mustExec(t, d, `INSERT INTO projects (id, label) VALUES (1, 'p')`)
+	// applyMigrations walks every table in columnMigrations, not just projects.
+	mustExec(t, d, `CREATE TABLE handoff_attempts (id INTEGER PRIMARY KEY)`)
+	mustExec(t, d, `CREATE TABLE executions (id INTEGER PRIMARY KEY)`)
+	mustExec(t, d, `CREATE TABLE beads (id INTEGER PRIMARY KEY)`)
+	mustExec(t, d, `CREATE TABLE handoff_jobs (id INTEGER PRIMARY KEY)`)
+	mustExec(t, d, `CREATE TABLE test_refinements (id INTEGER PRIMARY KEY)`)
+
+	if err := d.applyMigrations(); err != nil {
+		t.Fatalf("applyMigrations: %v", err)
+	}
+
+	var label string
+	var pauseVerb sql.NullString
+	var pauseBeadID sql.NullInt64
+	if err := d.QueryRowContext(ctx,
+		`SELECT label, pause_after_verb, pause_after_bead_id FROM projects WHERE id = 1`,
+	).Scan(&label, &pauseVerb, &pauseBeadID); err != nil {
+		t.Fatalf("row lost after migration: %v", err)
+	}
+	if label != "p" {
+		t.Errorf("data corrupted: label=%q", label)
+	}
+	if pauseVerb.Valid || pauseBeadID.Valid {
+		t.Errorf("expected NULL defaults, got pause_after_verb=%v pause_after_bead_id=%v", pauseVerb, pauseBeadID)
+	}
+
+	mustExec(t, d, `UPDATE projects SET pause_after_verb = 'CERTIFY_MANIFEST', pause_after_bead_id = 7 WHERE id = 1`)
+	if err := d.QueryRowContext(ctx,
+		`SELECT pause_after_verb, pause_after_bead_id FROM projects WHERE id = 1`,
+	).Scan(&pauseVerb, &pauseBeadID); err != nil {
+		t.Fatalf("re-query after update: %v", err)
+	}
+	if pauseVerb.String != "CERTIFY_MANIFEST" || pauseBeadID.Int64 != 7 {
+		t.Errorf("write/read mismatch: pause_after_verb=%q pause_after_bead_id=%d", pauseVerb.String, pauseBeadID.Int64)
+	}
+}

@@ -697,11 +697,19 @@ func (h *RefineTestsJudge) Commit(ctx context.Context, tx *sql.Tx, job *db.Hando
 
 	if out.Decision == "approved" {
 		slog.Info("REFINE_TESTS_JUDGE: approved — enqueuing EXECUTE_BEAD", "bead_id", beadID)
-		_, err := tx.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
 			VALUES (?, ?, ?, 'pending', ?, ?)`,
-			job.ProjectID, db.VerbExecuteBead, beadID, now, now)
-		return err
+			job.ProjectID, db.VerbExecuteBead, beadID, now, now,
+		); err != nil {
+			return err
+		}
+		if pause, err := shouldPauseAfterVerb(ctx, tx, job.ProjectID, db.VerbRefineTestsJudge); err != nil {
+			return err
+		} else if pause {
+			return pauseProject(ctx, tx, job.ProjectID, now)
+		}
+		return nil
 	}
 
 	// revise — check cycle cap.

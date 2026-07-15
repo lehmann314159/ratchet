@@ -186,6 +186,11 @@ func (h *CertifyManifest) commitApprove(ctx context.Context, tx *sql.Tx, job *db
 	); err != nil {
 		return fmt.Errorf("enqueue %s: %w", db.VerbDecomposeSpec, err)
 	}
+	if pause, err := shouldPauseAfterVerb(ctx, tx, job.ProjectID, db.VerbCertifyManifest); err != nil {
+		return err
+	} else if pause {
+		return pauseProject(ctx, tx, job.ProjectID, now)
+	}
 	return nil
 }
 

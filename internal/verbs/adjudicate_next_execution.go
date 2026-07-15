@@ -1110,11 +1110,19 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 		}
 
 		// Fire REVISE_PENDING to update remaining specs before dispatching next bead.
-		_, err := tx.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
 			VALUES (?, ?, ?, 'pending', ?, ?)`,
-			job.ProjectID, db.VerbRevisePending, beadID, now, now)
-		return err
+			job.ProjectID, db.VerbRevisePending, beadID, now, now,
+		); err != nil {
+			return err
+		}
+		if pause, err := shouldPauseAfterVerb(ctx, tx, job.ProjectID, db.VerbAdjudicateNextExecution); err != nil {
+			return err
+		} else if pause {
+			return pauseProject(ctx, tx, job.ProjectID, now)
+		}
+		return nil
 	}
 	return nil
 }

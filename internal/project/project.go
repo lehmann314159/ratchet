@@ -26,6 +26,21 @@ type Params struct {
 	Fleet                map[string]string // verb→model overrides; nil uses compiled-in defaults
 	Language             string            // project language (default "go")
 	PauseAfterReconcile  bool              // halt after RECONCILE converges; resume with resume-project
+	PauseAfterVerb       string            // halt after this verb's forward-progress branch commits; "" disables
+	PauseAfterBeadID     int64             // halt once this bead succeeds and REVISE_PENDING dispatches the next one; 0 disables
+}
+
+// pausableVerbs lists the verbs that actually check pause_after_verb (see
+// shouldPauseAfterVerb's call sites in internal/verbs). Bead IDs are assigned
+// by DECOMPOSE_SPEC (and are a global auto-increment across all projects, not
+// scoped per-project), so --pause-after-bead can't be validated against real
+// bead IDs at project-creation time — only --pause-after-verb is checked here.
+var pausableVerbs = []string{
+	db.VerbVerifyManifest,
+	db.VerbCertifyManifest,
+	db.VerbReconcileDecomposition,
+	db.VerbAdjudicateNextExecution,
+	db.VerbRefineTestsJudge,
 }
 
 // Create inserts a projects row, seeds the validated model fleet, and enqueues
@@ -47,6 +62,18 @@ func Create(ctx context.Context, d *db.DB, p Params) (int64, error) {
 	}
 	if p.Language == "" {
 		p.Language = "go"
+	}
+	if p.PauseAfterVerb != "" {
+		valid := false
+		for _, v := range pausableVerbs {
+			if p.PauseAfterVerb == v {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return 0, fmt.Errorf("pause-after-verb must be one of %v, got %q", pausableVerbs, p.PauseAfterVerb)
+		}
 	}
 
 	// Resolve to absolute path so traces and design-doc reads work regardless
@@ -75,16 +102,26 @@ func Create(ctx context.Context, d *db.DB, p Params) (int64, error) {
 	if p.PauseAfterReconcile {
 		pauseAfterReconcile = 1
 	}
+	var pauseAfterVerb any
+	if p.PauseAfterVerb != "" {
+		pauseAfterVerb = p.PauseAfterVerb
+	}
+	var pauseAfterBeadID any
+	if p.PauseAfterBeadID != 0 {
+		pauseAfterBeadID = p.PauseAfterBeadID
+	}
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO projects
 		  (label, folder_path, design_doc_path, status,
 		   monitor_override_default, execution_budget_default,
 		   audit_reconcile_round_cap, max_execution_attempts,
-		   language, pause_after_reconcile, created_at, updated_at)
-		VALUES (?, ?, ?, 'active', ?, ?, 2, ?, ?, ?, ?, ?)`,
+		   language, pause_after_reconcile, pause_after_verb, pause_after_bead_id,
+		   created_at, updated_at)
+		VALUES (?, ?, ?, 'active', ?, ?, 2, ?, ?, ?, ?, ?, ?, ?)`,
 		p.Label, folderAbs, p.DesignDocPath,
 		p.MonitorOverride, p.ExecutionBudget,
-		p.MaxExecutionAttempts, p.Language, pauseAfterReconcile, now, now)
+		p.MaxExecutionAttempts, p.Language, pauseAfterReconcile,
+		pauseAfterVerb, pauseAfterBeadID, now, now)
 	if err != nil {
 		_ = tx.Rollback()
 		return 0, fmt.Errorf("insert project: %w", err)
@@ -130,6 +167,8 @@ func RunNewProjectMain(args []string) {
 	fleetFile := flags.String("fleet", "", "path to a JSON file mapping verb names to model names (optional; omit to use compiled-in defaults)")
 	language := flags.String("language", "go", "programming language for this project (default: go)")
 	pauseAfterReconcile := flags.Bool("pause-after-reconcile", false, "halt after RECONCILE converges instead of starting bead execution; resume with resume-project")
+	pauseAfterVerb := flags.String("pause-after-verb", "", fmt.Sprintf("halt after this verb's forward-progress branch commits; resume with resume-project. One of: %v", pausableVerbs))
+	pauseAfterBead := flags.Int64("pause-after-bead", 0, "halt once this bead ID succeeds and REVISE_PENDING dispatches the next one; resume with resume-project. Bead IDs are assigned during decomposition, so this is only useful once you already know one (e.g. re-running a design doc you've decomposed before)")
 	_ = flags.Parse(args)
 
 	if *label == "" {
@@ -171,6 +210,8 @@ func RunNewProjectMain(args []string) {
 		Fleet:                fleet,
 		Language:             *language,
 		PauseAfterReconcile:  *pauseAfterReconcile,
+		PauseAfterVerb:       *pauseAfterVerb,
+		PauseAfterBeadID:     *pauseAfterBead,
 	})
 	if err != nil {
 		slog.Error("new-project: create failed", "error", err)
@@ -186,6 +227,12 @@ func RunNewProjectMain(args []string) {
 	fmt.Printf("  language:   %s\n", *language)
 	if *pauseAfterReconcile {
 		fmt.Printf("  pause:      after RECONCILE (resume with: ratchet resume-project --db=%s --project=%d)\n", *dbPath, projectID)
+	}
+	if *pauseAfterVerb != "" {
+		fmt.Printf("  pause:      after %s (resume with: ratchet resume-project --db=%s --project=%d)\n", *pauseAfterVerb, *dbPath, projectID)
+	}
+	if *pauseAfterBead != 0 {
+		fmt.Printf("  pause:      after bead %d succeeds (resume with: ratchet resume-project --db=%s --project=%d)\n", *pauseAfterBead, *dbPath, projectID)
 	}
 	fmt.Printf("  SURVEY_SPEC job enqueued (status: pending)\n")
 	fmt.Printf("\nstart the orchestrator:\n")

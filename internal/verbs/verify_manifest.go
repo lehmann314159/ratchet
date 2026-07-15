@@ -150,6 +150,11 @@ func (h *VerifyManifest) Commit(ctx context.Context, tx *sql.Tx, job *db.Handoff
 	if err != nil {
 		return fmt.Errorf("enqueue %s: %w", db.VerbCertifyManifest, err)
 	}
+	if pause, err := shouldPauseAfterVerb(ctx, tx, job.ProjectID, db.VerbVerifyManifest); err != nil {
+		return err
+	} else if pause {
+		return pauseProject(ctx, tx, job.ProjectID, now)
+	}
 	return nil
 }
 

@@ -211,19 +211,23 @@ func (h *ReconcileDecomposition) Commit(ctx context.Context, tx *sql.Tx, job *db
 
 	switch outcome {
 	case "converged":
-		var pauseAfter bool
-		if err := tx.QueryRowContext(ctx,
-			`SELECT pause_after_reconcile FROM projects WHERE id = ?`, job.ProjectID,
-		).Scan(&pauseAfter); err != nil {
-			return fmt.Errorf("load pause_after_reconcile: %w", err)
-		}
-		if pauseAfter {
-			_, err := tx.ExecContext(ctx,
-				`UPDATE projects SET status = 'paused', updated_at = ? WHERE id = ?`,
-				now, job.ProjectID)
+		if err := enqueueFirstBeadForExecution(ctx, tx, job.ProjectID, now); err != nil {
 			return err
 		}
-		return enqueueFirstBeadForExecution(ctx, tx, job.ProjectID, now)
+		var pauseAfterReconcile bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT pause_after_reconcile FROM projects WHERE id = ?`, job.ProjectID,
+		).Scan(&pauseAfterReconcile); err != nil {
+			return fmt.Errorf("load pause_after_reconcile: %w", err)
+		}
+		pauseAfterVerb, err := shouldPauseAfterVerb(ctx, tx, job.ProjectID, db.VerbReconcileDecomposition)
+		if err != nil {
+			return err
+		}
+		if pauseAfterReconcile || pauseAfterVerb {
+			return pauseProject(ctx, tx, job.ProjectID, now)
+		}
+		return nil
 	case "disagreed_continuing":
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)

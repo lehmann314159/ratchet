@@ -106,3 +106,117 @@ func TestLoadBeadRevisionLogFiltersPostRewind(t *testing.T) {
 		t.Errorf("log[1].ID = %d, want post-rewind revision (%d)", log[1].ID, postRewindID)
 	}
 }
+
+// --- shared pause-check helpers ---
+
+func TestShouldPauseAfterVerb(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "pause-after-verb test")
+	if _, err := d.ExecContext(ctx,
+		`UPDATE projects SET pause_after_verb = 'CERTIFY_MANIFEST' WHERE id = -1`,
+	); err != nil {
+		t.Fatalf("set pause_after_verb: %v", err)
+	}
+
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+
+	match, err := shouldPauseAfterVerb(ctx, tx, -1, "CERTIFY_MANIFEST")
+	if err != nil {
+		t.Fatalf("shouldPauseAfterVerb: %v", err)
+	}
+	if !match {
+		t.Error("expected match for CERTIFY_MANIFEST, got false")
+	}
+
+	noMatch, err := shouldPauseAfterVerb(ctx, tx, -1, "VERIFY_MANIFEST")
+	if err != nil {
+		t.Fatalf("shouldPauseAfterVerb: %v", err)
+	}
+	if noMatch {
+		t.Error("expected no match for VERIFY_MANIFEST, got true")
+	}
+}
+
+func TestShouldPauseAfterVerbUnset(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "pause-after-verb unset test")
+
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+
+	match, err := shouldPauseAfterVerb(ctx, tx, -1, "CERTIFY_MANIFEST")
+	if err != nil {
+		t.Fatalf("shouldPauseAfterVerb: %v", err)
+	}
+	if match {
+		t.Error("NULL pause_after_verb should never match, got true")
+	}
+}
+
+func TestShouldPauseAfterBead(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "pause-after-bead test")
+	beadID, _ := seedBead(t, d, -1, "target bead")
+	if _, err := d.ExecContext(ctx,
+		`UPDATE projects SET pause_after_bead_id = ? WHERE id = -1`, beadID,
+	); err != nil {
+		t.Fatalf("set pause_after_bead_id: %v", err)
+	}
+
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+
+	match, err := shouldPauseAfterBead(ctx, tx, -1, beadID)
+	if err != nil {
+		t.Fatalf("shouldPauseAfterBead: %v", err)
+	}
+	if !match {
+		t.Error("expected match for target bead, got false")
+	}
+
+	noMatch, err := shouldPauseAfterBead(ctx, tx, -1, beadID+1)
+	if err != nil {
+		t.Fatalf("shouldPauseAfterBead: %v", err)
+	}
+	if noMatch {
+		t.Error("expected no match for a different bead ID, got true")
+	}
+}
+
+func TestPauseProject(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "pause-project test")
+
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if err := pauseProject(ctx, tx, -1, "2026-07-15T00:00:00Z"); err != nil {
+		t.Fatalf("pauseProject: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	var status string
+	if err := d.QueryRowContext(ctx, `SELECT status FROM projects WHERE id = -1`).Scan(&status); err != nil {
+		t.Fatalf("query status: %v", err)
+	}
+	if status != "paused" {
+		t.Errorf("status = %q, want paused", status)
+	}
+}
