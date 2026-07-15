@@ -373,6 +373,14 @@ func lastTestResult(findings string, exitCriteria []string) string {
 			if strings.Contains(trimmed, "exit: 0") || strings.HasSuffix(trimmed, "exit 0") {
 				return "PASS"
 			}
+			// The run's own result never arrived (killed/timed out mid-command —
+			// trace.parseResultLines defaults ExitRaw to "(truncated)" when no
+			// "exit: " line was seen). That's neither a pass nor a fail; labeling
+			// it FAIL would misreport an execution that was killed before its
+			// test could finish as a definitive test failure.
+			if strings.HasSuffix(trimmed, "(truncated)") {
+				return "unknown (truncated)"
+			}
 			return "FAIL"
 		}
 		if strings.Contains(trimmed, "Not run during this execution") {

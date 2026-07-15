@@ -1018,24 +1018,152 @@ review, per standing practice.
       before this session. Now covered for both fixed bugs via
       `internal/ui/handlers_test.go` (11 new tests, first-ever for this package).
 
-## Stage 9 — Shared infrastructure
+## Stage 9 — Shared infrastructure — AUDITED 2026-07-15
 
-- [ ] `internal/db/` — schema, migrations (the ad-hoc `migrateX` rename+recreate+copy+
-      drop pattern used repeatedly — confirm no migration has ever silently dropped
-      data on a live DB; the `audit_reconcile_rounds.outcome` CHECK migration this
-      session was tested against a live DB copy first — confirm that's the norm, not
-      an exception)
-- [ ] `internal/splice/` — see Stage 3, this is where the fix actually lives
-- [ ] `internal/trace/` — `GenerateMechanicalFindings`, the stdout-suppression bug
-      (see Stage 5), parsing robustness against malformed/truncated trace files
-- [ ] `internal/report/` — `WriteBead`/`WriteProject`, whether report content can
-      drift from DB truth (e.g. would report a bead as succeeded after this session's
-      `declare_success` bug, before the gate existed?)
-- [ ] `internal/guidance/` — language detection, per-language prescriptive doc
-      injection
-- [ ] `internal/ollama/` — client timeout/retry/streaming behavior, `ExtractJSON`
-      robustness against the range of malformed JSON this session's own investigation
-      surfaced (markdown-fenced, truncated, etc.)
+- [x] `internal/db/` — `db.go`'s six ad-hoc `migrateX` rename+recreate+copy+drop
+      migrations, plus the two `columnMigrations`/`applyTableMigrations` seed
+      functions, read in full. **Confirmed no test had ever exercised any migration's
+      actual rename+recreate+copy+drop body**: `TestSchemaIdempotent` only opens a
+      fresh `:memory:` DB, where `schema.sql` already matches every migration's target
+      shape, so every migration's own guard (`if strings.Contains(createSQL, ...) {
+      return nil }`) short-circuits as a no-op before the risky part ever runs. Built
+      six legacy-shaped fixture DBs (one per migration: `bead_revisions` ×2,
+      `test_refinements`, `projects`, `audit_reconcile_rounds`, `adjudications`) and
+      ran each migration directly. Five preserve data correctly, including the FK from
+      `beads.current_revision_id` surviving the `legacy_alter_table` rename dance.
+      **One does intentionally discard data**: `migrateTestRefinementsVerbs` drops any
+      row using the old `REFINE_TESTS_A`/`REFINE_TESTS_B` verb names (its own comment
+      says so) rather than migrating them forward to the new three-verb names — checked
+      this isn't a live-data risk: `REFINE_TESTS_A/B` was introduced and replaced by
+      the three-verb design within the same development arc (`82339ca` →`47030cc`),
+      before any of the real chess/goban/checkers projects existed. Not fixed (correct,
+      intentional, harmless), but now covered — no bug found here, but this was a real
+      test-coverage gap for a genuinely risky pattern (schema rewrites on a live DB),
+      so all six migrations now have permanent regression tests:
+      `internal/db/migrations_test.go` (new file).
+- [x] `internal/db/assignments.go` — `checkModelConstraints`'s 5 pairwise rules (doc
+      comment above `SetVerbModelAssignment` still says "four" — stale, the 5th
+      `REFINE_TESTS_WRITE != REFINE_TESTS_CRITIQUE` rule was added later without
+      updating it; cosmetic, not fixed). Confirmed `SetVerbModelAssignment` is dead
+      code in production (only called from `db_test.go`; no CLI/UI wiring exists to
+      reassign a verb's model after project creation) — its check-then-write is not
+      transactional, which would be a real race if ever wired to a concurrent-capable
+      caller, but isn't reachable today. Not fixed (nothing to fix without inventing
+      the reassignment feature itself), flagged for whoever wires that up.
+- [x] `internal/splice/` — read in full. **Confirmed and fixed a real bug**:
+      `detectImports` matched any bare `x.Y` selector against its known-package table
+      by identifier name alone, with no check for whether `x` was the actual imported
+      package or a local variable/parameter that merely shares a package's short name
+      (e.g. `url := resp.Header.Get(...)` then `url.Path`-shaped access — extremely
+      plausible in the HTTP-handler test code this project's own web-app projects
+      exercise). That silently added a spurious import (`"net/url"` in the example),
+      which fails to compile with "imported and not used" — an error `write_function`'s
+      model has no way to connect back to its own code, since it's never shown an
+      import block and never writes one (`Do not include package declarations or
+      imports` is a hardcoded tool-description constraint). Reproduced directly before
+      fixing. Not yet observed live (`test_refinements` has 86 real `REFINE_TESTS_WRITE`
+      rows in the live DB, none from HTTP-handler-testing beads that would trigger this
+      shape), same "hasn't bitten yet, but will" bar as Stage 1's stub-purity gap.
+      **FIXED 2026-07-15**: added `declaredNames`, which walks the file collecting every
+      identifier bound by a function param/result, `var`/`const` decl, `:=`, or range
+      clause, and excludes those from `detectImports`'s candidate package matches (a
+      package identifier can never simultaneously be locally declared in the same
+      scope, so this exclusion is sound, not just heuristic). Verified genuine package
+      usage (`url.Parse(...)`) is still detected correctly. Test added:
+      `TestSyncImportsIgnoresShadowedLocalVar` (`splice_test.go`).
+- [x] `internal/trace/parse.go` + `findings.go` — read in full. No new parser crashes
+      or defeat scenarios found beyond the already-known, already-flagged stdout-
+      suppression display gap (Stage 5: `GenerateMechanicalFindings`'s "All Commands
+      Run" section shows no output for any `ExitCode == 0` command, which is a syntactic
+      proxy that a `cmd && echo Pass || echo Fail` self-check defeats since it always
+      exits 0). Re-confirmed still present, still **not fixed** — this session
+      determined it's a real but narrower exposure than it first sounds: the "Exit
+      Criteria" section (which actually feeds the mechanical `declare_success` gate)
+      already shows full output unconditionally regardless of exit code; only the
+      secondary "All Commands Run" narrative summary — covering ad-hoc, non-criterion
+      commands — suppresses it. Left as an open design question for the user (verbosity
+      vs. visibility trade-off, not a single obviously-correct mechanical fix) rather
+      than silently deciding — see session log.
+      Robustness check: `bufio.Scanner`'s 1MB per-line buffer would silently truncate-
+      as-if-EOF on a single trace line exceeding that (`scanner.Err()` is never checked)
+      — plausible for a project like `png-stego` printing a large base64 blob on one
+      line with no embedded newlines. Not fixed: this is the same graceful-truncation
+      behavior the whole format already relies on for a genuinely killed/timed-out
+      execution, so treating an oversized line the same way is consistent, not a new
+      failure mode — flagged for visibility, not treated as a bug.
+- [x] `internal/report/bead.go` + `project.go` — read in full, including every query.
+      **Confirmed and fixed a real bug**: `lastTestResult` labeled any "Last run:" line
+      not ending in `exit 0` as a definitive `FAIL`, including the truncated case
+      (execution killed/timed out mid-command, so its exit criterion's own run never
+      completed — `trace.parseResultLines` defaults `ExitRaw` to `"(truncated)"` when no
+      `exit: ` line was ever seen, per `TestParse_Truncated`). That mislabeled a
+      killed-mid-test execution as a definitive test failure in the human-facing bead
+      report, when the true state is unknown. **FIXED 2026-07-15**: added a check for
+      the `(truncated)` suffix before falling through to `FAIL`, returning
+      `"unknown (truncated)"` instead. Tests added: `internal/report/bead_test.go` (new
+      file — first tests for this package) covering the truncated case plus the
+      existing PASS/FAIL/not-run paths.
+      Investigated and **ruled out** (verified against real `project_id=98` data before
+      concluding, per standing practice) a suspected double-count in `WriteProject`'s
+      header line: `nEscalated` (from `handoff_jobs.status='escalated'`) looked like it
+      could double-count against `nStopped`/`nNeverRan` (from `beads.status`) for the
+      same bead. Confirmed this can't happen: `fullStopProject` only flips
+      `beads.status` to `full_stopped` for beads still `pending`; the one bead whose
+      escalation triggered the stop stays `status='executing'` forever (its own status
+      is never touched), so it's exclusively counted via `nEscalated`, never double
+      counted. No bug.
+- [x] `internal/guidance/` — read in full (86 lines). No bug found. Confirmed
+      `survey_spec.go` correctly uses the DB-stored `project.Language` (not filesystem
+      `Detect`) for the one verb that runs before any file exists on disk; confirmed
+      `scaffoldGoProject` (which writes `go.mod`) runs synchronously inside
+      `VERIFY_MANIFEST` — before `CERTIFY_MANIFEST` and everything after it — so every
+      other verb's `InjectForVerbPath` filesystem-based `Detect` call correctly finds
+      `go.mod` already on disk by the time it runs. Zero test coverage before and after
+      (no bug found, same precedent as Stage 5's `analyze_execution.go`/
+      `compress_analysis.go` — tests added alongside fixes, not speculatively).
+- [x] `internal/ollama/client.go` — read in full. **Confirmed and fixed a severe,
+      broad-blast-radius bug**: `ExtractJSON` found the end of a fenced JSON block by
+      searching for the *last* `` ``` `` in the entire raw string. Any trailing
+      commentary after the real closing fence that itself contained a code fence —
+      e.g. the model quoting a failing test or a code snippet as part of its own
+      explanation, entirely plausible model behavior — made that trailing fence "win":
+      everything up to it, including the prose/code in between, got swept into what
+      was returned as "JSON" and failed `json.Unmarshal`. `ExtractJSON` is called from
+      essentially every JSON-handoff verb in the system (grep: 20+ call sites across
+      `decompose_spec.go`, `reconcile_decomposition.go`, `adjudicate_next_execution.go`,
+      `refine_tests.go`, `survey_spec.go`, etc.) — this is exactly the class of bug the
+      whole audit initiative exists to catch: a framework parsing defect that would
+      have burned attempts and potentially escalated jobs as if the model had produced
+      bad output, when the model's output was fine. Reproduced directly before fixing.
+      **FIXED 2026-07-15**: replaced the fence-marker search with a structural scan —
+      find the first `{`/`[` (after skipping the opening fence's marker line, if
+      fenced) and walk forward tracking brace/bracket depth while honoring quoted
+      strings and escapes, returning the matching close. This sidesteps the ambiguity
+      in both directions: a JSON string value containing `` ``` `` no longer risks
+      truncating the payload early, and trailing prose/fences after the real JSON no
+      longer risk swallowing it whole — markdown fences are never searched for as the
+      terminator at all, only the real JSON structure is. Verified against every real
+      historical `handoff_attempts` row in the live DB with `validation_result='valid'`
+      (1,671 rows): 0 regressions — every one still parses correctly under the new
+      implementation. Tests added: `internal/ollama/client_test.go` (new file — first
+      tests for this package), including the exact trailing-fence defeat scenario,
+      embedded-backtick-in-string-value, nested braces, array-top-level, and truncated-
+      input cases.
+
+**Session log (2026-07-15):** Three real, confirmed-by-reproduction bugs found and
+fixed: the `splice` import-shadowing false-positive, the `report` truncated-run
+mislabeled as FAIL, and the `ollama.ExtractJSON` trailing-fence defeat (the most
+severe of the three — broadest blast radius of any bug found in this audit, since
+nearly every verb in the system routes through it). One long-standing, already-known
+design question (Stage 5's stdout-suppression gap) was re-confirmed but deliberately
+left to the user rather than silently resolved, since the right trade-off (show more
+output vs. keep the narrative summary compact) isn't dictated by any spec doc. One
+real test-coverage gap closed without an accompanying bug (`internal/db` migrations).
+One suspected bug (`report` double-counting) was investigated and ruled out against
+real data rather than assumed. All fixes verified: `go build ./...` / `go vet ./...` /
+`go test ./...` clean, plus the `ollama` fix specifically replayed against 1,671 real
+historical model outputs from the live `ratchet-projects/ratchet.db`. Left uncommitted
+pending user review, per standing practice.
 
 ## Stage 10 — Retroactive check across past "COMPLETE" projects — DONE 2026-07-14 (folded into Stage 3)
 

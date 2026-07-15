@@ -197,12 +197,21 @@ func detectImports(src string) []string {
 	fset := token.NewFileSet()
 	f, _ := parser.ParseFile(fset, "", src, parser.AllErrors)
 	if f != nil {
+		declared := declaredNames(f)
 		ast.Inspect(f, func(n ast.Node) bool {
 			sel, ok := n.(*ast.SelectorExpr)
 			if !ok {
 				return true
 			}
-			if id, ok := sel.X.(*ast.Ident); ok {
+			// A locally declared identifier (param, var, :=, range var) shadows
+			// any same-named package within its scope, so "x.Y" there is a
+			// method/field access, not a package reference — e.g. a test
+			// declaring `url := resp.Header.Get("Location")` and then calling
+			// `url.foo()`-shaped code must not trigger a spurious "net/url"
+			// import (which would fail with "imported and not used", an error
+			// the model has no way to connect back to its own variable name
+			// since write_function never shows it the import block).
+			if id, ok := sel.X.(*ast.Ident); ok && !declared[id.Name] {
 				used[id.Name] = true
 			}
 			return true
@@ -217,6 +226,53 @@ func detectImports(src string) []string {
 	}
 	sort.Strings(imports)
 	return imports
+}
+
+// declaredNames returns every identifier name introduced as a function
+// parameter/result, a var/const declaration, a short variable declaration
+// (:=), or a range loop variable, anywhere in f. Used by detectImports to
+// avoid mistaking "localVar.Method()" for a reference to an unrelated
+// same-named standard-library package.
+func declaredNames(f *ast.File) map[string]bool {
+	declared := make(map[string]bool)
+	addField := func(fl *ast.FieldList) {
+		if fl == nil {
+			return
+		}
+		for _, field := range fl.List {
+			for _, n := range field.Names {
+				declared[n.Name] = true
+			}
+		}
+	}
+	addLhs := func(lhs []ast.Expr) {
+		for _, e := range lhs {
+			if id, ok := e.(*ast.Ident); ok {
+				declared[id.Name] = true
+			}
+		}
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch d := n.(type) {
+		case *ast.FuncDecl:
+			addField(d.Type.Params)
+			addField(d.Type.Results)
+		case *ast.ValueSpec:
+			for _, n := range d.Names {
+				declared[n.Name] = true
+			}
+		case *ast.AssignStmt:
+			if d.Tok == token.DEFINE {
+				addLhs(d.Lhs)
+			}
+		case *ast.RangeStmt:
+			if d.Tok == token.DEFINE {
+				addLhs([]ast.Expr{d.Key, d.Value})
+			}
+		}
+		return true
+	})
+	return declared
 }
 
 // DetectPackage reads non-test .go files in dir and returns the package name

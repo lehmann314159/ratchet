@@ -294,6 +294,18 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 
 // ExtractJSON strips Qwen3-style <think>…</think> blocks and markdown code
 // fences, returning the innermost JSON text.
+//
+// The boundary is found structurally (brace/bracket depth, honoring quoted
+// strings and escapes) rather than by searching for a closing "```" marker.
+// A naive "last ``` in the string" search breaks as soon as the model adds
+// any trailing commentary of its own containing a code fence — e.g. quoting
+// a `go test` failure or a code snippet after the JSON block — because that
+// trailing fence, not the real one, is then the last "```" in the text, and
+// everything up to it (including the trailing prose) gets swept into what's
+// returned as "JSON". A JSON string value legitimately containing "```" runs
+// into the same ambiguity in reverse. Scanning structurally sidesteps both:
+// markdown fences never need to be located at all, only the real '{'/'[' and
+// its matching close.
 func ExtractJSON(raw string) string {
 	s := raw
 	// Strip <think>...</think> (Qwen3-Coder uses these).
@@ -310,16 +322,77 @@ func ExtractJSON(raw string) string {
 		s = s[:start] + s[start+end+len("</think>"):]
 	}
 	s = strings.TrimSpace(s)
-	// Strip markdown fences.
-	if strings.HasPrefix(s, "```json") {
-		s = strings.TrimPrefix(s, "```json")
-	} else if strings.HasPrefix(s, "```") {
-		s = strings.TrimPrefix(s, "```")
+
+	// If fenced, narrow the search to after the opening fence's marker line
+	// (e.g. "```json\n" or "```\n") so a stray '{'/'[' in the language tag
+	// itself can't be mistaken for the JSON start.
+	searchFrom := 0
+	if strings.HasPrefix(s, "```") {
+		if nl := strings.IndexByte(s, '\n'); nl >= 0 {
+			searchFrom = nl + 1
+		}
 	}
-	if idx := strings.LastIndex(s, "```"); idx >= 0 {
-		s = s[:idx]
+
+	start := indexOfJSONStart(s[searchFrom:])
+	if start < 0 {
+		return s
 	}
-	return strings.TrimSpace(s)
+	start += searchFrom
+
+	end := matchingJSONEnd(s, start)
+	if end < 0 {
+		// Unterminated (truncated model output) — best effort: everything
+		// from the JSON start onward, at least free of leading fence noise.
+		return strings.TrimSpace(s[start:])
+	}
+	return s[start : end+1]
+}
+
+// indexOfJSONStart returns the byte index of the first '{' or '[' in s, or -1.
+func indexOfJSONStart(s string) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '{' || s[i] == '[' {
+			return i
+		}
+	}
+	return -1
+}
+
+// matchingJSONEnd scans s starting at the '{' or '[' index start and returns
+// the index of its matching closing brace/bracket, tracking nested depth and
+// skipping over quoted-string content (including escaped quotes) so neither
+// contributes false structural characters. Returns -1 if depth never returns
+// to zero before the end of s (truncated output).
+func matchingJSONEnd(s string, start int) int {
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 func truncate(s string, n int) string {

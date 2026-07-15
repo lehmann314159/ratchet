@@ -137,3 +137,43 @@ func TestReplaceSyncsImports(t *testing.T) {
 		t.Fatalf("expected stale sort import to be removed:\n%s", result2)
 	}
 }
+
+// TestSyncImportsIgnoresShadowedLocalVar reproduces a Stage 9 audit finding:
+// detectImports matched any bare "x.Y" selector against its known-package
+// table by name alone, with no check for whether "x" was actually the
+// imported package or a local variable/parameter that merely shares a
+// package's short name (e.g. `url := resp.Header.Get(...)` followed by
+// `url.something`, both extremely plausible in HTTP-handling test code).
+// That produced a spurious import — e.g. "net/url" — which fails to compile
+// with "imported and not used", an error write_function's model can't
+// connect back to its own code, since it never wrote an import statement and
+// the tool never shows it the file's import block. declaredNames now excludes
+// any identifier bound by a param, var/const decl, ":=", or range clause from
+// candidate package matches.
+func TestSyncImportsIgnoresShadowedLocalVar(t *testing.T) {
+	src := "package foo\n\nfunc Handle(u string) string {\n\treturn u\n}\n"
+	newFunc := `func Handle(req struct{ URL struct{ Path string } }) string {
+	url := req.URL
+	return url.Path
+}`
+	out, err := Replace(src, "Handle", newFunc)
+	if err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	if strings.Contains(out, `"net/url"`) {
+		t.Fatalf("spurious net/url import added for shadowed local var:\n%s", out)
+	}
+
+	// Genuine package usage (no shadowing) must still be detected.
+	newFunc2 := `func Handle() string {
+	u, _ := url.Parse("http://x")
+	return u.Path
+}`
+	out2, err := Replace(src, "Handle", newFunc2)
+	if err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	if !strings.Contains(out2, `"net/url"`) {
+		t.Fatalf("expected net/url import for genuine url.Parse call:\n%s", out2)
+	}
+}
