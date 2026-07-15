@@ -120,30 +120,48 @@ func scaffoldGoProject(pkg, module, folderPath string, files []SurveyManifestFil
 	return nil
 }
 
-// WriteScaffoldStubs writes scaffold stub implementations for all non-test
-// output files, always overwriting existing content. Used by rewind-bead to
-// restore the VERIFY_MANIFEST baseline state before re-running EXECUTE_BEAD.
-func WriteScaffoldStubs(ctx context.Context, d *db.DB, projectID int64, folderPath string, outputFiles []string) error {
+// WriteScaffoldStubs resets all non-test output files to a clean baseline,
+// always overwriting existing content. Used by rewind-bead to restore the
+// VERIFY_MANIFEST baseline state before re-running EXECUTE_BEAD.
+//
+// A file's baseline depends on whether SURVEY_SPEC scaffolded it: files
+// declared in the manifest (all .go source files) are reset to their
+// mechanical scaffold stub. Files NOT in the manifest (e.g. a non-Go file
+// like a template that a bead wrote directly, since SURVEY only scaffolds
+// .go files) have no stub to reset to — they are deleted instead, the same
+// treatment _test.go files already get, so every output file genuinely
+// returns to a clean baseline rather than silently keeping stale content.
+// Returns the files actually stubbed and the files actually deleted, so
+// callers can report what really happened instead of assuming success.
+func WriteScaffoldStubs(ctx context.Context, d *db.DB, projectID int64, folderPath string, outputFiles []string) (stubbed, deleted []string, err error) {
 	manifest, err := latestSurveyManifest(ctx, d, projectID)
 	if err != nil {
-		return fmt.Errorf("load survey manifest: %w", err)
+		return nil, nil, fmt.Errorf("load survey manifest: %w", err)
 	}
-	needed := make(map[string]bool)
-	for _, f := range outputFiles {
-		if !strings.HasSuffix(f, "_test.go") {
-			needed[f] = true
-		}
-	}
+	declByPath := make(map[string]string, len(manifest.Files))
 	for _, mf := range manifest.Files {
-		if !needed[mf.Path] {
+		declByPath[mf.Path] = mf.Declarations
+	}
+	for _, f := range outputFiles {
+		if strings.HasSuffix(f, "_test.go") {
 			continue
 		}
-		content := buildGoFile(manifest.Package, mf.Declarations)
-		if err := os.WriteFile(filepath.Join(folderPath, mf.Path), []byte(content), 0644); err != nil {
-			return fmt.Errorf("write scaffold %s: %w", mf.Path, err)
+		decl, ok := declByPath[f]
+		if !ok {
+			path := filepath.Join(folderPath, f)
+			if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
+				return stubbed, deleted, fmt.Errorf("delete non-manifest output file %s: %w", f, rmErr)
+			}
+			deleted = append(deleted, f)
+			continue
 		}
+		content := buildGoFile(manifest.Package, decl)
+		if err := os.WriteFile(filepath.Join(folderPath, f), []byte(content), 0644); err != nil {
+			return stubbed, deleted, fmt.Errorf("write scaffold %s: %w", f, err)
+		}
+		stubbed = append(stubbed, f)
 	}
-	return nil
+	return stubbed, deleted, nil
 }
 
 // restoreMissingScaffolds writes scaffold stubs only for non-test output files
@@ -162,7 +180,8 @@ func restoreMissingScaffolds(ctx context.Context, d *db.DB, projectID int64, fol
 	if len(missing) == 0 {
 		return nil
 	}
-	return WriteScaffoldStubs(ctx, d, projectID, folderPath, missing)
+	_, _, err := WriteScaffoldStubs(ctx, d, projectID, folderPath, missing)
+	return err
 }
 
 // buildGoFile prepends the package declaration, infers imports from the

@@ -39,10 +39,9 @@ func (h *CertifyManifest) Run(ctx context.Context, d *db.DB, oc *ollama.Client, 
 	}
 
 	// Preliminary decision: any failed check → reject.
-	// stub_purity is guaranteed by mechanical scaffolding and excluded here.
 	preliminary := "approve"
 	if !verify.FilePresencePass || !verify.NoBehavioralTestsPass ||
-		!verify.CompilePass || !verify.APICheckPass {
+		!verify.CompilePass || !verify.APICheckPass || !verify.StubPurityPass {
 		preliminary = "reject"
 	}
 
@@ -92,6 +91,7 @@ func buildCertifyUserMsg(verify *VerifyManifestOutput, preliminary string, manif
 	fmt.Fprintf(&sb, "- no_behavioral_tests: %s\n", passFailStr(verify.NoBehavioralTestsPass))
 	fmt.Fprintf(&sb, "- compile: %s\n", passFailStr(verify.CompilePass))
 	fmt.Fprintf(&sb, "- api_check: %s\n", passFailStr(verify.APICheckPass))
+	fmt.Fprintf(&sb, "- stub_purity: %s\n", passFailStr(verify.StubPurityPass))
 
 	if len(verify.Violations) > 0 {
 		sb.WriteString("\n## Violations\n\n")

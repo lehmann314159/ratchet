@@ -87,8 +87,12 @@ func (h *VerifyManifest) Run(ctx context.Context, d *db.DB, _ *ollama.Client, jo
 		violations = append(violations, "api_check: "+apiErr)
 	}
 
-	// Stub purity is guaranteed by mechanical scaffolding.
-	out.StubPurityPass = true
+	// Check 5: stub bodies contain no control flow.
+	purityViolations := checkStubPurity(project.FolderPath, manifest)
+	out.StubPurityPass = len(purityViolations) == 0
+	for _, v := range purityViolations {
+		violations = append(violations, "stub_purity: "+v)
+	}
 
 	out.Violations = violations
 
@@ -198,6 +202,61 @@ func verifyCompile(ctx context.Context, folderPath string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// checkStubPurity returns one violation string per function body (in a
+// manifest source file) that contains control flow. Stub bodies must be an
+// empty block or a bare return of zero values — no if/for/range/switch/
+// select. Parse errors are skipped; the compile check already surfaces them.
+func checkStubPurity(folderPath string, manifest *SurveySpecOutput) []string {
+	var violations []string
+	fset := token.NewFileSet()
+	for _, f := range manifest.Files {
+		if !strings.HasSuffix(f.Path, ".go") || filepath.Base(f.Path) == apiCheckTestFilename {
+			continue
+		}
+		astFile, err := parser.ParseFile(fset, filepath.Join(folderPath, f.Path), nil, 0)
+		if err != nil {
+			continue
+		}
+		for _, decl := range astFile.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			if kind := findControlFlow(fd.Body); kind != "" {
+				violations = append(violations, fmt.Sprintf("%s: %s contains %s (stub bodies must be a bare return or empty body only)", f.Path, fd.Name.Name, kind))
+			}
+		}
+	}
+	return violations
+}
+
+// findControlFlow returns a description of the first banned control-flow
+// statement found in body, or "" if none is present.
+func findControlFlow(body *ast.BlockStmt) string {
+	var found string
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found != "" {
+			return false
+		}
+		switch n.(type) {
+		case *ast.IfStmt:
+			found = "an if statement"
+		case *ast.ForStmt:
+			found = "a for statement"
+		case *ast.RangeStmt:
+			found = "a range loop"
+		case *ast.SwitchStmt:
+			found = "a switch statement"
+		case *ast.TypeSwitchStmt:
+			found = "a type switch statement"
+		case *ast.SelectStmt:
+			found = "a select statement"
+		}
+		return true
+	})
+	return found
 }
 
 // verifyAPICheck returns "" if apiCheckTestFilename contains at least one

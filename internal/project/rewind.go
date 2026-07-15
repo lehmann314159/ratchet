@@ -194,17 +194,13 @@ func RunRewindBeadMain(args []string) {
 		}
 	}
 
-	// Write scaffold stubs for all impl files (always overwrites).
-	// This guarantees a clean, compilable baseline before the next verb runs.
-	if err := verbs.WriteScaffoldStubs(ctx, d, projectID, projectFolder, outputFiles); err != nil {
+	// Reset all non-test impl files to a clean baseline: manifest-backed .go
+	// files are overwritten with their scaffold stub; anything else (never
+	// scaffolded by SURVEY, so no stub baseline exists) is deleted instead.
+	stubbedFiles, deletedFiles, err := verbs.WriteScaffoldStubs(ctx, d, projectID, projectFolder, outputFiles)
+	if err != nil {
 		slog.Error("rewind-bead: write scaffold stubs", "error", err)
 		os.Exit(1)
-	}
-	var stubbedFiles []string
-	for _, f := range outputFiles {
-		if !strings.HasSuffix(f, "_test.go") {
-			stubbedFiles = append(stubbedFiles, f)
-		}
 	}
 
 	fmt.Printf("bead rewound\n")
@@ -222,6 +218,12 @@ func RunRewindBeadMain(args []string) {
 	if len(stubbedFiles) > 0 {
 		fmt.Printf("  impl files stubbed:\n")
 		for _, f := range stubbedFiles {
+			fmt.Printf("    %s\n", f)
+		}
+	}
+	if len(deletedFiles) > 0 {
+		fmt.Printf("  impl files deleted (not in SURVEY manifest, no stub baseline):\n")
+		for _, f := range deletedFiles {
 			fmt.Printf("    %s\n", f)
 		}
 	}

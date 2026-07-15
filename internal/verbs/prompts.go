@@ -35,10 +35,11 @@ Checks performed:
 2. no_behavioral_tests: no test files beyond the generated API check file are present
 3. compile: the stub project compiles — imports, types, and stub signatures are valid
 4. api_check: the generated API assertion file contains at least one exported symbol assertion
+5. stub_purity: every function body is a bare return or empty block — no if/for/range/switch/select
 
 See the language-specific guidance below for the exact commands and file conventions for checks 2–4.
 
-The mechanical layer has computed a preliminary decision: all four checks pass → approve; any failure → reject.
+The mechanical layer has computed a preliminary decision: all five checks pass → approve; any failure → reject.
 
 Your role:
 1. Confirm the preliminary decision (or override only in clear edge cases)
