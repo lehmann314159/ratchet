@@ -28,7 +28,7 @@
       <td class="meta">{{if .MonitorFired}}fired{{else}}—{{end}}</td>
       <td>{{if .Decision}}<span class="status {{.Decision}}" title="{{.DecisionReasoning}}">{{.Decision}}</span>{{else}}<span class="meta">—</span>{{end}}</td>
       <td class="meta">{{.StartedAt}}</td>
-      <td>{{if .TracePath}}<a href="/trace?path={{.TracePath}}">trace</a>{{else}}—{{end}}</td>
+      <td>{{if .TracePath}}<a href="/trace/{{.ID}}">trace</a>{{else}}—{{end}}</td>
     </tr>
     {{end}}
     </tbody>

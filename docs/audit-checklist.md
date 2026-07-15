@@ -935,16 +935,88 @@ the live `ratchet-projects/ratchet.db` (execution 631, bead 630 — a real
 orphan-recovery event from earlier today). Left uncommitted pending user
 review, per standing practice.
 
-## Stage 8 — UI & CLI
+## Stage 8 — UI & CLI — AUDITED 2026-07-15
 
-- [ ] `internal/ui/handlers.go` — escalation detail, requeue, requeue-with-budget,
-      grant-attempts (all used directly today via `curl` against the sanctioned
-      endpoints — confirm they're exposed and documented as CLI equivalents too,
-      not just reachable via a running `ratchet ui`/`ratchet start` process)
-- [ ] `internal/ui/queries.go`, `internal/ui/server.go`
-- [ ] `cmd/ratchet/main.go` — subcommand dispatch; confirm every UI-only recovery
-      action (requeue, grant-attempts) has a CLI-reachable equivalent, or document
-      that it deliberately doesn't
+- [x] `internal/ui/handlers.go` — every handler read in full. Confirmed escalation
+      detail, requeue, requeue-with-budget, grant-attempts, close are used directly
+      today via `curl` against the sanctioned endpoints (no CLI equivalent exists at
+      the job/escalation level — only at the project level, where `resume-project`/
+      `full-stop-project`/`restart-project`/`rewind-bead` already have CLI
+      subcommands). Not treating the missing job-level CLI equivalents as a bug —
+      that's the documented, sanctioned workflow — but found two real bugs auditing
+      the handlers themselves:
+
+  **Bug 1 — arbitrary file read via `GET /trace?path=<anything>`.**
+  `handleTrace` did `os.ReadFile(r.URL.Query().Get("path"))` with zero validation
+  and served the content back — `path=/etc/passwd` (or any file the process can
+  read) worked. `queries.go` already had a `queryTracePath(ctx, d, execID)` helper
+  — resolving a trace path from the DB by execution ID — but it was **dead code,
+  never called anywhere**, strongly suggesting the safe by-ID design was the
+  original intent and the handler/template just never got wired to it. Default
+  bind is `localhost:7474` (safe default, confirmed in `cmd/ratchet/main.go`), but
+  `-addr` can point this at any interface with no code-level guard, at which point
+  this becomes a real unauthenticated arbitrary-file-disclosure endpoint. Checked
+  for a matching XSS risk in the same code path (trace content, raw model output)
+  — none found; every template in this package renders through Go's html/template
+  default auto-escaping, no `template.HTML` casts anywhere. **FIXED 2026-07-15**:
+  route changed from `GET /trace` (query param) to `GET /trace/{id}` (execution
+  ID path segment); `handleTrace` now resolves the path server-side via the
+  previously-dead `queryTracePath`, so a request can only ever read a path this
+  application itself wrote to the `executions` table. `bead_detail.html`'s trace
+  link updated to `/trace/{{.ID}}`. Verified live against a copy of the real DB:
+  `GET /trace?path=/etc/passwd` now 404s (no route matches), `GET /trace/635`
+  serves the real trace content, `GET /trace/9999999` 404s cleanly.
+
+  **Bug 2 — four job-mutation handlers had no status guard, unlike their
+  project-level siblings in the same file.** `handleRequeue`,
+  `handleRequeuWithBudget`, `handleGrantAttempts`, `handleClose` all did
+  `UPDATE handoff_jobs ... WHERE id = ?` with no check that the job was still
+  `'escalated'` — while `handleCloseProject`/`handleResumeProject`/
+  `handleRemoveProject` in the exact same file already guard on status
+  (`WHERE id = ? AND status IN (...)`). `queryEscalatedJobByID` (backing the
+  escalation detail page) also has no status filter, so a stale browser tab left
+  open on that page, or a duplicate/retried `curl` POST (the actual documented
+  workflow), can requeue/close/grant-attempts on a job that's since resolved or
+  is currently `'running'` under the orchestrator — racing the orchestrator's own
+  writes with zero coordination (`commitAttempt` itself also has no status
+  guard). Same "later writer clobbers earlier writer" shape as several bugs
+  already fixed earlier in this audit. **FIXED 2026-07-15**: all four now guard
+  the status transition (`WHERE id = ? AND status = 'escalated'`, checked via
+  `RowsAffected`), returning 409 if the job has moved on. For the two handlers
+  with multiple writes (`requeue-with-budget` inserts a new `bead_revisions` row;
+  `grant-attempts` bumps `beads.execution_attempts_override`), the whole
+  operation is now wrapped in one transaction with the guarded status UPDATE as
+  the *final* write, so a conflict rolls back the side effects too instead of
+  partially applying them to a job that's moved on — matching the transaction
+  pattern the project-level handlers in this same file already used. Tests added
+  (`internal/ui/handlers_test.go`, new file — first tests for the `ui` package):
+  one success + one conflict case per handler, plus two tests specifically
+  confirming the conflict path rolls back the new revision / the attempts
+  override rather than partially applying it.
+- [x] `internal/ui/queries.go` — every query read in full. All parameterized
+      (`?` placeholders throughout) — no SQL injection surface from any
+      client-supplied value. No other bugs found.
+- [x] `internal/ui/server.go` — routes, template cache, `Run`. All mutating routes
+      are POST-only (confirmed via `routes()`) — no GET-triggerable destructive
+      action reachable by a crawler or a bare link. No auth on any route (by
+      design — single-user local tool), mitigated by the `localhost` default bind;
+      noted as a lower-priority hardening item if `-addr` is ever pointed at a
+      non-loopback interface, not fixed (out of scope without a stated multi-user
+      threat model).
+- [x] `cmd/ratchet/main.go` — subcommand dispatch read in full. Confirmed `start`
+      runs the orchestrator and UI as goroutines in one process sharing one
+      `*db.DB` (Go's `database/sql` is safe for concurrent use; SQLite serializes
+      writers) — this resolves what first looked like a "two processes both
+      writing to the DB" concern against `orchestrator.go`'s package-doc claim
+      that the orchestrator is the only DB writer: it's one process, not two, so
+      no cross-process race exists here. The real concurrency risk was Bug 2
+      above (two goroutines racing the *same* job row with no coordination), not
+      a process-level one. Confirmed project-level CLI/UI parity (resume,
+      full-stop, restart, rewind-bead all have both); job-level escalation
+      actions are intentionally HTTP-only.
+- [x] Test coverage check (Method item 6): `internal/ui` had **zero** test files
+      before this session. Now covered for both fixed bugs via
+      `internal/ui/handlers_test.go` (11 new tests, first-ever for this package).
 
 ## Stage 9 — Shared infrastructure
 
@@ -1064,3 +1136,31 @@ othello-v3-f (48), tasklist-v1 (49), chess-v1 (87), chess-v3 (89), goban-v2 (91)
   tests for every fix, including first-ever coverage for `lock.go`. Left
   uncommitted pending user review, per standing practice. See
   `[[project_audit_stage7]]` memory.
+- 2026-07-15: Stage 8 done. Two real bugs found in `internal/ui/handlers.go`
+  and fixed: (1) `GET /trace?path=` was an unauthenticated arbitrary file
+  read (no validation on the client-supplied path) — a dead, never-called
+  `queryTracePath` helper already existed for the safe by-execution-ID design,
+  suggesting this was an unfinished wiring rather than an intentional
+  trade-off; fixed by switching the route to `GET /trace/{id}` and resolving
+  the path server-side. (2) `handleRequeue`/`handleRequeuWithBudget`/
+  `handleGrantAttempts`/`handleClose` had no status guard before mutating a
+  job — unlike the project-level handlers in the same file, which already
+  guard on status — so a stale escalation page or a duplicate/retried `curl`
+  POST (the documented actual workflow) could requeue/close/grant-attempts on
+  a job that had already resolved or was currently `running` under the
+  orchestrator, racing its writes with zero coordination; fixed by adding a
+  `WHERE status = 'escalated'` guard (checked via `RowsAffected`, 409 on
+  conflict), wrapping the two multi-write handlers in a transaction so a
+  conflict rolls back the side effects too. Also confirmed: no SQL injection
+  surface in `queries.go` (fully parameterized); all mutating routes are
+  POST-only, no GET-triggerable destructive action; `cmd/ratchet start` runs
+  orchestrator+UI as goroutines in one process sharing one `*db.DB` (not two
+  processes — resolves what first looked like a cross-process DB-writer
+  concern); project-level CLI/UI parity confirmed, job-level escalation
+  actions are intentionally HTTP-only. All fixes verified: `go build ./...`,
+  `go vet ./...`, `go test ./...` clean; live smoke test against a copy of
+  the real `ratchet-projects/ratchet.db` (old vulnerable route now 404s, new
+  by-ID route serves real trace content, bead-detail page links correctly).
+  New tests: `internal/ui/handlers_test.go`, first-ever coverage for the `ui`
+  package (11 tests). Left uncommitted pending user review, per standing
+  practice. See `[[project_audit_stage8]]` memory.

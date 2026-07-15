@@ -109,21 +109,51 @@ func (s *server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid job id", http.StatusBadRequest)
 		return
 	}
+	ctx := r.Context()
 	now := time.Now().UTC().Format(time.RFC3339)
-	// Delete prior failed attempts so the strike count resets to zero.
-	_, _ = s.db.ExecContext(r.Context(),
-		`DELETE FROM handoff_attempts WHERE job_id = ? AND validation_result != 'valid'`, id)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("begin tx: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Claim the job atomically: only an escalated job may be requeued. Guards
+	// against a stale escalation-detail page (or a duplicate/retried request)
+	// requeuing a job that's already been resolved or is currently 'running'
+	// under the orchestrator — without this, that write would race the
+	// orchestrator's own status writes with no coordination at all.
 	// For REFINE_TESTS jobs, increment refinement_cycle_id so the cap check resets.
-	_, err = s.db.ExecContext(r.Context(), `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE handoff_jobs
 		SET status = 'pending', updated_at = ?,
 		    refinement_cycle_id = CASE
 		        WHEN verb LIKE 'REFINE_TESTS%' THEN COALESCE(refinement_cycle_id, 1) + 1
 		        ELSE refinement_cycle_id
 		    END
-		WHERE id = ?`, now, id)
+		WHERE id = ? AND status = 'escalated'`, now, id)
 	if err != nil {
+		_ = tx.Rollback()
 		http.Error(w, fmt.Sprintf("requeue failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		_ = tx.Rollback()
+		http.Error(w, "job is no longer escalated (already resolved, or picked up by the orchestrator) — reload the escalations list", http.StatusConflict)
+		return
+	}
+
+	// Delete prior failed attempts so the strike count resets to zero.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM handoff_attempts WHERE job_id = ? AND validation_result != 'valid'`, id,
+	); err != nil {
+		_ = tx.Rollback()
+		http.Error(w, fmt.Sprintf("requeue failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		http.Error(w, fmt.Sprintf("commit: %v", err), http.StatusInternalServerError)
 		return
 	}
 	http.Redirect(w, r, "/escalations", http.StatusSeeOther)
@@ -138,10 +168,17 @@ func (s *server) handleClose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = s.db.ExecContext(r.Context(),
-		`UPDATE handoff_jobs SET status = 'complete', updated_at = ? WHERE id = ?`, now, id)
+	// Guarded on status='escalated' so a stale page or duplicate request can't
+	// mark a job that's already moved on (resolved, or currently 'running'
+	// under the orchestrator) as complete out from under it.
+	res, err := s.db.ExecContext(r.Context(),
+		`UPDATE handoff_jobs SET status = 'complete', updated_at = ? WHERE id = ? AND status = 'escalated'`, now, id)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("close failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		http.Error(w, "job is no longer escalated (already resolved, or picked up by the orchestrator) — reload the escalations list", http.StatusConflict)
 		return
 	}
 	http.Redirect(w, r, "/escalations", http.StatusSeeOther)
@@ -173,8 +210,14 @@ func (s *server) handleRequeuWithBudget(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("begin tx: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	// Insert a new bead revision with the updated budget.
-	_, err = s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO bead_revisions
 		  (project_id, bead_id, revision_number, full_text, execution_budget, monitor_override, created_by_verb, created_at)
 		SELECT project_id, bead_id, revision_number + 1,
@@ -182,29 +225,53 @@ func (s *server) handleRequeuWithBudget(w http.ResponseWriter, r *http.Request) 
 		       ?, monitor_override, 'ADJUDICATE_NEXT_EXECUTION', ?
 		FROM bead_revisions WHERE bead_id = ?
 		ORDER BY revision_number DESC LIMIT 1`,
-		budget, budget, now, beadID)
-	if err != nil {
+		budget, budget, now, beadID,
+	); err != nil {
+		_ = tx.Rollback()
 		http.Error(w, fmt.Sprintf("insert revision: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	// Point the bead at the new revision.
-	_, err = s.db.ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE beads SET current_revision_id = (
 		   SELECT id FROM bead_revisions WHERE bead_id = ? ORDER BY revision_number DESC LIMIT 1
-		 ) WHERE id = ?`, beadID, beadID)
-	if err != nil {
+		 ) WHERE id = ?`, beadID, beadID,
+	); err != nil {
+		_ = tx.Rollback()
 		http.Error(w, fmt.Sprintf("update bead revision: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Reset job: delete invalid attempts, set pending.
-	_, _ = s.db.ExecContext(ctx,
-		`DELETE FROM handoff_attempts WHERE job_id = ? AND validation_result != 'valid'`, id)
-	_, err = s.db.ExecContext(ctx,
-		`UPDATE handoff_jobs SET status = 'pending', updated_at = ? WHERE id = ?`, now, id)
-	if err != nil {
+	// Delete invalid attempts.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM handoff_attempts WHERE job_id = ? AND validation_result != 'valid'`, id,
+	); err != nil {
+		_ = tx.Rollback()
 		http.Error(w, fmt.Sprintf("requeue failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Claim the job atomically as the final write: only an escalated job may
+	// be requeued. If another request already resolved this job (stale page,
+	// duplicate submission), this affects zero rows and the whole
+	// transaction — including the new revision — rolls back instead of
+	// silently applying a budget change to a job that's moved on.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE handoff_jobs SET status = 'pending', updated_at = ? WHERE id = ? AND status = 'escalated'`, now, id)
+	if err != nil {
+		_ = tx.Rollback()
+		http.Error(w, fmt.Sprintf("requeue failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		_ = tx.Rollback()
+		http.Error(w, "job is no longer escalated (already resolved, or picked up by the orchestrator) — reload the escalations list", http.StatusConflict)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		http.Error(w, fmt.Sprintf("commit: %v", err), http.StatusInternalServerError)
 		return
 	}
 	http.Redirect(w, r, "/escalations", http.StatusSeeOther)
@@ -235,9 +302,15 @@ func (s *server) handleGrantAttempts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("begin tx: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	// Increment the per-bead override (seeding from the project default if not yet set),
 	// so only this bead gets extra attempts rather than raising the cap project-wide.
-	if _, err := s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE beads
 		SET execution_attempts_override = COALESCE(
 			execution_attempts_override,
@@ -245,17 +318,40 @@ func (s *server) handleGrantAttempts(w http.ResponseWriter, r *http.Request) {
 		) + ?
 		WHERE id = ?`, beadID.Int64, extra, beadID.Int64,
 	); err != nil {
+		_ = tx.Rollback()
 		http.Error(w, fmt.Sprintf("grant attempts: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Reset job and clear invalid attempts so ADJUDICATE retries cleanly.
-	_, _ = s.db.ExecContext(ctx,
-		`DELETE FROM handoff_attempts WHERE job_id = ? AND validation_result != 'valid'`, id)
-	if _, err := s.db.ExecContext(ctx,
-		`UPDATE handoff_jobs SET status = 'pending', updated_at = ? WHERE id = ?`, now, id,
+	// Clear invalid attempts so ADJUDICATE retries cleanly.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM handoff_attempts WHERE job_id = ? AND validation_result != 'valid'`, id,
 	); err != nil {
+		_ = tx.Rollback()
+		http.Error(w, fmt.Sprintf("grant attempts: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Claim the job atomically as the final write: only an escalated job may
+	// have attempts granted. If another request already resolved this job,
+	// this affects zero rows and the whole transaction — including the
+	// attempts-override bump — rolls back instead of silently applying it to
+	// a job that's moved on.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE handoff_jobs SET status = 'pending', updated_at = ? WHERE id = ? AND status = 'escalated'`, now, id)
+	if err != nil {
+		_ = tx.Rollback()
 		http.Error(w, fmt.Sprintf("requeue: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		_ = tx.Rollback()
+		http.Error(w, "job is no longer escalated (already resolved, or picked up by the orchestrator) — reload the escalations list", http.StatusConflict)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		http.Error(w, fmt.Sprintf("commit: %v", err), http.StatusInternalServerError)
 		return
 	}
 
@@ -453,10 +549,19 @@ type traceData struct {
 	Content string
 }
 
+// handleTrace serves a trace file by execution ID, never a client-supplied
+// path — the path is resolved server-side via queryTracePath, so a request
+// can only ever read a path this application itself wrote to the executions
+// table, not an arbitrary file on disk.
 func (s *server) handleTrace(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Query().Get("path")
-	if path == "" {
-		http.Error(w, "path query parameter required", http.StatusBadRequest)
+	execID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid execution id", http.StatusBadRequest)
+		return
+	}
+	path, err := queryTracePath(r.Context(), s.db, execID)
+	if err != nil {
+		http.Error(w, "execution not found", http.StatusNotFound)
 		return
 	}
 	b, err := os.ReadFile(path)
