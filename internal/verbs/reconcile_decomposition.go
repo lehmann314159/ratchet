@@ -18,6 +18,7 @@ import (
 type ReconcileDecomposition struct {
 	lastCritique    string
 	lastRoundsSoFar int
+	lastHistory     []debateRound
 	budgetDefault   int
 	folderPath      string
 }
@@ -53,6 +54,7 @@ func (h *ReconcileDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.C
 	// Cache for Commit (single-goroutine orchestrator; no race).
 	h.lastCritique = critique
 	h.lastRoundsSoFar = roundsSoFar
+	h.lastHistory = history
 	h.budgetDefault = project.ExecutionBudgetDefault
 	h.folderPath = project.FolderPath
 
@@ -136,6 +138,16 @@ func (h *ReconcileDecomposition) Validate(raw string) (string, any) {
 // agree_and_fix → converged; any disagree → continue the loop, or escalate
 // if the round cap is reached. RECONCILE is explicitly not given authority
 // to declare convergence itself — the comparator is this code, not a model.
+//
+// One exception: if every current-round disagree is a verbatim repeat of a
+// finding AUDIT already raised in an earlier round and RECONCILE already
+// disagreed with (isRepeatDisagreement) — i.e. AUDIT re-raised the same
+// complaint without engaging with RECONCILE's prior rebuttal — the tie is
+// broken in RECONCILE's favor and the round converges immediately, rather
+// than burning further rounds or escalating on an unchanged disagreement.
+// This does not apply when AUDIT raises anything new or restates a finding
+// with a new argument; that still follows the normal continue-or-escalate
+// path above.
 func (h *ReconcileDecomposition) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJob, parsed any) error {
 	out := parsed.(ReconcileDecompositionOutput)
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -149,16 +161,20 @@ func (h *ReconcileDecomposition) Commit(ctx context.Context, tx *sql.Tx, job *db
 	}
 
 	nextRound := h.lastRoundsSoFar + 1
+	currentFindings := findingsByBead(h.lastCritique)
 	hasDisagree := false
+	allDisagreesAreRepeats := true
 	for _, r := range out.Responses {
 		if r.Action == "disagree" {
 			hasDisagree = true
-			break
+			if !isRepeatDisagreement(r.BeadTitle, currentFindings, h.lastHistory) {
+				allDisagreesAreRepeats = false
+			}
 		}
 	}
 
 	outcome := "converged"
-	if hasDisagree {
+	if hasDisagree && !allDisagreesAreRepeats {
 		if nextRound >= roundCap {
 			outcome = "escalated"
 		} else {

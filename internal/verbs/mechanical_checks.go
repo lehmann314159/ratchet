@@ -557,3 +557,94 @@ func firstSourceGoFile(outputFiles []string) string {
 	}
 	return ""
 }
+
+// --- RECONCILE tie-break: AUDIT repeating an already-disputed finding ---
+
+// normalizeFindingText canonicalizes an AUDIT finding's issue text for
+// verbatim-repeat comparison across rounds: lowercases, folds every quote
+// variant (straight/smart, single/double) to one canonical character, and
+// collapses whitespace runs. Folding single and double quotes together is
+// deliberate, not just cosmetic-unicode handling: the observed real-world
+// case (checkers-v8, project 98, round 1→2) had AUDIT re-quote the identical
+// embedded shell command with ASCII "..." in one round and ASCII '...' in the
+// next, which a smart-quote-only normalization would miss. This is deliberately
+// crude (not semantic similarity) — the goal is only to catch a model
+// re-emitting the same finding with cosmetic differences, not to judge
+// whether two different findings are "similar."
+func normalizeFindingText(s string) string {
+	replacer := strings.NewReplacer(
+		"'", "'", "‘", "'", "’", "'",
+		"\"", "'", "“", "'", "”", "'",
+	)
+	s = replacer.Replace(strings.ToLower(s))
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// findingsByBead parses a raw AUDIT_DECOMPOSITION critique (possibly
+// markdown-fenced) into a map from bead_title to its normalized finding issue
+// texts. Returns nil if the critique does not parse as AuditDecompositionOutput
+// JSON — expected for 'redecompose' rows, whose critique_text is mechanical
+// prose (forwardFileReferenceChecks output), not a model critique.
+func findingsByBead(critiqueRaw string) map[string][]string {
+	var out AuditDecompositionOutput
+	if err := json.Unmarshal([]byte(ollama.ExtractJSON(critiqueRaw)), &out); err != nil {
+		return nil
+	}
+	byBead := map[string][]string{}
+	for _, f := range out.Findings {
+		byBead[f.BeadTitle] = append(byBead[f.BeadTitle], normalizeFindingText(f.Issue))
+	}
+	return byBead
+}
+
+// isRepeatDisagreement reports whether every current-round finding AUDIT
+// raised about beadTitle was already raised — verbatim, per normalizeFindingText
+// — in some earlier round where RECONCILE disagreed with it. When true, AUDIT
+// has re-raised the same complaint without engaging with RECONCILE's prior
+// rebuttal: the "no new argument" case that lets RECONCILE's disagreement
+// stand (see ReconcileDecomposition.Commit's convergence comparator) instead
+// of burning another round or escalating on an unchanged disagreement.
+func isRepeatDisagreement(beadTitle string, currentFindings map[string][]string, history []debateRound) bool {
+	current := currentFindings[beadTitle]
+	if len(current) == 0 {
+		return false
+	}
+	for _, round := range history {
+		if round.Outcome == "redecompose" {
+			continue
+		}
+		var recon ReconcileDecompositionOutput
+		if err := json.Unmarshal([]byte(ollama.ExtractJSON(round.Reconciliation)), &recon); err != nil {
+			continue
+		}
+		disagreed := false
+		for _, r := range recon.Responses {
+			if r.BeadTitle == beadTitle && r.Action == "disagree" {
+				disagreed = true
+				break
+			}
+		}
+		if !disagreed {
+			continue
+		}
+		prior := findingsByBead(round.CritiqueText)
+		if prior == nil {
+			continue
+		}
+		priorSet := map[string]bool{}
+		for _, s := range prior[beadTitle] {
+			priorSet[s] = true
+		}
+		allSeen := true
+		for _, s := range current {
+			if !priorSet[s] {
+				allSeen = false
+				break
+			}
+		}
+		if allSeen {
+			return true
+		}
+	}
+	return false
+}

@@ -313,6 +313,74 @@ func TestForwardFileReferenceChecks(t *testing.T) {
 	})
 }
 
+func TestIsRepeatDisagreement(t *testing.T) {
+	// Modeled on the checkers-v8 (project 98) round 1→2 escalation: AUDIT
+	// re-raised an identical http-handlers finding (only quote style/case
+	// differed) that RECONCILE had already disputed in round 1.
+	priorCritique := `{"findings":[{"bead_title":"http-handlers","issue":"Depends on templates/index.html and templates/board.html created by the later 'templates' bead."}],"overall_verdict":"issues_found"}`
+	priorReconciliation := `{"responses":[{"bead_title":"http-handlers","action":"disagree","reason":"templates already precedes http-handlers"}]}`
+	history := []debateRound{
+		{RoundNumber: 1, CritiqueText: priorCritique, Reconciliation: priorReconciliation, Outcome: "disagreed_continuing"},
+	}
+
+	t.Run("verbatim repeat (cosmetic quote/case differences only) is a repeat", func(t *testing.T) {
+		currentCritique := `{"findings":[{"bead_title":"http-handlers","issue":"Depends on templates/index.html and templates/board.html created by the later \"templates\" bead."}],"overall_verdict":"issues_found"}`
+		current := findingsByBead(currentCritique)
+		if !isRepeatDisagreement("http-handlers", current, history) {
+			t.Error("expected a cosmetically-reworded repeat of an already-disputed finding to be detected as a repeat")
+		}
+	})
+
+	t.Run("genuinely new finding is not a repeat", func(t *testing.T) {
+		currentCritique := `{"findings":[{"bead_title":"http-handlers","issue":"HandleMove does not validate that from/to coordinates are on the board."}],"overall_verdict":"issues_found"}`
+		current := findingsByBead(currentCritique)
+		if isRepeatDisagreement("http-handlers", current, history) {
+			t.Error("a substantively new finding must not be treated as a repeat")
+		}
+	})
+
+	t.Run("bead with no prior disagreement is not a repeat", func(t *testing.T) {
+		currentCritique := `{"findings":[{"bead_title":"layout","issue":"output_files contains no *_test.go file."}],"overall_verdict":"issues_found"}`
+		current := findingsByBead(currentCritique)
+		if isRepeatDisagreement("layout", current, history) {
+			t.Error("a bead never previously disagreed-with must not be treated as a repeat")
+		}
+	})
+
+	t.Run("prior round where RECONCILE agreed_and_fixed is not a repeat source", func(t *testing.T) {
+		agreedHistory := []debateRound{
+			{
+				RoundNumber:    1,
+				CritiqueText:   priorCritique,
+				Reconciliation: `{"responses":[{"bead_title":"http-handlers","action":"agree_and_fix","reason":"fixed","updated_bead":{"title":"http-handlers","full_text":"x","execution_budget":0,"monitor_override":"honor","output_files":["a.go"],"exit_criteria":["go build ./..."]}}]}`,
+				Outcome:        "disagreed_continuing",
+			},
+		}
+		current := findingsByBead(priorCritique)
+		if isRepeatDisagreement("http-handlers", current, agreedHistory) {
+			t.Error("agree_and_fix in the prior round means there was no dispute to repeat")
+		}
+	})
+
+	t.Run("redecompose rows are skipped as non-critique history", func(t *testing.T) {
+		redecomposeHistory := []debateRound{
+			{RoundNumber: 1, CritiqueText: "Bead ordering violations (structural, mechanically detected...)", Reconciliation: "", Outcome: "redecompose"},
+		}
+		current := findingsByBead(priorCritique)
+		if isRepeatDisagreement("http-handlers", current, redecomposeHistory) {
+			t.Error("a redecompose row's mechanical prose must not be parsed as a matching critique")
+		}
+	})
+}
+
+func TestNormalizeFindingText(t *testing.T) {
+	a := normalizeFindingText(`Depends on templates/index.html — the 'templates' bead.`)
+	b := normalizeFindingText(`depends on templates/index.html — the "templates" bead.`)
+	if a != b {
+		t.Errorf("expected quote-style and case differences to normalize equal, got %q vs %q", a, b)
+	}
+}
+
 func TestExtractRunTestName(t *testing.T) {
 	cases := []struct {
 		criterion string
