@@ -503,6 +503,7 @@ func (s *server) handleRemoveProject(w http.ResponseWriter, r *http.Request) {
 		`DELETE FROM handoff_jobs     WHERE project_id = ?`,
 		`DELETE FROM audit_reconcile_rounds WHERE project_id = ?`,
 		`DELETE FROM verb_model_assignments WHERE project_id = ?`,
+		`DELETE FROM test_refinements WHERE project_id = ?`,
 		`UPDATE beads SET current_revision_id = NULL WHERE project_id = ?`,
 		`DELETE FROM bead_revisions   WHERE project_id = ?`,
 		`DELETE FROM beads            WHERE project_id = ?`,

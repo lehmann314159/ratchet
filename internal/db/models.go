@@ -49,7 +49,7 @@ type Project struct {
 	Label                    string
 	FolderPath               string
 	DesignDocPath            string
-	Status                   string // 'active' | 'full_stopped' | 'complete' | 'paused'
+	Status                   string // 'active' | 'full_stopped' | 'complete' | 'paused' | 'fixture'
 	RecoveredFromProjectID   sql.NullInt64
 	MonitorOverrideDefault   string // 'honor' | 'ignore'
 	ExecutionBudgetDefault   int

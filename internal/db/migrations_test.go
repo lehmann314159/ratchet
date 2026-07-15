@@ -165,6 +165,56 @@ func TestMigrateProjectsStatusPreservesData(t *testing.T) {
 	  VALUES (3,'proj-C','/tmp/c','c.md','paused','honor',300,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`)
 }
 
+func TestMigrateProjectsStatusFixturePreservesData(t *testing.T) {
+	ctx := context.Background()
+	d := openRawTestDB(t)
+	mustExec(t, d, `CREATE TABLE projects (
+	  id INTEGER PRIMARY KEY,
+	  label TEXT NOT NULL,
+	  folder_path TEXT NOT NULL,
+	  design_doc_path TEXT NOT NULL,
+	  status TEXT NOT NULL CHECK (status IN ('active','full_stopped','complete','paused')),
+	  recovered_from_project_id INTEGER REFERENCES projects(id),
+	  monitor_override_default TEXT NOT NULL CHECK (monitor_override_default IN ('honor','ignore')),
+	  execution_budget_default INTEGER NOT NULL,
+	  audit_reconcile_round_cap INTEGER NOT NULL DEFAULT 2,
+	  max_execution_attempts INTEGER NOT NULL DEFAULT 5,
+	  language TEXT NOT NULL DEFAULT 'go',
+	  pause_after_reconcile INTEGER NOT NULL DEFAULT 0,
+	  created_at TIMESTAMP NOT NULL,
+	  updated_at TIMESTAMP NOT NULL
+	)`)
+	mustExec(t, d, `INSERT INTO projects (id,label,folder_path,design_doc_path,status,monitor_override_default,execution_budget_default,language,created_at,updated_at)
+	  VALUES (1,'proj-A','/tmp/a','a.md','active','honor',300,'python','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`)
+	mustExec(t, d, `INSERT INTO projects (id,label,folder_path,design_doc_path,status,recovered_from_project_id,monitor_override_default,execution_budget_default,language,created_at,updated_at)
+	  VALUES (2,'proj-B','/tmp/b','b.md','paused',1,'ignore',400,'go','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`)
+	// Simulate the two columnMigrations that precede this in real Open().
+	mustExec(t, d, `ALTER TABLE projects ADD COLUMN pause_after_verb TEXT`)
+	mustExec(t, d, `ALTER TABLE projects ADD COLUMN pause_after_bead_id INTEGER`)
+	mustExec(t, d, `UPDATE projects SET pause_after_verb = 'CERTIFY_MANIFEST' WHERE id = 2`)
+
+	if err := d.migrateProjectsStatusFixture(); err != nil {
+		t.Fatalf("migrateProjectsStatusFixture: %v", err)
+	}
+
+	var label, lang string
+	var recov sql.NullInt64
+	var pauseVerb sql.NullString
+	if err := d.QueryRowContext(ctx,
+		`SELECT label, language, recovered_from_project_id, pause_after_verb FROM projects WHERE id = 2`,
+	).Scan(&label, &lang, &recov, &pauseVerb); err != nil {
+		t.Fatalf("row lost after migration: %v", err)
+	}
+	if label != "proj-B" || lang != "go" || !recov.Valid || recov.Int64 != 1 || pauseVerb.String != "CERTIFY_MANIFEST" {
+		t.Errorf("data corrupted: label=%q language=%q recovered_from=%v pause_after_verb=%v", label, lang, recov, pauseVerb)
+	}
+
+	// The new CHECK value must actually be accepted, including a negative
+	// (fixture-style) ID.
+	mustExec(t, d, `INSERT INTO projects (id,label,folder_path,design_doc_path,status,monitor_override_default,execution_budget_default,created_at,updated_at)
+	  VALUES (-1,'fixture: proj-C','/tmp/c','c.md','fixture','honor',300,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`)
+}
+
 func TestMigrateAuditReconcileRoundsOutcomePreservesData(t *testing.T) {
 	ctx := context.Background()
 	d := openRawTestDB(t)

@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS projects (
   label                       TEXT    NOT NULL,
   folder_path                 TEXT    NOT NULL,
   design_doc_path             TEXT    NOT NULL,
-  status                      TEXT    NOT NULL CHECK (status IN ('active', 'full_stopped', 'complete', 'paused')),
+  status                      TEXT    NOT NULL CHECK (status IN ('active', 'full_stopped', 'complete', 'paused', 'fixture')),
   recovered_from_project_id   INTEGER REFERENCES projects(id),
   monitor_override_default    TEXT    NOT NULL CHECK (monitor_override_default IN ('honor', 'ignore')),
   execution_budget_default    INTEGER NOT NULL,

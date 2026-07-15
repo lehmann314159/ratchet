@@ -35,6 +35,9 @@ func main() {
 		case "full-stop-project":
 			project.RunFullStopProjectMain(os.Args[2:])
 			return
+		case "save-fixture":
+			project.RunSaveFixtureMain(os.Args[2:])
+			return
 		case "restart-project":
 			project.RunRestartProjectMain(os.Args[2:])
 			return

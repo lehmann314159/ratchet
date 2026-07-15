@@ -370,3 +370,47 @@ func TestHandleTrace_NoArbitraryPathParameter(t *testing.T) {
 		t.Fatalf("expected the old query-param route to 404 (no matching handler), got %d: %s", w.Code, w.Body.String())
 	}
 }
+
+// --- handleRemoveProject ---
+
+// TestHandleRemoveProject_WithTestRefinementsSucceeds reproduces a gap found
+// while designing save-fixture: the delete steps list was missing
+// test_refinements, so removing a project with any REFINE_TESTS history hit
+// a live FK violation (test_refinements.bead_id references beads, and beads
+// was deleted first) instead of succeeding.
+func TestHandleRemoveProject_WithTestRefinementsSucceeds(t *testing.T) {
+	s, d := openTestServer(t)
+	ctx := context.Background()
+	projectID := seedProject(t, d)
+	beadID := seedBead(t, d, projectID, 300)
+
+	if _, err := d.ExecContext(ctx, `
+		INSERT INTO test_refinements (project_id, bead_id, cycle_id, turn, verb, changed, created_at)
+		VALUES (?, ?, 1, 1, 'REFINE_TESTS_WRITE', 1, '2026-01-01T00:00:00Z')`,
+		projectID, beadID); err != nil {
+		t.Fatalf("seed test_refinements: %v", err)
+	}
+	if _, err := d.ExecContext(ctx,
+		`UPDATE projects SET status = 'full_stopped' WHERE id = ?`, projectID); err != nil {
+		t.Fatalf("set project full_stopped: %v", err)
+	}
+
+	rec := doPost(t, s, "/projects/"+strconv.FormatInt(projectID, 10)+"/remove", nil)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 redirect, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var count int
+	if err := d.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE id = ?`, projectID).Scan(&count); err != nil {
+		t.Fatalf("query projects: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("project row still present after remove")
+	}
+	if err := d.QueryRowContext(ctx, `SELECT COUNT(*) FROM test_refinements WHERE project_id = ?`, projectID).Scan(&count); err != nil {
+		t.Fatalf("query test_refinements: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("test_refinements rows still present after remove")
+	}
+}
