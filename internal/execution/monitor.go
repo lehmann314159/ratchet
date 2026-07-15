@@ -7,12 +7,14 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"ratchet/internal/db"
 	"ratchet/internal/ollama"
+	"ratchet/internal/trace"
 )
 
 // RunMonitorMain is the entry point for the `ratchet monitor` subcommand.
@@ -119,6 +121,24 @@ func runMonitor(d *db.DB, oc *ollama.Client, execID int64) error {
 				return nil
 			}
 
+			// Mechanical check for the two "explicit loop patterns" documented in
+			// monitorSystemPrompt. These were previously enforced purely by the
+			// model reading the rule out of the prompt against raw trace text, with
+			// no mechanical backstop — a weaker model (mistral-small3.2:24b) could
+			// miss an instance the rule was written to catch (observed: checkers-v8
+			// bead 627 attempt 2, a repeated identical self-check command did not
+			// fire). trace.Parse already produces the structured data needed to
+			// check both rules directly; ANALYZE_EXECUTION already relies on it.
+			if reason := mechanicalLoopPatternCheck(traceStr); reason != "" {
+				fired = true
+				if err := writeMonitorFired(d, execID, true); err != nil {
+					return fmt.Errorf("write monitor_fired (loop pattern): %w", err)
+				}
+				slog.Info("monitor fired — mechanical loop pattern detected",
+					"execution_id", execID, "reason", reason)
+				return nil
+			}
+
 			decision, err := callMonitorModel(ctx, oc, model, traceStr)
 			if err != nil {
 				slog.Warn("monitor model call failed; skipping this tick",
@@ -165,6 +185,58 @@ func isWriteFileStall(trace string) bool {
 		return strings.HasPrefix(line, "[TURN ")
 	}
 	return false
+}
+
+// mechanicalLoopPatternCheck mechanically evaluates the two "Explicit loop
+// patterns" rules documented in monitorSystemPrompt, returning a non-empty
+// reason string if either fires. Runs before the model call as a backstop —
+// the model is also instructed to apply these same rules, but nothing
+// previously verified it actually did.
+func mechanicalLoopPatternCheck(traceStr string) string {
+	// Rule 2: repeated write_file missing-path error.
+	if strings.Count(traceStr, "write_file requires a 'path' argument") >= 2 {
+		return "write_file missing-path error appeared 2+ times"
+	}
+
+	// Rule 1: the same run_command producing identical stdout+stderr twice
+	// with no successful write_file in between. Walk commands and successful
+	// writes in chronological (turn) order; a successful write clears the
+	// recurrence tracking, matching "no intervening write" in the rule.
+	pt := trace.Parse([]byte(traceStr))
+	type event struct {
+		turn      int
+		seq       int // stable tie-break for same-turn events
+		isWrite   bool
+		signature string
+	}
+	events := make([]event, 0, len(pt.Commands)+len(pt.WriteFiles))
+	for i, c := range pt.Commands {
+		events = append(events, event{turn: c.Turn, seq: i * 2, signature: c.Command + "\x00" + c.Stdout + "\x00" + c.Stderr})
+	}
+	for i, w := range pt.WriteFiles {
+		if w.Succeeded {
+			events = append(events, event{turn: w.Turn, seq: i*2 + 1, isWrite: true})
+		}
+	}
+	sort.Slice(events, func(i, j int) bool {
+		if events[i].turn != events[j].turn {
+			return events[i].turn < events[j].turn
+		}
+		return events[i].seq < events[j].seq
+	})
+
+	seen := make(map[string]bool)
+	for _, e := range events {
+		if e.isWrite {
+			seen = make(map[string]bool)
+			continue
+		}
+		if seen[e.signature] {
+			return "same run_command produced identical output twice with no intervening write_file"
+		}
+		seen[e.signature] = true
+	}
+	return ""
 }
 
 // callMonitorModel calls the model and returns "FIRE" or "NO_FIRE".

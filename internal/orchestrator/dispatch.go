@@ -13,6 +13,23 @@ import (
 	"ratchet/internal/verbs"
 )
 
+// completeExecuteBeadJob marks an EXECUTE_BEAD job complete after
+// RunExecutionWindow returns nil. The update is guarded on status='running':
+// RunExecutionWindow's infra-failure path (execute-bead crashed before writing
+// any termination_cause) already moves this same job to 'pending' (retry,
+// under infraFailureCap) or 'escalated' (at cap) itself before returning nil.
+// Without this guard, an unconditional write here clobbered that decision back
+// to 'complete' every time, silently stranding the bead — no ANALYZE_EXECUTION
+// job exists to pick it back up on the infra-failure path, and an escalation
+// was invisible to a human. On the normal completion path the job is still
+// 'running' (nothing else updates it), so this still fires exactly as before.
+func completeExecuteBeadJob(ctx context.Context, d *db.DB, jobID int64) error {
+	_, err := d.ExecContext(ctx,
+		`UPDATE handoff_jobs SET status = 'complete', updated_at = ? WHERE id = ? AND status = 'running'`,
+		time.Now().UTC().Format(time.RFC3339), jobID)
+	return err
+}
+
 // dispatch executes one handoff job end-to-end:
 //  1. Marks the job running.
 //  2. Calls the verb handler's Run (HTTP call to Ollama — outside any transaction).
@@ -34,10 +51,7 @@ func dispatch(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[str
 				time.Now().UTC().Format(time.RFC3339), job.ID)
 			return err
 		}
-		_, err := d.ExecContext(ctx,
-			`UPDATE handoff_jobs SET status = 'complete', updated_at = ? WHERE id = ?`,
-			time.Now().UTC().Format(time.RFC3339), job.ID)
-		return err
+		return completeExecuteBeadJob(ctx, d, job.ID)
 	}
 
 	handler, ok := handlers[job.Verb]

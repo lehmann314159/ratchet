@@ -3,6 +3,9 @@ package execution
 import (
 	"context"
 	"database/sql"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"ratchet/internal/db"
@@ -31,6 +34,81 @@ func TestParseDecision(t *testing.T) {
 				t.Errorf("parseDecision(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+// --- isTestsLockedMode ---
+
+// TestIsTestsLockedMode_PureTestBeadNeverLocks reproduces the Stage 4 audit
+// bug: a bead whose output_files is entirely *_test.go (e.g. an
+// integration-test bead with no implementation files of its own — 72 such
+// beads exist in production data) must never enter "tests locked" mode, even
+// if its own test file already exists on disk from a prior attempt. Before
+// the fix, this bead shape tripped isTestsLockedMode (built for a REFINE_TESTS
+// impl bead retrying against a separately-owned, pre-certified test file),
+// producing a contradictory prompt (the file was simultaneously the only
+// legal Output File and explicitly "LOCKED, do NOT write") and an empty
+// expectedFiles slice.
+func TestIsTestsLockedMode_PureTestBeadNeverLocks(t *testing.T) {
+	dir := t.TempDir()
+	outputFiles := []string{"integration_test.go"}
+	if err := os.WriteFile(filepath.Join(dir, "integration_test.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if isTestsLockedMode(dir, outputFiles) {
+		t.Error("expected isTestsLockedMode=false for a pure-test bead (no non-test output files) even with its test file already on disk")
+	}
+
+	// The user message must not be contradictory: the model must be allowed
+	// to write its own test file, and must not see a LOCKED section for it.
+	msg := buildBeadUserMsg("spec text", outputFiles, []string{"go test ./..."}, "", "", "", dir)
+	if strings.Contains(msg, "LOCKED") {
+		t.Errorf("expected no Tests Locked section for a pure-test bead, got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "integration_test.go") {
+		t.Errorf("expected integration_test.go to still be listed as a writable Output File, got:\n%s", msg)
+	}
+}
+
+// TestIsTestsLockedMode_ImplBeadStillLocks confirms the fix doesn't break the
+// intended case: an impl bead with both test and non-test output files, whose
+// test file was pre-certified by REFINE_TESTS (already on disk), must still
+// lock the test file and restrict writes to the implementation file.
+func TestIsTestsLockedMode_ImplBeadStillLocks(t *testing.T) {
+	dir := t.TempDir()
+	outputFiles := []string{"game.go", "game_test.go"}
+	if err := os.WriteFile(filepath.Join(dir, "game_test.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !isTestsLockedMode(dir, outputFiles) {
+		t.Error("expected isTestsLockedMode=true for an impl bead whose pre-certified test file already exists on disk")
+	}
+
+	msg := buildBeadUserMsg("spec text", outputFiles, []string{"go test ./..."}, "", "", "", dir)
+	if !strings.Contains(msg, "LOCKED") {
+		t.Errorf("expected a Tests Locked section for an impl bead with a pre-certified test file, got:\n%s", msg)
+	}
+}
+
+// --- buildMissingPathWarning ---
+
+// TestBuildMissingPathWarning_EmptyExpectedFilesDoesNotPanic guards the crash
+// found alongside the isTestsLockedMode bug: expectedFiles[0] was indexed
+// unconditionally, which panicked (crashing execute-bead with no
+// termination_cause written) whenever expectedFiles was empty. Kept as a
+// defensive backstop even though the isTestsLockedMode fix removes the only
+// known way to reach this with an empty slice.
+func TestBuildMissingPathWarning_EmptyExpectedFilesDoesNotPanic(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("buildMissingPathWarning(nil) panicked: %v", r)
+		}
+	}()
+	msg := buildMissingPathWarning(nil)
+	if msg == "" {
+		t.Error("expected a non-empty warning message even with no expected files")
 	}
 }
 
@@ -99,6 +177,114 @@ func seedExecution(t *testing.T, d *db.DB, projectID, beadID, revID int64) int64
 	}
 	id, _ := res.LastInsertId()
 	return id
+}
+
+// --- handleInfraFailure ---
+//
+// No test exercised this function before the Stage 4 audit, even though it's
+// the function whose job-status writes the dispatch.go clobbering bug
+// stomped. These tests cover handleInfraFailure in isolation; the clobbering
+// itself is covered by TestCompleteExecuteBeadJob_DoesNotClobberInfraFailureRetry
+// in internal/orchestrator.
+
+func TestHandleInfraFailure_UnderCapRetriesJob(t *testing.T) {
+	d := openTestDB(t)
+	seedProject(t, d, -1)
+	beadID, revID := seedBeadWithRevision(t, d, -1, 300)
+	execID := seedExecution(t, d, -1, beadID, revID)
+
+	res, err := d.ExecContext(context.Background(), `
+		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
+		VALUES (-1, ?, ?, 'running', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		db.VerbExecuteBead, beadID)
+	if err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+	jobID, _ := res.LastInsertId()
+	job := &db.HandoffJob{ID: jobID, ProjectID: -1, Verb: db.VerbExecuteBead, BeadID: sql.NullInt64{Int64: beadID, Valid: true}}
+
+	if err := handleInfraFailure(context.Background(), d, execID, beadID, job); err != nil {
+		t.Fatalf("handleInfraFailure: %v", err)
+	}
+
+	var execInfraFailure int
+	var terminationCause string
+	if err := d.QueryRowContext(context.Background(),
+		`SELECT infra_failure, termination_cause FROM executions WHERE id = ?`, execID,
+	).Scan(&execInfraFailure, &terminationCause); err != nil {
+		t.Fatalf("query execution: %v", err)
+	}
+	if execInfraFailure != 1 || terminationCause != "success" {
+		t.Errorf("execution: infra_failure=%d termination_cause=%q, want 1/\"success\"", execInfraFailure, terminationCause)
+	}
+
+	var beadStatus string
+	if err := d.QueryRowContext(context.Background(),
+		`SELECT status FROM beads WHERE id = ?`, beadID,
+	).Scan(&beadStatus); err != nil {
+		t.Fatalf("query bead: %v", err)
+	}
+	if beadStatus != "pending" {
+		t.Errorf("bead status = %q, want pending", beadStatus)
+	}
+
+	var jobStatus string
+	if err := d.QueryRowContext(context.Background(),
+		`SELECT status FROM handoff_jobs WHERE id = ?`, jobID,
+	).Scan(&jobStatus); err != nil {
+		t.Fatalf("query job: %v", err)
+	}
+	if jobStatus != "pending" {
+		t.Errorf("job status = %q, want pending (under infraFailureCap, should retry)", jobStatus)
+	}
+}
+
+func TestHandleInfraFailure_AtCapEscalates(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1)
+	beadID, revID := seedBeadWithRevision(t, d, -1, 300)
+
+	// Two prior infra failures already recorded, each with a distinct
+	// started_at so the consecutive-failure count query orders correctly.
+	for i, startedAt := range []string{"2026-01-01T00:00:00Z", "2026-01-01T00:05:00Z"} {
+		res, err := d.ExecContext(ctx, `
+			INSERT INTO executions
+			  (project_id, bead_id, bead_revision_id, trace_path, monitor_honored,
+			   started_at, infra_failure, termination_cause, ended_at)
+			VALUES (-1, ?, ?, ?, 1, ?, 1, 'success', ?)`,
+			beadID, revID, "/tmp/prior-trace.log", startedAt, startedAt)
+		if err != nil {
+			t.Fatalf("seed prior infra failure %d: %v", i, err)
+		}
+		_ = res
+	}
+
+	execID := seedExecution(t, d, -1, beadID, revID) // started_at 2026-01-01T00:00:00Z per helper; fine, only ordering vs a real attempt matters
+
+	res, err := d.ExecContext(ctx, `
+		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
+		VALUES (-1, ?, ?, 'running', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		db.VerbExecuteBead, beadID)
+	if err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+	jobID, _ := res.LastInsertId()
+	job := &db.HandoffJob{ID: jobID, ProjectID: -1, Verb: db.VerbExecuteBead, BeadID: sql.NullInt64{Int64: beadID, Valid: true}}
+
+	if err := handleInfraFailure(ctx, d, execID, beadID, job); err != nil {
+		t.Fatalf("handleInfraFailure: %v", err)
+	}
+
+	var jobStatus string
+	if err := d.QueryRowContext(ctx,
+		`SELECT status FROM handoff_jobs WHERE id = ?`, jobID,
+	).Scan(&jobStatus); err != nil {
+		t.Fatalf("query job: %v", err)
+	}
+	if jobStatus != "escalated" {
+		t.Errorf("job status = %q, want escalated (3rd consecutive infra failure, at cap)", jobStatus)
+	}
 }
 
 // --- writeMonitorFired ---

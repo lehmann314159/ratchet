@@ -103,3 +103,64 @@ func TestRecordCommitFailure_EscalatesAtTolerance(t *testing.T) {
 		t.Errorf("expected status 'escalated' at tolerance, got %q", status)
 	}
 }
+
+// TestCompleteExecuteBeadJob_DoesNotClobberInfraFailureRetry reproduces the
+// Stage 4 audit bug: internal/execution/window.go's handleInfraFailure moves
+// an EXECUTE_BEAD job to 'pending' (to retry, under infraFailureCap) or
+// 'escalated' (at cap) itself, then returns nil. Before the fix,
+// completeExecuteBeadJob's write was unconditional and always clobbered that
+// decision back to 'complete' — silently stranding the bead, since no
+// ANALYZE_EXECUTION job exists on the infra-failure path to pick it back up.
+// Verifies the status='running' guard leaves a job handleInfraFailure already
+// moved untouched.
+func TestCompleteExecuteBeadJob_DoesNotClobberInfraFailureRetry(t *testing.T) {
+	for _, finalStatus := range []string{"pending", "escalated"} {
+		t.Run(finalStatus, func(t *testing.T) {
+			d := openTestDB(t)
+			job := seedRunningJob(t, d)
+			ctx := context.Background()
+
+			// Simulate handleInfraFailure already having moved the job out of
+			// 'running' before RunExecutionWindow returned nil.
+			if _, err := d.ExecContext(ctx,
+				`UPDATE handoff_jobs SET status = ? WHERE id = ?`, finalStatus, job.ID,
+			); err != nil {
+				t.Fatalf("simulate handleInfraFailure write: %v", err)
+			}
+
+			if err := completeExecuteBeadJob(ctx, d, job.ID); err != nil {
+				t.Fatalf("completeExecuteBeadJob: %v", err)
+			}
+
+			var status string
+			if err := d.QueryRowContext(ctx, `SELECT status FROM handoff_jobs WHERE id = ?`, job.ID).Scan(&status); err != nil {
+				t.Fatalf("query job status: %v", err)
+			}
+			if status != finalStatus {
+				t.Errorf("expected completeExecuteBeadJob to leave status %q untouched, got %q — bug reproduced: infra-failure decision clobbered", finalStatus, status)
+			}
+		})
+	}
+}
+
+// TestCompleteExecuteBeadJob_CompletesRunningJob verifies the normal
+// completion path still works: a job still 'running' (the state
+// RunExecutionWindow leaves it in on a real successful execution) is marked
+// 'complete'.
+func TestCompleteExecuteBeadJob_CompletesRunningJob(t *testing.T) {
+	d := openTestDB(t)
+	job := seedRunningJob(t, d)
+	ctx := context.Background()
+
+	if err := completeExecuteBeadJob(ctx, d, job.ID); err != nil {
+		t.Fatalf("completeExecuteBeadJob: %v", err)
+	}
+
+	var status string
+	if err := d.QueryRowContext(ctx, `SELECT status FROM handoff_jobs WHERE id = ?`, job.ID).Scan(&status); err != nil {
+		t.Fatalf("query job status: %v", err)
+	}
+	if status != "complete" {
+		t.Errorf("expected status 'complete' for a normally-completed running job, got %q", status)
+	}
+}

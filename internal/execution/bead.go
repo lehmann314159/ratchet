@@ -472,10 +472,29 @@ func isTestFirstMode(folderPath string, outputFiles []string) bool {
 }
 
 // isTestsLockedMode returns true when the bead has *_test.go output files AND
-// at least one of them already exists on disk. This indicates REFINE_TESTS has
-// already run: the test files are certified and must not be modified by EXECUTE_BEAD.
-// In this mode the executor should write ONLY the implementation files.
+// at least one of them already exists on disk AND the bead also has at least
+// one non-test output file. This indicates REFINE_TESTS has already run: the
+// test files are certified and must not be modified by EXECUTE_BEAD; the
+// executor should write ONLY the implementation files.
+//
+// The non-test-file requirement matters for pure-test beads (output_files
+// consisting entirely of *_test.go — e.g. integration-test beads with no
+// implementation files of their own). Without it, a pure-test bead whose file
+// survives on disk from a prior attempt would be mistaken for a REFINE_TESTS-
+// certified file belonging to someone else, producing a contradictory prompt
+// (the file is simultaneously the only "Output File" and explicitly "LOCKED")
+// with no legal implementation file to write instead.
 func isTestsLockedMode(folderPath string, outputFiles []string) bool {
+	hasNonTest := false
+	for _, f := range outputFiles {
+		if !strings.HasSuffix(f, "_test.go") {
+			hasNonTest = true
+			break
+		}
+	}
+	if !hasNonTest {
+		return false
+	}
 	for _, f := range outputFiles {
 		if strings.HasSuffix(f, "_test.go") {
 			if _, err := os.Stat(filepath.Join(folderPath, f)); err == nil {
@@ -572,6 +591,15 @@ func buildNoWriteWarning(expectedFiles []string) string {
 // calls write_file without a path argument. The generated content is still in
 // context; the model only needs to retry the call with an explicit path= argument.
 func buildMissingPathWarning(expectedFiles []string) string {
+	if len(expectedFiles) == 0 {
+		// Defensive: expectedFiles should never be empty here in practice, but
+		// indexing expectedFiles[0] below unconditionally would panic and crash
+		// the subprocess with no termination_cause written if some future bead
+		// shape ever reaches this with none. Degrade to a generic message instead.
+		return "Your write_file call was missing the required 'path' argument, so nothing was written to disk.\n\n" +
+			"Your generated content is still in context — do NOT regenerate it. " +
+			"Call write_file again immediately with an explicit path= argument naming the file you intended to write."
+	}
 	fileList := strings.Join(expectedFiles, ", ")
 	return fmt.Sprintf(
 		"Your write_file call was missing the required 'path' argument, so nothing was written to disk.\n\n"+

@@ -339,26 +339,206 @@ session (`go build ./...`, `go vet ./...`, `go test ./...` all clean). Retroacti
 project check surfaced confirmed corruption in 2 of 5 `COMPLETE` projects
 (3 beads total) predating the fix — documented, left unremediated per user decision.
 
-## Stage 4 — Bead execution: EXECUTE_BEAD / MONITOR_EXECUTION
+## Stage 4 — Bead execution: EXECUTE_BEAD / MONITOR_EXECUTION — AUDITED 2026-07-14
 
 Subprocess-based; not a normal one-shot verb (`Run`/`Validate`/`Commit`) — special-cased
 in the orchestrator. This is where the model actually writes code.
 
-- [ ] `internal/execution/bead.go` — the ChatWithTools loop, tool implementations,
-      budget/soft-stop handling
-- [ ] `internal/execution/window.go` — `RunExecutionWindow`, infra-failure retry cap,
-      orphaned-execution recovery on daemon restart
-- [ ] `internal/execution/monitor.go` — the parallel watchdog subprocess: FIRE/NO_FIRE
-      decision logic, the documented loop-pattern rules (repeated identical
-      `run_command` output with no intervening write; missing-path error 2+ times).
-      **Known gap observed today, not yet investigated**: a repeated identical
+- [x] `internal/execution/bead.go` — read in full (the ChatWithTools loop, tool
+      dispatch, budget/soft-stop handling, message-building helpers). **Found and
+      confirmed by reproduction (standalone unit test, then deleted — not a
+      permanent regression test yet, pending fix approval): a pure-test bead
+      (`output_files` consisting entirely of `*_test.go` — 72 such beads exist in
+      the live `ratchet.db`, e.g. `integration_test.go`-only integration beads) that
+      reaches a retry (`execute_revised`) with its test file already on disk trips
+      `isTestsLockedMode`.** That heuristic was designed for the REFINE_TESTS
+      test-first shape (impl bead retrying against pre-certified, separately-owned
+      test files) — for a pure-test bead it misfires: the bead's *own* file is
+      mistaken for someone else's pre-certified, locked file. Reproduced via
+      `isTestsLockedMode(dir, []string{"integration_test.go"})` = `true` when that
+      file exists on disk; `runExecuteBeadReal`'s `expectedFiles` computation for
+      the `testsLocked` branch then filters to *non*-test files, leaving
+      `expectedFiles` empty (`nil`) since the bead has no impl files at all.
+      `buildBeadUserMsg` produces a **self-contradictory prompt**: the "Output
+      Files" section says "You may ONLY write to: `integration_test.go`" directly
+      followed by a "Tests Locked" section saying "Do NOT write to
+      `integration_test.go` under any circumstances... Write ONLY the
+      implementation files listed in Output Files above" — but there are no
+      implementation files, so nothing is legally writable. If the model then
+      calls `write_file` without a `path` argument (an existing, already-handled
+      failure mode elsewhere in this file), `buildMissingPathWarning(expectedFiles)`
+      indexes `expectedFiles[0]` unconditionally and **panics** (`index out of
+      range [0] with length 0`), crashing the execute-bead subprocess without ever
+      writing `termination_cause` — which is exactly the infra-failure precondition
+      that then hits the `dispatch.go` bug below, silently stranding the bead.
+      Checked live DB: no bead has yet hit the exact trigger (a pure-test bead's
+      test file surviving on disk into a second execution against the same or a
+      later revision) — 72 pure-test beads exist but none has had 2+ executions
+      with the file already present going in, so this hasn't caused an observed
+      production failure yet. Same shape as Stage 1's stub-purity finding: reachable
+      by construction, not yet observed live. **FIXED 2026-07-14**: `isTestsLockedMode`
+      now requires at least one non-test file present in `output_files` before it
+      will consider tests "locked" — a pure-test bead can never legitimately be in
+      that mode, so it now falls through to the normal (non-contradictory) message
+      path, letting the model revise its own test file on retry as intended.
+      Defense-in-depth: `buildMissingPathWarning` no longer indexes `expectedFiles[0]`
+      unconditionally — an empty slice now degrades to a generic warning message
+      instead of panicking, in case some future bead shape reaches this some other
+      way. Tests added: `TestIsTestsLockedMode_PureTestBeadNeverLocks` (reproduces
+      this exact bug and confirms no contradictory prompt), 
+      `TestIsTestsLockedMode_ImplBeadStillLocks` (confirms the intended REFINE_TESTS
+      case still locks correctly), `TestBuildMissingPathWarning_EmptyExpectedFilesDoesNotPanic`.
+      Separately, lower-severity and not fixed: the no-write-warning retry (fires
+      once when the model declares done with zero tool calls and zero writes) falls
+      through to `termination_cause='success'` if the model ignores the warning and
+      again produces zero tool calls on the very next turn. Traced downstream:
+      `ANALYZE_EXECUTION`'s `checkOutputFiles` independently stats every output file
+      regardless of `termination_cause`, so this doesn't appear to change any actual
+      ADJUDICATE decision — it's a cosmetic mislabel in the trace/analysis text
+      ("Termination cause: success" for a run that wrote nothing), not a correctness
+      bug. Left as a low-priority note.
+- [x] `internal/execution/window.go` — read in full (`RunExecutionWindow`,
+      `handleInfraFailure`, `finalizeExecution`, kill helpers). **Found and confirmed
+      by reproduction (real compiled `ratchet` binary + real file-backed DB,
+      throwaway test then deleted) a severe bug spanning this file and
+      `internal/orchestrator/dispatch.go`: dispatch.go silently clobbers
+      handleInfraFailure's job-status decision.** `dispatch()`'s `EXECUTE_BEAD`
+      branch is: `if err := execution.RunExecutionWindow(...); err != nil {
+      ...failed_retry...; return err }` then, unconditionally,
+      `UPDATE handoff_jobs SET status = 'complete' WHERE id = ?`. But
+      `handleInfraFailure` (called from inside `RunExecutionWindow` when
+      execute-bead crashes before writing any `termination_cause`, e.g. SQLITE_BUSY
+      during its startup `db.Open`) already writes the *same* job's status itself —
+      `'pending'` to retry when under `infraFailureCap` (3), `'escalated'` when at
+      cap — and returns `nil` on a successful write. Because `RunExecutionWindow`
+      then also returns `nil`, `dispatch()` takes the success branch and overwrites
+      whatever `handleInfraFailure` just wrote back to `'complete'`, unconditionally,
+      with no status guard. Net effect: **any infra failure permanently and
+      silently strands the bead** — marked `'complete'` with no `ANALYZE_EXECUTION`
+      ever enqueued (window.go correctly skips that on the infra-failure path, so
+      there's no other job left to pick the bead back up), and even the
+      `infraFailureCap` escalation path is invisible to a human since `'escalated'`
+      also gets overwritten to `'complete'`. Reproduced live: built the real
+      `ratchet` binary, seeded a project with no `EXECUTE_BEAD` model assignment
+      (so the real execute-bead's startup JOIN returns `sql.ErrNoRows` and it exits
+      before writing anything — the same shape as the documented SQLITE_BUSY
+      scenario), called `RunExecutionWindow` for real, confirmed
+      `infra_failure=1`/`handoff_jobs.status='pending'` immediately after, then
+      replicated `dispatch.go`'s exact tail logic verbatim and watched it flip to
+      `'complete'`. Cross-checked the live `ratchet.db`: 8 beads show 2 consecutive
+      `infra_failure=1` executions in the July 4–10 window; all eventually reached
+      `status='succeeded'`, meaning recovery in practice required something other
+      than the built-in retry path (manual restart/rewind per the session-55
+      "Operational finding" in `[[project_ratchet]]`) — consistent with, though not
+      conclusive proof of, this bug biting in production. **FIXED 2026-07-14**:
+      extracted the `EXECUTE_BEAD` completion write into
+      `completeExecuteBeadJob(ctx, d, jobID)` (`internal/orchestrator/dispatch.go`,
+      alongside `recordCommitFailure` — same "small, directly-testable helper"
+      pattern) and added `AND status = 'running'` to its `UPDATE`. On the normal
+      completion path the job is still `'running'` (nothing else touches it), so it
+      still fires exactly as before; on the infra-failure path the job is already
+      `'pending'`/`'escalated'`, so the guarded write now affects zero rows instead
+      of clobbering it. Tests added (`internal/orchestrator/dispatch_test.go`):
+      `TestCompleteExecuteBeadJob_DoesNotClobberInfraFailureRetry` (both the
+      `'pending'` and `'escalated'` cases — reproduces the exact bug), 
+      `TestCompleteExecuteBeadJob_CompletesRunningJob` (confirms the normal path is
+      unaffected). Also added direct coverage for `handleInfraFailure` itself
+      (`internal/execution/execution_test.go`), which had zero tests before this
+      session: `TestHandleInfraFailure_UnderCapRetriesJob`,
+      `TestHandleInfraFailure_AtCapEscalates`.
+      `recoverOrphanedExecutions`/`resetStaleRunning` (orchestrator.go/queue.go) were
+      also read in full as part of tracing this — they handle the *different*
+      scenario of the whole orchestrator process crashing/restarting mid-execution,
+      and are unaffected by this bug (correctly gated on `status = 'running'`).
+- [x] `internal/execution/monitor.go` — read in full. **Root-caused the checklist's
+      known gap.** The only mechanical (non-model) FIRE check in this file is
+      `isWriteFileStall` (trace byte-size unchanged for 24 consecutive ~30s ticks
+      *and* the last trace line is a bare `[TURN N]` marker) — this catches exactly
+      one failure mode, "model frozen mid-generation," and nothing else. The two
+      "Explicit loop patterns" rules stated in `monitorSystemPrompt`
+      (1: identical `run_command` stdout/stderr twice with no intervening
+      `write_file` → FIRE; 2: the literal string `write_file requires a 'path'`
+      appearing 2+ times → FIRE) have **zero mechanical backstop** — both are
+      enforced purely by `mistral-small3.2:24b` (the weakest model in the fleet)
+      correctly parsing and applying a prompt rule against raw trace text.
+      `monitor.go` never calls `internal/trace.Parse`, even though that package
+      already produces exactly the structured data (`CommandResult{Command, Stdout,
+      Stderr, Turn}`) needed to check rule 1 mechanically, and is already used for
+      this purpose by `ANALYZE_EXECUTION` — the capability exists in the codebase,
+      it's just not wired into the live watchdog. This directly explains the
+      checkers-v8 bead 627 attempt 2 gap noted below: a repeated identical
+      `grep ... && echo Pass || echo Fail` self-check (always exit 0, so it never
+      even touches `isWriteFileStall`'s trace-growth check, since a run_command +
+      result pair appends to the trace every tick) depends entirely on the model
+      correctly applying rule 1 from prose, with no fallback if it doesn't. This is
+      the same class of gap as Stage 5's `declare_success` finding: a model's own
+      narrative feeds a consequential decision (FIRE/NO_FIRE) with no mechanical
+      ground truth consulted for two rules that are, in fact, mechanically checkable.
+      **FIXED 2026-07-14**: added `mechanicalLoopPatternCheck` (mirrors
+      `isWriteFileStall`'s placement — a pre-check run before the model call), using
+      `trace.Parse`'s `CommandResult`/`WriteFileResult` lists to detect both
+      documented rules directly: rule 1 walks commands and successful writes in
+      chronological (turn) order, tracking a per-signature (command+stdout+stderr)
+      "seen" set that's cleared on every successful write, firing on a repeat; rule
+      2 is a literal `strings.Count` of the exact missing-path error text (matching
+      the string `toolWriteFile` actually returns) reaching 2+. Test added:
+      `internal/execution/monitor_test.go` (`TestMechanicalLoopPatternCheck`) —
+      covers both rules firing, both rules *not* firing when the mitigating
+      condition holds (different output; an intervening write; only one
+      occurrence), and the checkers-v8 bead 627 scenario specifically (the exact
+      `grep ... && echo Pass || echo Fail` self-check pattern).
+      Original known-gap note, now explained rather than open: a repeated identical
       self-check command (`grep ... && echo Pass || echo Fail`, always exit 0) did
       NOT trigger a MONITOR fire in checkers-v8 bead 627 attempt 2, even though the
       printed stdout was identical ("Fail") both times with no intervening write —
-      confirm whether this is a real gap in the loop-pattern rule or working as
-      intended for a different reason.
-- [ ] `internal/execution/tools.go` — `toolRunCommand` and other tool implementations
-- [ ] `internal/execution/prompts.go` — EXECUTE and MONITOR system prompts
+      confirmed this is a real gap (no mechanical enforcement of the loop-pattern
+      rule), not working-as-intended.
+- [x] `internal/execution/tools.go` — read in full. `safePath` correctly blocks `../`
+      traversal and absolute-path escapes for `write_file`/`read_file` (verified by
+      reasoning through `filepath.Join`+`Clean`+prefix-check against both defeat
+      forms). `run_command`'s arbitrary `bash -c` execution is intentional (running
+      build/test commands is the model's job), not a bug. Cross-checked the exact
+      error string `toolWriteFile` returns for a missing path
+      (`"write_file requires a 'path' argument"`) against `bead.go`'s
+      `strings.Contains` check that sets `missingPathDetected` — strings match
+      exactly, no drift. No bugs found.
+- [x] `internal/execution/prompts.go` — read in full (`executeBeadSystemPrompt` +
+      `monitorSystemPrompt`). Cross-checked the EXECUTE prompt's stated rules
+      (Output Files as write permission, read-before-write on an existing file,
+      the `ls`-based Output-Files-exist check before declaring done) against
+      `bead.go`'s actual behavior — consistent, no drift found beyond the
+      `isTestsLockedMode` bug already noted above (which is a code-logic bug, not a
+      prompt/code mismatch). `monitorSystemPrompt`'s loop-pattern rules are covered
+      under `monitor.go` above.
+- [x] Test coverage check (Method item 6): `execution_test.go` covers only
+      DB-plumbing helpers (`writeMonitorFired`, `writeTerminationCause`,
+      `readMonitorFired`) and pure string logic (`parseDecision`, `stubLine`);
+      `smoke_test.go` covers the SIGTERM contract and the monitor-fire two-stage
+      kill. **Zero coverage existed for either bug found this session**:
+      `isTestFirstMode`/`isTestsLockedMode`/`buildBeadUserMsg`/
+      `buildMissingPathWarning` (the contradiction+panic bug) and
+      `handleInfraFailure` (the dispatch.go clobbering bug) had no tests at all —
+      not even a happy-path test of `handleInfraFailure` in isolation. Both
+      throwaway verification tests written this session were deleted after
+      confirming the bugs (per standing practice: propose before applying a fix);
+      real regression tests should be added alongside whichever fix the user
+      approves.
+
+**Session log (2026-07-14):** Two real, confirmed-by-reproduction bugs found (the
+`isTestsLockedMode` pure-test-bead contradiction+panic in `bead.go`, and the
+`dispatch.go`/`handleInfraFailure` job-status clobbering spanning
+`execution/window.go` and `orchestrator/dispatch.go`), plus one root-caused,
+previously-open known gap (MONITOR's loop-pattern rules have no mechanical
+backstop). All three verified by real reproduction this session (built binary +
+real DB for the dispatch bug; standalone unit test for the panic bug), not just
+static reading — throwaway test files deleted after verification, no permanent
+code changes made yet. Cross-checked live `ratchet.db` for both bugs: the panic
+bug hasn't been triggered live yet (72 pure-test beads exist, none has hit the
+exact retry-with-file-on-disk precondition); the dispatch-clobbering bug has
+suggestive-but-not-conclusive live evidence (8 beads with repeated infra failures
+in July 4–10, all eventually recovered via what appears to be manual intervention
+rather than the built-in retry path). No fixes applied — pending user decision, per
+standing practice ([[feedback_propose_before_apply]]).
 
 ## Stage 5 — Analysis & judgment: ANALYZE_EXECUTION / COMPRESS_ANALYSIS / ADJUDICATE_NEXT_EXECUTION
 
@@ -422,9 +602,16 @@ not just the one code path that was already fixed.
       handling, `EXECUTE_BEAD`'s special-casing. **Partial credit from Stage 2's
       audit**: the `handler.Commit()`-error-wedges-the-job gap found there (generic
       to every verb, not just RECONCILE) was fixed 2026-07-15 — see Stage 2's
-      `applyFixes` entry and `recordCommitFailure` in this file. Rest of this
-      stage (queue.go's FIFO ordering, EXECUTE_BEAD special-casing, orchestrator.go
-      poll loop, lock.go) still genuinely unaudited.
+      `applyFixes` entry and `recordCommitFailure` in this file. **Partial credit
+      from Stage 4's audit**: the `EXECUTE_BEAD` branch's unconditional
+      `UPDATE handoff_jobs SET status = 'complete'` after `RunExecutionWindow`
+      returns `nil` clobbered `handleInfraFailure`'s own status write (`pending` or
+      `escalated`) on the infra-failure path — confirmed by reproduction and
+      **fixed 2026-07-14** (extracted to `completeExecuteBeadJob`, guarded on
+      `status = 'running'`). See Stage 4's `window.go` entry for the full writeup.
+      Rest of this stage (queue.go's FIFO ordering, EXECUTE_BEAD special-casing
+      beyond this one bug, orchestrator.go poll loop, lock.go) still genuinely
+      unaudited.
 - [ ] `internal/orchestrator/orchestrator.go`, `internal/orchestrator/lock.go` —
       main poll loop, advisory locking, `recoverOrphanedExecutions` on startup
 
@@ -494,3 +681,24 @@ othello-v3-f (48), tasklist-v1 (49), chess-v1 (87), chess-v3 (89), goban-v2 (91)
   live corruption in 2 of 5 `COMPLETE` projects (chess-v1 bead 536, goban-v2
   beads 565/566) predating the fix — user decided to leave both as-is
   (archival, no remediation). See `[[project_audit_stage3]]` memory.
+- 2026-07-14: Stage 4 done. Two real bugs found and confirmed by reproduction
+  (real compiled binary + real DB for one; standalone unit test for the other;
+  throwaway test files deleted after verification, no permanent changes made):
+  (1) `dispatch.go`'s unconditional `status='complete'` write after
+  `RunExecutionWindow` returns clobbers `handleInfraFailure`'s own
+  pending/escalated status write, silently stranding any bead hit by an infra
+  failure (spans `execution/window.go` and `orchestrator/dispatch.go`, cross-
+  referenced into Stage 7); (2) a pure-test bead (output_files entirely
+  `*_test.go`, 72 exist in the live DB) retrying with its test file already on
+  disk trips `isTestsLockedMode`, producing a self-contradictory prompt and an
+  empty `expectedFiles` slice that panics `buildMissingPathWarning` if the model
+  ever calls `write_file` without a path. Also root-caused the standing "MONITOR
+  didn't fire on a repeated self-check" gap: the two documented loop-pattern
+  rules have zero mechanical backstop, purely model-narrative-driven (same class
+  as Stage 5's `declare_success` finding). User chose "fix all 3 now" — all
+  three fixed and tested same day (`go build ./...`, `go vet ./...`, `go test
+  ./...` and the real-subprocess smoke tests all clean), with new regression
+  tests for each including two functions (`handleInfraFailure`,
+  `completeExecuteBeadJob`) that had zero prior coverage. Left uncommitted
+  pending user review, per standing practice. See `[[project_audit_stage4]]`
+  memory.
