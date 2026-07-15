@@ -38,6 +38,9 @@ func main() {
 		case "save-fixture":
 			project.RunSaveFixtureMain(os.Args[2:])
 			return
+		case "clone-project":
+			project.RunCloneProjectMain(os.Args[2:])
+			return
 		case "restart-project":
 			project.RunRestartProjectMain(os.Args[2:])
 			return
