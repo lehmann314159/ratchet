@@ -107,19 +107,36 @@ func dispatch(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[str
 	}
 
 	// Single atomic transaction: write attempt + result (if valid) + next jobs + job status.
+	var commitFailed bool
 	txErr := withTx(ctx, d, func(tx *sql.Tx) error {
 		if err := commitAttempt(ctx, tx, job.ID, attemptNum, rawOutput, validationResult, nextStatus, startedAt); err != nil {
 			return err
 		}
 		if isValid {
 			if err := handler.Commit(ctx, tx, job, parsed); err != nil {
+				commitFailed = true
 				return fmt.Errorf("commit result: %w", err)
 			}
 		}
 		return nil
 	})
 	if txErr != nil {
-		return txErr
+		if !commitFailed {
+			// commitAttempt itself failed — a plain DB write error, unrelated to
+			// the model's output. Same treatment as a Run() failure: retry
+			// without counting a strike.
+			return txErr
+		}
+		// handler.Commit failed after Validate already accepted the output as
+		// well-formed (e.g. RECONCILE's applyFixes hitting a bead lookup that
+		// doesn't exist). The whole transaction — including the attempt row —
+		// rolled back, so without this the job is left in 'running' forever:
+		// claimNextJob only claims 'pending'/'failed_retry' jobs, and the only
+		// reset path (resetStaleRunning) runs once at daemon startup. Recording
+		// this as a failed attempt reuses the existing strike/tolerance math so
+		// the job retries, then escalates, instead of silently wedging the
+		// orchestrator's one execution slot until a human restarts the daemon.
+		return recordCommitFailure(ctx, d, job, attemptNum, rawOutput, startedAt, strikes, tolerance, txErr)
 	}
 
 	if shouldEscalate {
@@ -148,6 +165,53 @@ func dispatch(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[str
 // have their model assignment looked up (VERIFY_MANIFEST has none).
 func verbSkipsModelWarmup(verb string) bool {
 	return verb == db.VerbVerifyManifest
+}
+
+// recordCommitFailure runs in a fresh transaction after handler.Commit has
+// failed and the original attempt transaction has rolled back. It writes the
+// attempt as failed (validation_result carries the Commit error, distinct
+// from a Validate failure) and applies the same strike/tolerance decision
+// dispatch already computed for a Validate failure, so a Commit error is
+// retried and eventually escalated exactly like any other bad attempt,
+// instead of leaving the job stuck in 'running' indefinitely.
+func recordCommitFailure(ctx context.Context, d *db.DB, job *db.HandoffJob, attemptNum int, rawOutput string, startedAt time.Time, strikes, tolerance int, commitErr error) error {
+	slog.Error("verb Commit failed", "verb", job.Verb, "job_id", job.ID, "project_id", job.ProjectID, "error", commitErr)
+
+	nextStatus := "failed_retry"
+	shouldEscalate := strikes+1 > tolerance
+	if shouldEscalate {
+		nextStatus = "escalated"
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	txErr := withTx(ctx, d, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO handoff_attempts (job_id, attempt_number, raw_output, validation_result, created_at, ended_at)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			job.ID, attemptNum, rawOutput, "commit_error: "+commitErr.Error(),
+			startedAt.UTC().Format(time.RFC3339), now,
+		); err != nil {
+			return fmt.Errorf("record commit-failure attempt: %w", err)
+		}
+		_, err := tx.ExecContext(ctx,
+			`UPDATE handoff_jobs SET status = ?, updated_at = ? WHERE id = ?`,
+			nextStatus, now, job.ID)
+		return err
+	})
+	if txErr != nil {
+		return txErr
+	}
+
+	if shouldEscalate {
+		slog.Error("ESCALATION — requires human review (Commit failure)",
+			"project_id", job.ProjectID, "job_id", job.ID, "verb", job.Verb,
+			"bead_id", job.BeadID, "strikes", strikes+1, "tolerance", tolerance,
+		)
+	} else {
+		slog.Warn("job attempt failed at Commit, will retry",
+			"verb", job.Verb, "job_id", job.ID, "strikes", strikes+1, "next_status", nextStatus)
+	}
+	return nil
 }
 
 // withTx executes fn within a new transaction, rolling back on error.

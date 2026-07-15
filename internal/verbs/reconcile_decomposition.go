@@ -19,6 +19,7 @@ type ReconcileDecomposition struct {
 	lastCritique    string
 	lastRoundsSoFar int
 	lastHistory     []debateRound
+	knownTitles     map[string]bool
 	budgetDefault   int
 	folderPath      string
 }
@@ -51,10 +52,14 @@ func (h *ReconcileDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.C
 		return "", err
 	}
 
-	// Cache for Commit (single-goroutine orchestrator; no race).
+	// Cache for Validate/Commit (single-goroutine orchestrator; no race).
 	h.lastCritique = critique
 	h.lastRoundsSoFar = roundsSoFar
 	h.lastHistory = history
+	h.knownTitles = make(map[string]bool, len(beads))
+	for _, b := range beads {
+		h.knownTitles[b.Title] = true
+	}
 	h.budgetDefault = project.ExecutionBudgetDefault
 	h.folderPath = project.FolderPath
 
@@ -123,6 +128,9 @@ func (h *ReconcileDecomposition) Validate(raw string) (string, any) {
 		}
 		if r.Action == "agree_and_fix" && r.UpdatedBead == nil {
 			return fmt.Sprintf("malformed: responses[%d] action is agree_and_fix but updated_bead is absent", i), nil
+		}
+		if r.Action == "agree_and_fix" && !h.knownTitles[r.UpdatedBead.Title] {
+			return fmt.Sprintf("malformed: responses[%d] updated_bead.title %q does not match any current bead title — do not rename a bead when fixing it", i, r.UpdatedBead.Title), nil
 		}
 		if r.Action == "disagree" && strings.TrimSpace(r.Reason) == "" {
 			return fmt.Sprintf("malformed: responses[%d] action is disagree but reason is empty", i), nil

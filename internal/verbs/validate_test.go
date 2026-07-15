@@ -77,7 +77,7 @@ func TestAuditDecompositionValidate(t *testing.T) {
 }
 
 func TestReconcileDecompositionValidate(t *testing.T) {
-	h := &ReconcileDecomposition{}
+	h := &ReconcileDecomposition{knownTitles: map[string]bool{"B01": true}}
 	tests := []struct {
 		name  string
 		input string
@@ -96,6 +96,16 @@ func TestReconcileDecompositionValidate(t *testing.T) {
 		{
 			"agree_and_fix missing updated_bead",
 			`{"responses":[{"bead_title":"B01","action":"agree_and_fix","reason":"ok"}]}`,
+			false,
+		},
+		{
+			// Reproduces the applyFixes crash found in the Stage 2 audit: a
+			// well-formed agree_and_fix whose updated_bead.title doesn't match
+			// any existing bead (typo/rename) used to sail through Validate and
+			// only fail deep inside Commit's DB lookup, rolling back the whole
+			// transaction. Must now be caught here instead.
+			"agree_and_fix with unknown updated_bead title",
+			`{"responses":[{"bead_title":"B01","action":"agree_and_fix","reason":"correct","updated_bead":{"title":"B01 Renamed","full_text":"fixed","execution_budget":60,"monitor_override":"honor","output_files":["b01.go"],"exit_criteria":["go build ./..."]}}]}`,
 			false,
 		},
 		{

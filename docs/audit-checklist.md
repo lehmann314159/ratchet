@@ -149,33 +149,130 @@ Verified by reproduction throughout: `git log -p` for the stub-purity hardcode's
 origin, live-DB query across all `verify_attempts` rows, and a script cross-checking
 three real projects' actual SURVEY_SPEC declarations for control-flow tokens.
 
-## Stage 2 — Decomposition: DECOMPOSE_SPEC / AUDIT_DECOMPOSITION / RECONCILE_DECOMPOSITION
+## Stage 2 — Decomposition: DECOMPOSE_SPEC / AUDIT_DECOMPOSITION / RECONCILE_DECOMPOSITION — AUDITED 2026-07-14/15
 
-Design doc + survey doc → bead specs, with a model debate loop. Partially exercised
-today (three real bugs found and fixed here: bead-ordering forward-references,
-round-cap counter sharing, RECONCILE tie-break on verbatim-repeat findings) — but all
-three were found reactively, chasing a specific incident, not via a systematic pass.
-Treat as unaudited.
+Design doc + survey doc → bead specs, with a model debate loop.
 
-- [ ] `internal/verbs/decompose_spec.go` — DECOMPOSE_SPEC, including
-      `forwardFileReferenceChecks`'s known scope limit (only catches *subdirectory*
-      asset forward-references, not same-directory or non-literal dependencies —
-      stated explicitly as a partial fix at the time)
-- [ ] `internal/verbs/audit_decomposition.go` — AUDIT_DECOMPOSITION, including the
-      recurring pattern observed today where AUDIT re-raises structurally-identical
-      findings across rounds even when instructed not to (the tie-break fix handles
-      the *symptom*; is there a cheaper prompt-level fix for the *cause*?)
-- [ ] `internal/verbs/reconcile_decomposition.go` — RECONCILE_DECOMPOSITION,
-      including the new `isRepeatDisagreement` tie-break logic itself (added today —
-      audit your own new code with the same scrutiny as everything else)
-- [ ] `internal/verbs/mechanical_checks.go` — every mechanical check in this file,
-      not just `forwardFileReferenceChecks` and the new repeat-detection helpers
-- [ ] `internal/verbs/inputs.go` — `latestAuditCritique`, `loadDebateHistory`, and
-      every other shared-counter/shared-query helper this stage depends on (the
-      round-cap bug lived here; are there siblings?)
-- [ ] Cross-check: `round_number` collisions between mechanical `redecompose` rows and
-      real debate rounds (both can now legitimately share round_number=1) — cosmetic
-      today, confirm it stays cosmetic as more mechanical gates are potentially added
+- [x] `internal/verbs/decompose_spec.go` — read in full (Run/Validate/Commit/
+      commitRedecompose). `forwardFileReferenceChecks`'s documented scope limit
+      (subdirectory paths only) confirmed still accurate, not re-litigated — it's an
+      intentional recall/precision tradeoff, not a bug.
+- [x] `internal/verbs/audit_decomposition.go` — read in full. No new bugs found in
+      this file itself; the "AUDIT re-raises identical findings" pattern is fully
+      handled downstream by `isRepeatDisagreement` (RECONCILE side) — did not find a
+      cheaper prompt-level fix worth the churn; the mechanical tie-break is already
+      the more reliable of the two options (per this audit's own Method: prefer
+      mechanical ground truth over prompt-level hoping).
+- [x] `internal/verbs/reconcile_decomposition.go` — read in full, including
+      `isRepeatDisagreement`'s call site in `Commit`. **Found the bug described
+      below** (round_number) plus a second, more severe one in `applyFixes`.
+- [x] `internal/verbs/mechanical_checks.go` — read in full (650 lines, every
+      function). No new defeat scenarios found beyond the documented ones;
+      `goFixBeadSpec`'s vacuous-pass guard picks the *first* test file in
+      `output_files` when a bead owns more than one and the exit criterion lacks
+      `-run` — low-severity (the grep pattern is generic, `'func Test'`, not a
+      specific name, so picking the "wrong" file rarely matters) — noted, not fixed.
+- [x] `internal/verbs/inputs.go` — read `latestAuditCritique`/`loadDebateHistory` and
+      every other query helper in the file. **`loadDebateHistory` is the sibling the
+      checklist asked about**: it loads *every* `audit_reconcile_rounds` row for the
+      project with no `outcome` filter, feeding both AUDIT's and RECONCILE's prompts
+      — see the round_number finding below for why this matters.
+- [x] Cross-check: `round_number` collisions — **confirmed NOT cosmetic, found live
+      in production data, two independent mechanisms:**
+
+  **Bug 1 — round_number is not a single authoritative sequence.**
+  `DecomposeSpec.commitRedecompose` numbers redecompose rows via
+  `COUNT(outcome='redecompose')+1` (its own 1,2,3... sequence); RECONCILE's `Commit`
+  numbers real rounds via `COUNT(outcome!='redecompose')+1` (a separate 1,2,3...
+  sequence, since last session's round-cap fix). Any project with at least one of
+  each collides at `round_number=1`. **Verified in the live DB**: project 98
+  (checkers-v8) has two rows with `(project_id=98, round_number=1)` — one
+  `outcome='redecompose'`, one `outcome='disagreed_continuing'`.
+
+  **Bug 2 — COUNT-based numbering is not self-healing, and collides between two
+  *real* rounds too.** Project 97 (checkers-v7) has two rows with
+  `(project_id=97, round_number=2, outcome='escalated')`, from two different
+  `handoff_attempts` on the *same* `RECONCILE_DECOMPOSITION` job (attempt 1 at
+  18:09:58, attempt 2 at 19:36:26 — nearly 1.5h apart, i.e. a manual requeue of the
+  escalated job, not an automatic retry). Attempt 1's round_number=2 was itself a
+  relic of the pre-fix code (which counted the redecompose row too); attempt 2's
+  fresh COUNT-based computation (now fixed, counting only the 1 real row from
+  attempt 1) landed on the same number by coincidence. This proves COUNT-based
+  "next round number" inherits and perpetuates any historical mislabeling instead of
+  self-correcting — `MAX(round_number)+1` would not have this property.
+
+  **Downstream impact, confirmed by reading (not yet observed live)**:
+  `loadDebateHistory` has no `outcome` filter, so both collisions are rendered
+  verbatim into the "Previous Debate History" section of both AUDIT's and
+  RECONCILE's own prompts — two `### Round 1` (or `### Round 2`) headers back to
+  back, one of them a `redecompose` row whose `reconciliation` column is `''`, so
+  `formatReconcileResponses` renders it as an empty "Reconcile Response" block
+  attributed to a round that was never actually reconciled.
+
+  **FIXED 2026-07-15**: added `nextRoundNumber` (`internal/verbs/inputs.go`) —
+  `SELECT COALESCE(MAX(round_number),0)+1 FROM audit_reconcile_rounds WHERE
+  project_id=?`, a single project-wide sequence spanning every row regardless of
+  outcome. Both `DecomposeSpec.commitRedecompose` and
+  `ReconcileDecomposition.Commit` now use it for the stored `round_number`,
+  while keeping their existing (unchanged, still correct) COUNT-based counters
+  for the redecompose-cap and round-cap comparisons — display numbering and
+  cap-counting are now two explicitly separate concerns instead of one
+  conflated variable. Tests added:
+  `TestReconcileDecompositionCommitRoundNumberAfterRedecompose` and
+  `TestDecomposeSpecCommitRedecomposeRoundNumberAfterRealRound` (mirror cases),
+  both reproducing the exact production collisions found above.
+
+  **Bug 3 (found investigating Bug 1/2, more severe, broader than Stage 2) —
+  `ReconcileDecomposition.applyFixes`'s bead lookup
+  (`WHERE json_extract(br.full_text,'$.title') = ?`) is not defended by `Validate()`.**
+  `Validate` only checks `UpdatedBead != nil`, never that `updated_bead.title`
+  matches an existing bead. A title typo/case-drift/rename in the model's own output
+  — a well-formed JSON response that passes `Validate` — causes `applyFixes` to hit
+  `sql.ErrNoRows`, which `Commit` returns as an error. Traced all the way through
+  `internal/orchestrator/dispatch.go`: a `Commit()` error rolls back the *entire*
+  transaction (losing every `agree_and_fix` update in the batch, not just the bad
+  one), and — this is the broader, Stage-7-scope part — **the job is left in
+  `status='running'` with no automatic recovery**. `tick()`
+  (`internal/orchestrator/orchestrator.go`) just logs and moves to the next poll;
+  `claimNextJob` only claims `'pending'` jobs; the only reset path is
+  `resetStaleRunning`, which runs once at daemon startup. In steady state, any
+  handler's `Commit()` error silently wedges the orchestrator's single execution
+  slot until a human notices and restarts the daemon. Checked the live DB: no job is
+  currently stuck this way (`SELECT ... WHERE status='running'` → empty), so this
+  hasn't visibly bitten anyone yet — verified by tracing the code path, not by a
+  caught incident. **FIXED 2026-07-15, both halves**: RECONCILE's `Validate` now
+  caches the current project's bead titles (`h.knownTitles`, populated in `Run`,
+  same pattern already used for `lastCritique`/`lastRoundsSoFar`/`lastHistory`)
+  and rejects an `agree_and_fix` whose `updated_bead.title` doesn't match any of
+  them — a title mismatch is now a normal malformed-output retry instead of a
+  hard `Commit()` error. Additionally fixed the broader mechanism in
+  `internal/orchestrator/dispatch.go` (pulled forward from Stage 7, since it was
+  found here and the fix is small and self-contained): a `handler.Commit()`
+  error is now caught, recorded as a failed attempt via the new
+  `recordCommitFailure` helper (reusing the exact strike/tolerance math already
+  computed for a `Validate` failure), and the job is moved to `failed_retry` or
+  `escalated` — never left stuck in `'running'`. Tests added:
+  `internal/verbs/validate_test.go` (new case reproducing the title-mismatch
+  input), `internal/orchestrator/dispatch_test.go` (new file — first tests for
+  the `orchestrator` package — covering both the under-tolerance retry and the
+  at-tolerance escalation paths of `recordCommitFailure`).
+- [x] Test coverage check (Method item 6): decent coverage exists
+      (`mechanical_checks_test.go`, `debate_test.go`, `commit_test.go`) for the
+      individual pieces added last session (`forwardFileReferenceChecks`,
+      `isRepeatDisagreement`, sequential 2-round debate progression) but none of it
+      exercises a redecompose-then-real-round interleaving, a requeue-after-
+      escalation retry, or a title-mismatched `agree_and_fix` — i.e. it covers the
+      happy path of round progression, not the failure modes just found.
+
+**Session log (2026-07-14/15):** Three real bugs found (two are one root cause —
+round_number numbering — plus the applyFixes title-validation gap that surfaced a
+broader orchestrator-wide recovery gap). Verified by reproduction: live-DB queries
+against project 97 and 98's actual `audit_reconcile_rounds`/`handoff_jobs`/
+`handoff_attempts` rows, and a full code trace of the Commit-error path through
+`dispatch.go`/`orchestrator.go`/`queue.go`. User chose "fix all 3, including the
+orchestrator gap" — all fixed and tested same day (`go build ./...`, `go vet ./...`,
+`go test ./...` all clean), including the first-ever tests for the `orchestrator`
+package. Left uncommitted pending user review, per standing practice.
 
 ## Stage 3 — Test refinement: REFINE_TESTS_WRITE / REFINE_TESTS_CRITIQUE / REFINE_TESTS_JUDGE
 
@@ -284,7 +381,12 @@ not just the one code path that was already fixed.
       out-of-order bead run ahead of a stuck one; confirm this is still intentional
       and doesn't cause a subtler problem than the one already found)
 - [ ] `internal/orchestrator/dispatch.go` — generic verb dispatch, strike/tolerance
-      handling, `EXECUTE_BEAD`'s special-casing
+      handling, `EXECUTE_BEAD`'s special-casing. **Partial credit from Stage 2's
+      audit**: the `handler.Commit()`-error-wedges-the-job gap found there (generic
+      to every verb, not just RECONCILE) was fixed 2026-07-15 — see Stage 2's
+      `applyFixes` entry and `recordCommitFailure` in this file. Rest of this
+      stage (queue.go's FIFO ordering, EXECUTE_BEAD special-casing, orchestrator.go
+      poll loop, lock.go) still genuinely unaudited.
 - [ ] `internal/orchestrator/orchestrator.go`, `internal/orchestrator/lock.go` —
       main poll loop, advisory locking, `recoverOrphanedExecutions` on startup
 
