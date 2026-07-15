@@ -1165,7 +1165,7 @@ real data rather than assumed. All fixes verified: `go build ./...` / `go vet ./
 historical model outputs from the live `ratchet-projects/ratchet.db`. Left uncommitted
 pending user review, per standing practice.
 
-## Stage 10 — Retroactive check across past "COMPLETE" projects — DONE 2026-07-14 (folded into Stage 3)
+## Stage 10 — Retroactive check across past "COMPLETE" projects — DONE 2026-07-14 (folded into Stage 3), extended 2026-07-15 for Stage 9
 
 Not a code-audit stage — a data-audit stage, only meaningful once Stage 3's fix
 landed. Performed as part of Stage 3's own retroactive-check item rather than as a
@@ -1185,6 +1185,60 @@ othello-v3-f (48), tasklist-v1 (49), chess-v1 (87), chess-v3 (89), goban-v2 (91)
 - [x] tasklist-v1 (project 49) — no beads share a test file; not exposed to this bug.
 - [x] chess-v1 (project 87) — **corrupted**: bead 536 clobbered by bead 537 in shared
       `ai_test.go`; bead 536's own exit criterion now fails. See Stage 3.
+
+**Follow-up 2026-07-15 — retroactive check for the three Stage 9 fixes.** Extended
+this stage to cross-check `ollama.ExtractJSON`'s trailing-fence bug, `splice`'s
+import-shadowing bug, and `report.lastTestResult`'s truncated-mislabel bug against
+real historical data in `ratchet-projects/ratchet.db` and its trace/log/report
+artifacts, rather than treating Stage 9 as closed on code-reading and reproduction
+alone.
+
+- [x] **`ollama.ExtractJSON`** — replayed old vs. new implementation against every
+      `handoff_attempts.raw_output` row (1,527 rows) belonging to the 11 verbs whose
+      `Validate` actually pipes `rawOutput` through `ExtractJSON` (excludes
+      `VERIFY_MANIFEST` and `REFINE_TESTS_WRITE`, both of which re-marshal a Go
+      struct server-side and `json.Unmarshal` it directly — confirmed by reading
+      each `Validate` body, not assumed; an initial unscoped pass had wrongly
+      flagged a `REFINE_TESTS_WRITE` row as "rescued by the fix" before this
+      correction). **Zero real historical outcomes changed** either direction (no
+      row rescued, no regression) — the bug is real and reproducible but never
+      actually fired in production to date.
+- [x] **`splice` import-shadowing** — grepped the real `ratchet.log` orchestrator
+      log for every `REFINE_TESTS_WRITE: compile failed` line (14 total) looking
+      for "imported and not used" (the bug's signature). Found 2 real instances
+      (beads 570, 571, both 2026-07-12, both in goban-v2) — but traced both to a
+      *different*, already-fixed root cause: pre-Stage-3, `splice.Replace` never
+      called `syncImports` at all, so a revision that stopped using a package left
+      its now-stale import in place. Both predate Stage 3's 2026-07-14 fix and
+      self-healed on the next turn once redone under fixed code; neither is
+      explained by (or was still live for) this session's shadowing fix. The other
+      2 `REFINE_TESTS_WRITE` compile failures found in the same grep pass
+      (beads 557, 629 — "declared and not used") are genuine model bugs, unrelated
+      to `splice` entirely, correctly caught by the compile gate. One further
+      escalation found in the same log sweep (bead 583, `TestNewGame redeclared`)
+      was already root-caused and fixed same-day in commit `4fafc23`
+      (mechanically-owned `api_check_test.go` renamed to `do_not_use_this_test.go`
+      to stop exactly this class of model/framework name collision) — not a new
+      finding. No live evidence of the variable-shadowing false-positive this
+      session actually fixed.
+- [x] **`report.lastTestResult`** truncated-mislabel — scanned all 115 real
+      `traces/bead-*-report.md` files on disk across every `ratchet-projects/*`
+      project for an Attempt-History row where Termination was
+      `timeout`/`monitor_terminated`/`monitor_force_killed` and Last Test Result
+      was `FAIL` (38 such rows). Cross-checked each against the underlying
+      `analyses.mechanical_findings` text in the live DB (28 of the 38 execution
+      IDs still resolve there; the other 10 belong to superseded report files from
+      the same folder path being reused across earlier dev-iteration project rows,
+      not evidence of anything). **Zero** had a `(truncated)` "Last run:" line —
+      every one of the 28 verified `FAIL` labels was a genuine completed exit
+      criterion (`exit exit status 1`) in an execution that was killed for
+      unrelated reasons afterward. Bug confirmed real and reproducible, never yet
+      triggered in a real report.
+
+All three Stage 9 fixes: real, reproducible, currently latent in production —
+consistent with this audit's recurring "hasn't bitten yet, but will" pattern (same
+bar as Stage 1's stub-purity gap). No retroactive remediation needed for any of the
+115 existing bead reports or historical handoff attempts.
 
 ---
 
