@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,8 +71,13 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 
 	// Detect files the execute model wrote outside its declared output_files.
 	// This is structural fact, not interpretation — append directly to findings.
-	allBeads, _ := loadCurrentBeads(ctx, d, job.ProjectID)
-	if undeclared := checkUndeclaredFiles(folderPath, designDocPath, allBeads); undeclared != "" {
+	// A transient DB failure here must skip the check entirely, not run it
+	// against an empty bead list — checkUndeclaredFiles has no way to tell
+	// "no beads exist" from "the query failed," and would otherwise flag
+	// every file in the project folder as undeclared.
+	if allBeads, err := loadCurrentBeads(ctx, d, job.ProjectID); err != nil {
+		slog.Warn("checkUndeclaredFiles: load beads failed, skipping check", "project_id", job.ProjectID, "error", err)
+	} else if undeclared := checkUndeclaredFiles(folderPath, designDocPath, allBeads); undeclared != "" {
 		mechanicalFindings += "\n\n" + undeclared
 	}
 

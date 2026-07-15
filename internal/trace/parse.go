@@ -3,6 +3,7 @@ package trace
 import (
 	"bufio"
 	"bytes"
+	"log/slog"
 	"strconv"
 	"strings"
 )
@@ -155,6 +156,15 @@ func Parse(data []byte) ParsedTrace {
 				resultLines = append(resultLines, line)
 			}
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		// bufio.Scanner silently truncates as if it hit EOF when a single line
+		// exceeds the 1MB buffer (e.g. a large base64 blob printed with no
+		// embedded newlines) — scanner.Err() is the only signal that happened.
+		// Same graceful-degradation behavior this format already relies on for
+		// a genuinely killed/timed-out execution, so parsing continues with
+		// whatever was read; this is visibility only, not a behavior change.
+		slog.Warn("trace.Parse: scanner stopped early", "error", err, "bytes_scanned", len(data))
 	}
 
 	finalize()

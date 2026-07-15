@@ -105,6 +105,7 @@ func (h *DecomposeSpec) Validate(raw string) (string, any) {
 	if len(out.Beads) == 0 {
 		return "malformed: beads array is empty", nil
 	}
+	seenTitles := make(map[string]int, len(out.Beads))
 	for i, b := range out.Beads {
 		if b.Title == "" {
 			return fmt.Sprintf("malformed: bead[%d] missing title", i), nil
@@ -121,6 +122,14 @@ func (h *DecomposeSpec) Validate(raw string) (string, any) {
 		if len(b.ExitCriteria) == 0 {
 			return fmt.Sprintf("malformed: bead[%d] (%s) exit_criteria is missing or empty", i, b.Title), nil
 		}
+		// Every downstream title-keyed lookup (RevisePending's revisionMap,
+		// AUDIT/RECONCILE's own per-title maps) assumes titles are unique
+		// within a project — bead titles aren't a separate DB column, so this
+		// is the only point where a collision can be caught mechanically.
+		if prev, dup := seenTitles[b.Title]; dup {
+			return fmt.Sprintf("malformed: bead[%d] and bead[%d] both use title %q — every bead title must be unique", prev, i, b.Title), nil
+		}
+		seenTitles[b.Title] = i
 	}
 	return "valid", out
 }

@@ -517,12 +517,19 @@ func recurringTestFailureNote(ctx context.Context, d *db.DB, beadID int64) strin
 	}
 	sort.Strings(shared)
 
-	return "[Fast path — recurring test failure] The following subtest(s) failed identically " +
-		"across the last two attempts that revised the implementation: " + strings.Join(shared, ", ") +
-		". Revising the bead spec's implementation prose has not resolved this.\n\n" +
-		"Action: issue decision=re_refine, not execute_revised. In re_refine_guidance, explain " +
-		"for each listed subtest why its assertion cannot be satisfied by any correct " +
-		"implementation given how the test sets up its inputs, and what must change in the test."
+	return "[Recurring test failure] The following subtest(s) failed identically across the " +
+		"last two attempts that revised the implementation: " + strings.Join(shared, ", ") +
+		". Revising the bead spec's implementation prose alone has not resolved this so far — " +
+		"treat that as a strong signal, not proof the test itself is at fault.\n\n" +
+		"Before choosing a decision: check whether the failure looks like an implementation " +
+		"defect (a crash, a runtime/template error, a wrong computed value traceable to a " +
+		"specific, nameable logic bug) rather than a genuinely unsatisfiable assertion — a " +
+		"recurring failure can mean \"the implementation keeps making the same mistake\" just " +
+		"as easily as \"the test is wrong.\" Only use decision=re_refine if you can state, for " +
+		"each listed subtest, why its assertion cannot be satisfied by any correct " +
+		"implementation given how the test sets up its inputs — then explain that in " +
+		"re_refine_guidance. If instead you can name a specific, untried implementation change " +
+		"that would satisfy the assertion, use execute_revised and describe that change."
 }
 
 type AdjudicateNextExecution struct {

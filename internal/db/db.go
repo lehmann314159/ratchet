@@ -144,6 +144,71 @@ func (db *DB) applyTableMigrations() error {
 	if err := db.migrateBeadRevisionVerbsRewind(); err != nil {
 		return err
 	}
+	if err := db.migrateExecutionsTerminationCause(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// migrateExecutionsTerminationCause updates executions' termination_cause
+// CHECK constraint to include 'no_write', written when execute-bead's
+// no-write warning fires and the model still produces zero tool calls on
+// the very next turn — previously fell through to the generic 'success'
+// path, mislabeling a run that wrote nothing as a normal completion in the
+// trace/UI/report text (ANALYZE_EXECUTION's own file-stat check is
+// unaffected either way, since it never trusts termination_cause). Uses the
+// explicit column-list INSERT pattern (like migrateProjectsStatus), not
+// `SELECT *`, since applyMigrations (columnMigrations) has already appended
+// infra_failure/test_first_attempt to the old table by the time this runs.
+func (db *DB) migrateExecutionsTerminationCause() error {
+	var createSQL string
+	if err := db.QueryRow(
+		`SELECT COALESCE(sql, '') FROM sqlite_master WHERE type='table' AND name='executions'`,
+	).Scan(&createSQL); err != nil {
+		return fmt.Errorf("query executions schema: %w", err)
+	}
+	if strings.Contains(createSQL, "no_write") {
+		return nil
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		return fmt.Errorf("disable foreign_keys: %w", err)
+	}
+	stmts := []string{
+		`PRAGMA legacy_alter_table = ON`,
+		`ALTER TABLE executions RENAME TO _executions_old`,
+		`PRAGMA legacy_alter_table = OFF`,
+		`CREATE TABLE executions (
+		  id                 INTEGER PRIMARY KEY,
+		  project_id         INTEGER NOT NULL REFERENCES projects(id),
+		  bead_id            INTEGER NOT NULL REFERENCES beads(id),
+		  bead_revision_id   INTEGER NOT NULL REFERENCES bead_revisions(id),
+		  trace_path         TEXT    NOT NULL,
+		  termination_cause  TEXT    CHECK (termination_cause IN ('success', 'timeout', 'monitor_terminated', 'monitor_force_killed', 'no_write')),
+		  monitor_fired      INTEGER,
+		  monitor_honored    INTEGER,
+		  started_at         TIMESTAMP NOT NULL,
+		  ended_at           TIMESTAMP,
+		  infra_failure      INTEGER NOT NULL DEFAULT 0,
+		  test_first_attempt INTEGER NOT NULL DEFAULT 0
+		)`,
+		`INSERT INTO executions
+		  (id, project_id, bead_id, bead_revision_id, trace_path, termination_cause,
+		   monitor_fired, monitor_honored, started_at, ended_at, infra_failure, test_first_attempt)
+		SELECT
+		  id, project_id, bead_id, bead_revision_id, trace_path, termination_cause,
+		  monitor_fired, monitor_honored, started_at, ended_at, infra_failure, test_first_attempt
+		FROM _executions_old`,
+		`DROP TABLE _executions_old`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			_, _ = db.Exec(`PRAGMA foreign_keys = ON`)
+			return fmt.Errorf("migrate executions termination_cause (%s): %w", truncate(stmt, 40), err)
+		}
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		return fmt.Errorf("re-enable foreign_keys: %w", err)
+	}
 	return nil
 }
 

@@ -362,7 +362,7 @@ Respond with JSON only, no prose before or after:
     "<name of every Test* function reviewed and found correct>"
   ],
   "all_correct": true | false,
-  "summary": "<one sentence: N problems found in [functions], or all N tests verified correct>"
+  "summary": "<state the actual outcome in one sentence — if findings is non-empty, name the count and functions, e.g. \"2 problems found in TestFoo and TestBar\"; if findings is empty, e.g. \"All 6 tests verified correct\". Do not echo this instruction itself.>"
 }`
 
 const refineTestsJudgeSystemPrompt = `You are a test review judge. Given critique findings and the current test file, decide whether the file is ready to proceed or needs revision.

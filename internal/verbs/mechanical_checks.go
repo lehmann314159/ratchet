@@ -268,11 +268,18 @@ func goFixBeadSpec(bead *ParsedBead) bool {
 			if extractRunTestName(c) != "" {
 				continue // already has -run; guard applied in first pass
 			}
-			tf := testFileForName("Test", bead.OutputFiles)
-			if tf == "" {
+			// testFileForName's fallback (used for a generic "Test" name that
+			// never substring-matches a filename stem) always resolves to the
+			// bead's first test file — if the bead owns more than one and the
+			// missing test happens to land in a later one, that file's grep
+			// guard would wrongly vacuous-pass. grep natively checks multiple
+			// files and reports a match if any contains the pattern, so grep
+			// every owned test file instead of picking just one.
+			tfs := allTestFiles(bead.OutputFiles)
+			if len(tfs) == 0 {
 				continue
 			}
-			bead.ExitCriteria[i] = fmt.Sprintf("grep -q 'func Test' %s && %s", tf, c)
+			bead.ExitCriteria[i] = fmt.Sprintf("grep -q 'func Test' %s && %s", strings.Join(tfs, " "), c)
 			fixed = true
 		}
 		return fixed // owns a test file — no further structural fix needed
@@ -380,6 +387,19 @@ func addGrepGuard(criterion string, outputFiles []string) (string, bool) {
 		return criterion, false
 	}
 	return fmt.Sprintf("grep -q 'func %s' %s && %s", testName, tf, criterion), true
+}
+
+// allTestFiles returns every *_test.go file in outputFiles, excluding the
+// mechanically-owned apiCheckTestFilename (which is never where a model
+// writes behavioral test functions).
+func allTestFiles(outputFiles []string) []string {
+	var out []string
+	for _, f := range outputFiles {
+		if strings.HasSuffix(f, "_test.go") && filepath.Base(f) != apiCheckTestFilename {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // testFileForName returns the *_test.go file in outputFiles most likely to

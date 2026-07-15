@@ -8,7 +8,7 @@ import (
 )
 
 // SetVerbModelAssignment upserts a verb→model assignment for a project,
-// enforcing the four model-assignment constraints from the architecture:
+// enforcing the five model-assignment constraints from the architecture:
 //
 //  1. model(DECOMPOSE_SPEC) == model(RECONCILE_DECOMPOSITION)
 //     The reconciling model must be the decomposing model; otherwise a
@@ -25,8 +25,23 @@ import (
 //  4. model(CERTIFY_MANIFEST) != model(SURVEY_SPEC)
 //     The certifying model must differ from the surveying model; a model
 //     cannot provide independent review of its own output.
+//
+//  5. model(REFINE_TESTS_WRITE) != model(REFINE_TESTS_CRITIQUE)
+//     The writer and critic must be independent for the review to mean
+//     anything.
 func (db *DB) SetVerbModelAssignment(ctx context.Context, projectID int64, verb, model string) error {
-	existing, err := db.verbModelMap(ctx, projectID)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck — no-op once committed
+
+	// Reading the existing assignments and validating+writing the proposed
+	// one inside a single transaction makes this atomic: nothing currently
+	// calls this outside tests (no CLI/UI wires up verb reassignment yet),
+	// but a concurrent caller racing this read-check-write would otherwise
+	// be able to commit a constraint-violating pair.
+	existing, err := verbModelMap(ctx, tx, projectID)
 	if err != nil {
 		return err
 	}
@@ -41,17 +56,19 @@ func (db *DB) SetVerbModelAssignment(ctx context.Context, projectID int64, verb,
 		return fmt.Errorf("assignment rejected: %w", err)
 	}
 
-	_, err = db.ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO verb_model_assignments (project_id, verb, model)
 		 VALUES (?, ?, ?)
 		 ON CONFLICT (project_id, verb) DO UPDATE SET model = excluded.model`,
 		projectID, verb, model,
-	)
-	return err
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // SeedVerbModelAssignments writes all verb→model assignments for a new
-// project in a single transaction, enforcing all four model-assignment
+// project in a single transaction, enforcing all five model-assignment
 // constraints.
 func SeedVerbModelAssignments(ctx context.Context, tx *sql.Tx, projectID int64) error {
 	assignments := map[string]string{
@@ -151,9 +168,15 @@ func SeedVerbModelAssignmentsFromFleet(ctx context.Context, tx *sql.Tx, projectI
 	return nil
 }
 
+// queryContexter is satisfied by both *DB and *sql.Tx, letting verbModelMap
+// run against either a plain connection or an in-flight transaction.
+type queryContexter interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
 // verbModelMap returns the current verb→model map for a project.
-func (db *DB) verbModelMap(ctx context.Context, projectID int64) (map[string]string, error) {
-	rows, err := db.QueryContext(ctx,
+func verbModelMap(ctx context.Context, q queryContexter, projectID int64) (map[string]string, error) {
+	rows, err := q.QueryContext(ctx,
 		`SELECT verb, model FROM verb_model_assignments WHERE project_id = ?`,
 		projectID,
 	)
@@ -173,7 +196,7 @@ func (db *DB) verbModelMap(ctx context.Context, projectID int64) (map[string]str
 	return m, rows.Err()
 }
 
-// checkModelConstraints validates the four model-assignment constraints.
+// checkModelConstraints validates the five model-assignment constraints.
 // A partial assignment (not all verbs present) is allowed; constraints
 // are only violated if both verbs in a pair are present and conflict.
 func checkModelConstraints(m map[string]string) error {

@@ -149,6 +149,26 @@ func TestGoFixBeadSpec(t *testing.T) {
 		}
 	})
 
+	t.Run("owns two test files, no -run flag — vacuous-pass guard greps all owned test files, not just the first", func(t *testing.T) {
+		// Reproduces the Stage 2 audit finding: testFileForName's fallback for
+		// a generic "Test" name always resolves to the first *_test.go file,
+		// so a bead owning two test files could grep only the first — a false
+		// "nothing written" verdict if the model wrote real tests to the
+		// second file instead.
+		b := &ParsedBead{
+			OutputFiles:  []string{"game.go", "game_test.go", "ai_test.go"},
+			ExitCriteria: []string{"go test -v ."},
+		}
+		fixed := goFixBeadSpec(b)
+		if !fixed {
+			t.Fatal("expected the vacuous-pass guard to be added")
+		}
+		want := "grep -q 'func Test' game_test.go ai_test.go && go test -v ."
+		if b.ExitCriteria[0] != want {
+			t.Errorf("criterion = %q, want %q", b.ExitCriteria[0], want)
+		}
+	})
+
 	t.Run("layout bead with do_not_use_this_test.go — already correct form, idempotent", func(t *testing.T) {
 		b := &ParsedBead{
 			OutputFiles:  []string{"game.go", "do_not_use_this_test.go"},

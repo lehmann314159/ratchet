@@ -219,6 +219,15 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 				})
 				continue
 			}
+			if stubWarningInjected && writeFileCount == 0 {
+				// The warning already fired once and the model still wrote
+				// nothing on the very next turn — none of success/timeout/
+				// monitor_terminated/monitor_force_killed accurately describe
+				// this, so label it distinctly rather than mislabeling a
+				// zero-output run as a normal completion.
+				writeLine(traceFile, "[done — no further tool calls after no-write warning; nothing written]")
+				return writeTerminationCause(d, execID, "no_write")
+			}
 			writeLine(traceFile, "[done — no further tool calls]")
 			return writeTerminationCause(d, execID, "success")
 		}

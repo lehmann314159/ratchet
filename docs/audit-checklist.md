@@ -172,6 +172,9 @@ Design doc + survey doc → bead specs, with a model debate loop.
       `output_files` when a bead owns more than one and the exit criterion lacks
       `-run` — low-severity (the grep pattern is generic, `'func Test'`, not a
       specific name, so picking the "wrong" file rarely matters) — noted, not fixed.
+      **Follow-up 2026-07-15: fixed.** The guard now greps every owned test
+      file (`grep -q 'func Test' file1 file2 ...`) instead of only the first,
+      since grep natively reports a match if any listed file contains it.
 - [x] `internal/verbs/inputs.go` — read `latestAuditCritique`/`loadDebateHistory` and
       every other query helper in the file. **`loadDebateHistory` is the sibling the
       checklist asked about**: it loads *every* `audit_reconcile_rounds` row for the
@@ -311,6 +314,9 @@ Test-first mode's WRITE → CRITIQUE → JUDGE cycle.
       template, noted in `[[project_checkers]]`) is still present, still low-severity
       (doesn't affect the `all_correct`/`findings` fields JUDGE and downstream logic
       actually use) — left unfixed, not urgent.
+      **Follow-up 2026-07-15: fixed.** Reworded the JSON example to state the
+      two outcome branches as explicit conditional instructions instead of a
+      single fill-in-the-blank sentence a model could echo verbatim.
 - [x] Retroactive check across past `COMPLETE` projects, now that the fix exists to
       compare against: **confirmed real, live data corruption in two of the five
       `COMPLETE` projects.** Of the 5, only 3 had beads sharing a test file
@@ -397,6 +403,12 @@ in the orchestrator. This is where the model actually writes code.
       ADJUDICATE decision — it's a cosmetic mislabel in the trace/analysis text
       ("Termination cause: success" for a run that wrote nothing), not a correctness
       bug. Left as a low-priority note.
+      **Follow-up 2026-07-15: fixed.** Added `termination_cause='no_write'`
+      (schema migration, same pattern as `rewound_at`/`infra_failure`),
+      written specifically when the warning already fired once and the model
+      still produces zero tool calls on the very next turn — confirmed still
+      cosmetic (no ADJUDICATE decision changes), but the label is now
+      accurate.
 - [x] `internal/execution/window.go` — read in full (`RunExecutionWindow`,
       `handleInfraFailure`, `finalizeExecution`, kill helpers). **Found and confirmed
       by reproduction (real compiled `ratchet` binary + real file-backed DB,
@@ -561,6 +573,9 @@ file got the same scrutiny this session, not just that one code path.
       file in the project folder would be flagged "undeclared" in the findings text.
       Requires a transient DB failure at exactly that moment to trigger — flagged for
       visibility, not treated as a confirmed bug.
+      **Follow-up 2026-07-15: fixed.** The error is now checked; on failure the
+      check is skipped entirely (logged via `slog.Warn`) instead of running
+      against an empty bead list.
 - [x] `internal/verbs/compress_analysis.go` — read in full (`sanitizeJSON`,
       `escapeControlCharsInStrings`, `injectResolvedTags`, `synthesizeMinimalEntry`).
       Traced the two-pass JSON sanitizer and the RESOLVED-tag substring matching
@@ -635,6 +650,15 @@ file got the same scrutiny this session, not just that one code path.
   (real cause was a Go template scoping bug, not an impossible assertion) shows it
   can't distinguish "implementation produces wrong values" from "implementation
   throws a runtime/template error." Not re-chased this session.
+  **Follow-up 2026-07-15: softened, not mechanically fixed** (this genuinely
+  requires model judgment, not a mechanical distinction — no structured
+  signal reliably tells "wrong computed value" from "unsatisfiable
+  assertion"). The note no longer issues an unconditional
+  "Action: issue decision=re_refine" command; it now requires the model to
+  name why no correct implementation could satisfy the assertion before
+  choosing re_refine, and explicitly permits execute_revised if it can name
+  an untried implementation fix — aligned with the softer framing the
+  adjacent general REFINE_TESTS note already used.
 - [x] Cross-check: `verifyExitCriteriaMechanically`'s wiring into `declare_success`
       traced end-to-end against `atExecutionCap` — when the mechanical gate fails and
       the bead is at its attempt cap, `atExecutionCap` correctly escalates the job
@@ -682,6 +706,11 @@ Left uncommitted pending user review, per standing practice.
       a model emitting two identical bead titles would silently collide. Low
       probability, and shared by AUDIT/RECONCILE's own title-keyed maps too —
       not specific to this file, not chased further.
+      **Follow-up 2026-07-15: fixed at the root.** `DecomposeSpec.Validate`
+      now rejects a DECOMPOSE output containing two beads with the same
+      title — every bead title in the system originates from this one call
+      site, so this closes the gap for `revisionMap` and AUDIT/RECONCILE's
+      own title-keyed maps at once, per the "shared fix" suggested above.
 - [x] `internal/project/rewind.go` — **found and fixed a severe, confirmed bug**
       (full writeup below). Also confirmed the "no --to flag, no mid-flight
       corrected revision" design decision still holds and wasn't touched. The
@@ -703,6 +732,8 @@ Left uncommitted pending user review, per standing practice.
       mid-`executing` keeps that stale status forever after — inert in
       practice since a `full_stopped` project is never dispatched again, but
       cosmetically wrong. Not fixed (low value, no observed harm).
+      **Follow-up 2026-07-15: fixed.** The bead-reset `UPDATE` now matches
+      `status IN ('pending', 'executing')`.
 
 **Bug found — `rewind-bead` discarded structural spec fixes, not just corrupted
 prose, sending affected beads into a silent infinite retry loop.**
@@ -1050,6 +1081,12 @@ review, per standing practice.
       transactional, which would be a real race if ever wired to a concurrent-capable
       caller, but isn't reachable today. Not fixed (nothing to fix without inventing
       the reassignment feature itself), flagged for whoever wires that up.
+      **Follow-up 2026-07-15: both fixed.** Doc comments (`SetVerbModelAssignment`,
+      `SeedVerbModelAssignments`) now say five and list the
+      `REFINE_TESTS_WRITE != REFINE_TESTS_CRITIQUE` rule. `SetVerbModelAssignment`'s
+      read-check-write now runs inside a single transaction, preemptively per
+      the original note's own recommendation — still unreachable in production
+      today, but hardened before anything gets wired up to it.
 - [x] `internal/splice/` — read in full. **Confirmed and fixed a real bug**:
       `detectImports` matched any bare `x.Y` selector against its known-package table
       by identifier name alone, with no check for whether `x` was the actual imported
@@ -1091,6 +1128,9 @@ review, per standing practice.
       behavior the whole format already relies on for a genuinely killed/timed-out
       execution, so treating an oversized line the same way is consistent, not a new
       failure mode — flagged for visibility, not treated as a bug.
+      **Follow-up 2026-07-15: visibility fix only, no behavior change** (per the
+      conclusion above that the truncation itself is fine). `trace.Parse` now
+      checks `scanner.Err()` after the scan loop and `slog.Warn`s if set.
 - [x] `internal/report/bead.go` + `project.go` — read in full, including every query.
       **Confirmed and fixed a real bug**: `lastTestResult` labeled any "Last run:" line
       not ending in `exit 0` as a definitive `FAIL`, including the truncated case
@@ -1346,3 +1386,23 @@ bar as Stage 1's stub-purity gap). No retroactive remediation needed for any of 
   New tests: `internal/ui/handlers_test.go`, first-ever coverage for the `ui`
   package (11 tests). Left uncommitted pending user review, per standing
   practice. See `[[project_audit_stage8]]` memory.
+- 2026-07-15: Follow-up session against `docs/audit-followups.md` (the
+  punch list compiled at the end of Stage 10). User picked items 3–10 and
+  12–13 to work through (items 1 and 2 kept as decided; item 11 re-confirmed
+  as "leave as documented" after asking again). Each item was re-verified
+  against current code, then fixed with a regression test: Stage 6's
+  `fullStopProject` executing-bead gap and `revisionMap` title collision
+  (fixed at the root via a DECOMPOSE-time title-uniqueness check) and
+  `recurringTestFailureNote`'s unconditional command (softened to advisory);
+  Stage 4's no-write-warning mislabel (new `termination_cause='no_write'`
+  enum value); Stage 5's swallowed `loadCurrentBeads` error; Stage 9's
+  unchecked `scanner.Err()` (visibility-only) and `checkModelConstraints`'s
+  stale doc comment plus `SetVerbModelAssignment`'s non-atomic write; Stage
+  2's `goFixBeadSpec` single-test-file grep; Stage 3's CRITIQUE summary
+  template wording. Two items needed an explicit design decision from the
+  user before implementing (item 5's advisory-vs-command wording, item 6's
+  new enum value vs. leaving it) — both resolved before any code changed, per
+  standing practice. All ten items now marked resolved in
+  `docs/audit-followups.md`. `go build -o ratchet ./cmd/ratchet/`,
+  `go vet ./...`, `go test ./...` all clean. Left uncommitted pending user
+  review, per standing practice.

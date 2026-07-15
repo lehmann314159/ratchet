@@ -83,7 +83,7 @@ func fullStopProject(ctx context.Context, d *db.DB, projectID int64) (label stri
 	}
 
 	beadRes, err := tx.ExecContext(ctx,
-		`UPDATE beads SET status = 'full_stopped' WHERE project_id = ? AND status = 'pending'`,
+		`UPDATE beads SET status = 'full_stopped' WHERE project_id = ? AND status IN ('pending', 'executing')`,
 		projectID,
 	)
 	if err != nil {

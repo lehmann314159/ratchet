@@ -274,3 +274,58 @@ func TestMigrateBeadRevisionVerbsRewindPreservesData(t *testing.T) {
 	mustExec(t, d, `INSERT INTO bead_revisions (id,project_id,bead_id,revision_number,full_text,execution_budget,monitor_override,created_by_verb,created_at)
 	  VALUES (2,1,1,2,'text-2',300,'honor','REWIND_BEAD','2026-01-01T00:00:00Z')`)
 }
+
+func TestMigrateExecutionsTerminationCausePreservesData(t *testing.T) {
+	ctx := context.Background()
+	d := openRawTestDB(t)
+	mustExec(t, d, `CREATE TABLE projects (id INTEGER PRIMARY KEY)`)
+	mustExec(t, d, `INSERT INTO projects (id) VALUES (1)`)
+	mustExec(t, d, `CREATE TABLE beads (id INTEGER PRIMARY KEY)`)
+	mustExec(t, d, `INSERT INTO beads (id) VALUES (1)`)
+	mustExec(t, d, `CREATE TABLE bead_revisions (id INTEGER PRIMARY KEY)`)
+	mustExec(t, d, `INSERT INTO bead_revisions (id) VALUES (1)`)
+	mustExec(t, d, `CREATE TABLE executions (
+	  id INTEGER PRIMARY KEY,
+	  project_id INTEGER NOT NULL,
+	  bead_id INTEGER NOT NULL,
+	  bead_revision_id INTEGER NOT NULL,
+	  trace_path TEXT NOT NULL,
+	  termination_cause TEXT CHECK (termination_cause IN ('success','timeout','monitor_terminated','monitor_force_killed')),
+	  monitor_fired INTEGER,
+	  monitor_honored INTEGER,
+	  started_at TIMESTAMP NOT NULL,
+	  ended_at TIMESTAMP
+	)`)
+	mustExec(t, d, `INSERT INTO executions (id,project_id,bead_id,bead_revision_id,trace_path,termination_cause,monitor_fired,monitor_honored,started_at,ended_at)
+	  VALUES (1,1,1,1,'/tmp/trace-1.log','success',0,1,'2026-01-01T00:00:00Z','2026-01-01T00:05:00Z')`)
+	// Simulate the two columnMigrations that precede this in real Open().
+	mustExec(t, d, `ALTER TABLE executions ADD COLUMN infra_failure INTEGER NOT NULL DEFAULT 0`)
+	mustExec(t, d, `ALTER TABLE executions ADD COLUMN test_first_attempt INTEGER NOT NULL DEFAULT 0`)
+	mustExec(t, d, `UPDATE executions SET infra_failure = 1 WHERE id = 1`)
+	// A table with a FK into executions, to confirm it survives the rename dance.
+	mustExec(t, d, `CREATE TABLE analyses (
+	  id INTEGER PRIMARY KEY,
+	  execution_id INTEGER NOT NULL REFERENCES executions(id)
+	)`)
+	mustExec(t, d, `INSERT INTO analyses (id, execution_id) VALUES (1, 1)`)
+
+	if err := d.migrateExecutionsTerminationCause(); err != nil {
+		t.Fatalf("migrateExecutionsTerminationCause: %v", err)
+	}
+
+	var tracePath string
+	var infraFailure int
+	if err := d.QueryRowContext(ctx, `SELECT trace_path, infra_failure FROM executions WHERE id = 1`).
+		Scan(&tracePath, &infraFailure); err != nil {
+		t.Fatalf("row lost after migration: %v", err)
+	}
+	if tracePath != "/tmp/trace-1.log" || infraFailure != 1 {
+		t.Errorf("data corrupted: trace_path=%q infra_failure=%d", tracePath, infraFailure)
+	}
+	var execID int64
+	if err := d.QueryRowContext(ctx, `SELECT execution_id FROM analyses WHERE id = 1`).Scan(&execID); err != nil || execID != 1 {
+		t.Fatalf("analyses.execution_id FK broke: err=%v execID=%d", err, execID)
+	}
+	mustExec(t, d, `INSERT INTO executions (id,project_id,bead_id,bead_revision_id,trace_path,termination_cause,monitor_fired,monitor_honored,started_at,ended_at)
+	  VALUES (2,1,1,1,'/tmp/trace-2.log','no_write',0,1,'2026-01-01T00:00:00Z','2026-01-01T00:05:00Z')`)
+}

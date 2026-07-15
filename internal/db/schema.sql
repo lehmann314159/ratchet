@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS executions (
   trace_path        TEXT    NOT NULL,
   -- 'monitor_force_killed' is written by the orchestrator, not EXECUTE_BEAD,
   -- because EXECUTE_BEAD didn't get to write anything before the hard kill.
-  termination_cause TEXT    CHECK (termination_cause IN ('success', 'timeout', 'monitor_terminated', 'monitor_force_killed')),
+  termination_cause TEXT    CHECK (termination_cause IN ('success', 'timeout', 'monitor_terminated', 'monitor_force_killed', 'no_write')),
   monitor_fired     INTEGER,  -- BOOLEAN: 0/1/NULL
   monitor_honored   INTEGER,  -- BOOLEAN: read off bead_revisions.monitor_override at execution time
   started_at        TIMESTAMP NOT NULL,

@@ -1,6 +1,7 @@
 package trace
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -219,6 +220,30 @@ stdout:
 	c := pt.Commands[0]
 	if c.ExitCode != -1 {
 		t.Errorf("ExitCode = %d, want -1 (truncated)", c.ExitCode)
+	}
+}
+
+// TestParse_OversizedLineDoesNotPanic covers the Stage 9 audit's flagged
+// robustness gap: bufio.Scanner's 1MB per-line buffer silently truncates as
+// if it hit EOF on a single line exceeding that (e.g. a large base64 blob
+// with no embedded newlines). Confirms Parse degrades gracefully — same
+// truncated-execution shape as TestParse_Truncated — rather than panicking or
+// losing everything read before the oversized line.
+func TestParse_OversizedLineDoesNotPanic(t *testing.T) {
+	huge := strings.Repeat("A", 2*1024*1024) // 2MB, exceeds the 1MB buffer
+	input := "[TURN 1]\n" +
+		"[tool: run_command map[command:echo first]]\n" +
+		"[result]\n" +
+		"ok\n" +
+		"[TURN 2]\n" +
+		"[tool: run_command map[command:echo blob]]\n" +
+		"[result]\n" +
+		huge + "\n"
+
+	pt := Parse([]byte(input))
+
+	if len(pt.Commands) < 1 || pt.Commands[0].Command != "echo first" {
+		t.Errorf("expected the first command (read before the oversized line) to survive, got Commands=%v", pt.Commands)
 	}
 }
 

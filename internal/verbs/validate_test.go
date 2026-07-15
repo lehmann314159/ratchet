@@ -30,6 +30,14 @@ func TestDecomposeSpecValidate(t *testing.T) {
 		{"execution_budget negative", `{"beads":[{"title":"B01","full_text":"x","execution_budget":-1,"monitor_override":"honor"}]}`, false},
 		{"monitor_override invalid", `{"beads":[{"title":"B01","full_text":"x","execution_budget":60,"monitor_override":"maybe"}]}`, false},
 		{"not JSON", `not json`, false},
+		{
+			"duplicate bead titles",
+			`{"beads":[
+				{"title":"B01","full_text":"a","execution_budget":60,"monitor_override":"honor","output_files":["a.go"],"exit_criteria":["go build ./..."]},
+				{"title":"B01","full_text":"b","execution_budget":60,"monitor_override":"honor","output_files":["b.go"],"exit_criteria":["go build ./..."]}
+			]}`,
+			false,
+		},
 	}
 	runValidate(t, h.Validate, tests)
 }
