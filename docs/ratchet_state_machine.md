@@ -2,26 +2,31 @@
 
 Four diagrams, from outermost to innermost:
 
-1. **Project status** — the four values of `projects.status`.
+1. **Project status** — the five values of `projects.status`.
 2. **Bootstrap** — runs once per project, before any bead executes.
 3. **Per-bead pipeline** — the loop every bead goes through; this is where most of the complexity lives.
 4. **Generic job status** — the low-level `handoff_jobs.status` FSM that every verb call goes through underneath diagrams 2 and 3.
 
 Render with a Mermaid-capable viewer (VS Code preview, GitHub, mermaid.live).
 
+See `docs/fixtures.md` for the `fixture` status, the three pause knobs, and the `save-fixture`/`clone-project` workflow built on top of this state machine.
+
 ## 1. Project status
 
-`projects.status CHECK IN ('active', 'full_stopped', 'complete', 'paused')` — schema.sql:10
+`projects.status CHECK IN ('active', 'full_stopped', 'complete', 'paused', 'fixture')` — schema.sql:10. `fixture` was added alongside the fixture/clone workflow — see `docs/fixtures.md`.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> active : new-project
-    active --> paused : RECONCILE_DECOMPOSITION converges<br/>with pause_after_reconcile flag set<br/>(reconcile_decomposition.go:191)
-    paused --> active : resume-project CLI<br/>(re-dispatches bead 1 only — resume.go:20)
+    [*] --> active : new-project<br/>(or clone-project, from any status)
+    active --> paused : a pause knob matches<br/>(pause_after_reconcile,<br/>pause_after_verb, or<br/>pause_after_bead_id —<br/>see docs/fixtures.md)
+    paused --> active : resume-project CLI<br/>(pure status flip — the next job was<br/>already enqueued before pausing;<br/>resume.go:65)
     active --> full_stopped : full_stop decision on any bead (Diagram 3),<br/>or 5 consecutive CERTIFY_MANIFEST rejections,<br/>or full-stop-project CLI
     active --> complete : declare_success on the last<br/>remaining pending bead (Diagram 3)
+    active --> fixture : save-fixture CLI<br/>(in-place renumber to a negative id;<br/>never dispatched again — fixture.go:80)
+    paused --> fixture : save-fixture CLI<br/>(also allowed — the paused project's<br/>inert pending job moves with it)
     full_stopped --> [*]
     complete --> [*]
+    fixture --> [*] : terminal by design —<br/>clone it instead of resuming it
 
     note right of active
       Diagrams 2 and 3 both run
@@ -29,9 +34,17 @@ stateDiagram-v2
       Diagram 2 runs once, first;
       Diagram 3 repeats per bead.
     end note
+
+    note right of fixture
+      clone-project (any status,
+      including fixture) spawns a
+      brand-new project row at
+      status=active — a deep copy,
+      not a transition of this row.
+    end note
 ```
 
-![Project status diagram](diagrams/1_project_status.png)
+![Project status diagram](diagrams/1_project_status.png) — **stale**: predates the `fixture` status and the generalized pause knobs (still shows the original `pause_after_reconcile`-only version). Not regenerated as part of this doc pass; regenerate from the Mermaid source above next time the PNGs are refreshed.
 
 ## 2. Bootstrap (runs once, before bead 1)
 
@@ -105,7 +118,7 @@ stateDiagram-v2
     executing --> full_stopped : full_stop
     executing --> pending : rewind-bead CLI<br/>(spec reset to revision 1, test files<br/>deleted, impl files stubbed, fresh<br/>attempt budget, restarts at<br/>REFINE_TESTS_WRITE cycle 1)<br/>callable from ESCALATED too
 
-    succeeded --> [*] : REVISE_PENDING revises other pending<br/>specs, then dispatches the next pending<br/>bead into its own Diagram 3<br/>(or project.status = complete if none left)
+    succeeded --> [*] : REVISE_PENDING revises other pending<br/>specs, then dispatches the next pending<br/>bead into its own Diagram 3<br/>(or project.status = complete if none left,<br/>or project.status = paused if<br/>pause_after_bead_id matches this bead<br/>— see docs/fixtures.md)
     full_stopped --> [*] : cascades every later pending<br/>bead straight to full_stopped too
 ```
 
