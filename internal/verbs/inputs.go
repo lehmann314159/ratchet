@@ -535,10 +535,12 @@ func loadBeadRevisionLog(ctx context.Context, d *db.DB, beadID int64) ([]revisio
 
 // currentLineage trims a bead's revisions (ordered by id, i.e. creation
 // order) down to the segment created since the most recent rewind. Revision 1
-// is always kept: it's simultaneously the last row of the old lineage and the
-// first row of the new one, since rewind-bead repoints current_revision_id at
-// it rather than creating a fresh row. A bead that was never rewound
-// (rewoundAt not valid) returns the full history unchanged.
+// is always kept regardless of rewoundAt — it's the bead's origin story and
+// rewind-bead's own merged revision (created_by_verb='REWIND_BEAD') already
+// falls inside the created_at >= rewoundAt window on its own, so this isn't
+// load-bearing for reaching the post-rewind spec, just deliberately always
+// visible. A bead that was never rewound (rewoundAt not valid) returns the
+// full history unchanged.
 func currentLineage(all []revisionEntry, rewoundAt sql.NullString) []revisionEntry {
 	if !rewoundAt.Valid {
 		return all

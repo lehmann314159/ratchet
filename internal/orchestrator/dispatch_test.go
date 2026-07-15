@@ -104,6 +104,77 @@ func TestRecordCommitFailure_EscalatesAtTolerance(t *testing.T) {
 	}
 }
 
+var errAssertRunFailure = errors.New("no test file paths for bead 42")
+
+// TestRecordRunFailure_UnderTolerance reproduces the Stage 6 audit scenario:
+// handler.Run returns a deterministic error (e.g. REFINE_TESTS_WRITE's "no
+// test file paths" when a bead's output_files lost its test file) that can
+// never resolve on retry. Before this fix, dispatch reset the job straight
+// back to 'pending' unconditionally — no attempt recorded, no strike
+// counted, no cap — so the job retried forever and never escalated. Verifies
+// a first Run failure is recorded as a retryable attempt.
+func TestRecordRunFailure_UnderTolerance(t *testing.T) {
+	d := openTestDB(t)
+	job := seedRunningJob(t, d)
+	ctx := context.Background()
+
+	err := recordRunFailure(ctx, d, job, time.Now(), errAssertRunFailure)
+	if err == nil {
+		t.Fatal("recordRunFailure: expected the original runErr to be returned")
+	}
+
+	var status string
+	if err := d.QueryRowContext(ctx, `SELECT status FROM handoff_jobs WHERE id = ?`, job.ID).Scan(&status); err != nil {
+		t.Fatalf("query job status: %v", err)
+	}
+	if status != "failed_retry" {
+		t.Errorf("expected status 'failed_retry' (job must remain retryable), got %q", status)
+	}
+
+	var validationResult string
+	if err := d.QueryRowContext(ctx,
+		`SELECT validation_result FROM handoff_attempts WHERE job_id = ?`, job.ID,
+	).Scan(&validationResult); err != nil {
+		t.Fatalf("query attempt: %v", err)
+	}
+	if validationResult == "valid" {
+		t.Errorf("a Run failure must not be recorded as a valid attempt")
+	}
+}
+
+// TestRecordRunFailure_EscalatesAtTolerance verifies that a Run error which
+// keeps recurring (the same deterministic bug on every retry) escalates once
+// strikes reach tolerance, instead of retrying forever with zero visibility.
+func TestRecordRunFailure_EscalatesAtTolerance(t *testing.T) {
+	d := openTestDB(t)
+	job := seedRunningJob(t, d)
+	ctx := context.Background()
+
+	// Seed two prior failed attempts to bring strikes to tolerance.
+	for i := 1; i <= 2; i++ {
+		if _, err := d.ExecContext(ctx, `
+			INSERT INTO handoff_attempts (job_id, attempt_number, raw_output, validation_result, created_at, ended_at)
+			VALUES (?, ?, '', 'run_error: prior failure', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+			job.ID, i,
+		); err != nil {
+			t.Fatalf("seed prior attempt: %v", err)
+		}
+	}
+
+	err := recordRunFailure(ctx, d, job, time.Now(), errAssertRunFailure)
+	if err == nil {
+		t.Fatal("recordRunFailure: expected the original runErr to be returned")
+	}
+
+	var status string
+	if err := d.QueryRowContext(ctx, `SELECT status FROM handoff_jobs WHERE id = ?`, job.ID).Scan(&status); err != nil {
+		t.Fatalf("query job status: %v", err)
+	}
+	if status != "escalated" {
+		t.Errorf("expected status 'escalated' at tolerance, got %q — a permanently failing Run() must not retry forever", status)
+	}
+}
+
 // TestCompleteExecuteBeadJob_DoesNotClobberInfraFailureRetry reproduces the
 // Stage 4 audit bug: internal/execution/window.go's handleInfraFailure moves
 // an EXECUTE_BEAD job to 'pending' (to retry, under infraFailureCap) or

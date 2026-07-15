@@ -82,15 +82,19 @@ func dispatch(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[str
 		slog.Info("ollama warmup ok", "verb", job.Verb, "job_id", job.ID, "model", model)
 	}
 
-	// Run: infrastructure error → return without counting as a strike.
+	// Run: apply the same strike/tolerance accounting as a Validate/Commit
+	// failure, so a Run() error that can never resolve on its own (a
+	// deterministic precondition failure in the verb's own code, not a
+	// transient infra hiccup — e.g. REFINE_TESTS_WRITE's "no test file paths"
+	// error when a bead's output_files lost its test file) eventually
+	// escalates instead of retrying forever with zero attempt record and zero
+	// visibility. A truly transient error (DB blip, network) still just
+	// retries — recordRunFailure only escalates after tolerance is exceeded,
+	// same as any other failure class.
 	startedAt := time.Now().UTC()
 	rawOutput, runErr := handler.Run(ctx, d, oc, job)
 	if runErr != nil {
-		slog.Error("verb Run failed (infrastructure error, will retry)",
-			"verb", job.Verb, "job_id", job.ID, "error", runErr)
-		_, _ = d.ExecContext(ctx,
-			`UPDATE handoff_jobs SET status = 'pending' WHERE id = ? AND status = 'running'`, job.ID)
-		return runErr
+		return recordRunFailure(ctx, d, job, startedAt, runErr)
 	}
 
 	validationResult, parsed := handler.Validate(rawOutput)
@@ -179,6 +183,48 @@ func dispatch(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[str
 // have their model assignment looked up (VERIFY_MANIFEST has none).
 func verbSkipsModelWarmup(verb string) bool {
 	return verb == db.VerbVerifyManifest
+}
+
+// recordRunFailure applies the strike/tolerance decision to a handler.Run
+// error exactly like a malformed Validate result would, instead of the old
+// unconditional 'pending' reset that retried forever with no attempt record
+// and no escalation path. Mirrors recordCommitFailure below.
+func recordRunFailure(ctx context.Context, d *db.DB, job *db.HandoffJob, startedAt time.Time, runErr error) error {
+	slog.Error("verb Run failed", "verb", job.Verb, "job_id", job.ID, "project_id", job.ProjectID, "error", runErr)
+
+	strikes, err := strikeCount(ctx, d, job.ID)
+	if err != nil {
+		return fmt.Errorf("count strikes: %w", err)
+	}
+	attemptNum, err := nextAttemptNumber(ctx, d, job.ID)
+	if err != nil {
+		return fmt.Errorf("next attempt number: %w", err)
+	}
+	tolerance := verbTolerance(job.Verb)
+
+	nextStatus := "failed_retry"
+	shouldEscalate := strikes+1 > tolerance
+	if shouldEscalate {
+		nextStatus = "escalated"
+	}
+
+	txErr := withTx(ctx, d, func(tx *sql.Tx) error {
+		return commitAttempt(ctx, tx, job.ID, attemptNum, "", "run_error: "+runErr.Error(), nextStatus, startedAt)
+	})
+	if txErr != nil {
+		return txErr
+	}
+
+	if shouldEscalate {
+		slog.Error("ESCALATION — requires human review (Run failure)",
+			"project_id", job.ProjectID, "job_id", job.ID, "verb", job.Verb,
+			"bead_id", job.BeadID, "strikes", strikes+1, "tolerance", tolerance,
+		)
+	} else {
+		slog.Warn("job attempt failed at Run, will retry",
+			"verb", job.Verb, "job_id", job.ID, "strikes", strikes+1, "next_status", nextStatus)
+	}
+	return runErr
 }
 
 // recordCommitFailure runs in a fresh transaction after handler.Commit has

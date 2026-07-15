@@ -668,20 +668,127 @@ migration dry-run (copied the real `ratchet-projects/ratchet.db`, ran a real com
 binary against it, confirmed `rewound_at` added cleanly with existing data intact).
 Left uncommitted pending user review, per standing practice.
 
-## Stage 6 — Cross-bead handoff: REVISE_PENDING, rewind-bead, bead lifecycle
+## Stage 6 — Cross-bead handoff: REVISE_PENDING, rewind-bead, bead lifecycle — AUDITED 2026-07-14
 
-- [ ] `internal/verbs/revise_pending.go` — REVISE_PENDING, including the trimmed
-      context (only trigger bead's non-test output files, not full project history —
-      confirm this trim hasn't since caused a real miss)
-- [ ] `internal/project/rewind.go` — `rewind-bead`'s reset-to-revision-1 behavior;
-      confirm it still can't be extended to insert a corrected mid-flight revision
-      (deliberately not built — confirm that decision still holds) and that the
-      bead-revision lineage-bloat class of bug (goban ADJUDICATE `execute_revised`
-      regenerating stale pre-rewind content, noted but not fully chased in
-      `[[project_goban]]`) hasn't recurred
-- [ ] `internal/project/restart.go`, `internal/project/fullstop.go`,
-      `internal/project/resume.go` — the project-lifecycle CLI commands used heavily
-      today (`restart-project`, `full-stop-project`)
+- [x] `internal/verbs/revise_pending.go` — read in full (Run/Validate/Commit).
+      The trimmed context (trigger bead's non-test output files only, not full
+      project history) still checks out — no evidence of a real miss. The
+      "dispatch next pending bead" query (`id > triggerBeadID AND status =
+      'pending'`) correctly does *not* need to also catch a lower-ID bead that
+      was independently rewound mid-flight — rewind-bead enqueues that bead's
+      own REFINE_TESTS_WRITE job directly, so the two mechanisms don't need to
+      overlap. Minor, not fixed: `revisionMap` is keyed by bead title with no
+      uniqueness validation anywhere upstream (title isn't even a DB column);
+      a model emitting two identical bead titles would silently collide. Low
+      probability, and shared by AUDIT/RECONCILE's own title-keyed maps too —
+      not specific to this file, not chased further.
+- [x] `internal/project/rewind.go` — **found and fixed a severe, confirmed bug**
+      (full writeup below). Also confirmed the "no --to flag, no mid-flight
+      corrected revision" design decision still holds and wasn't touched. The
+      goban `execute_revised`-regenerating-stale-content wrinkle referenced
+      here was already root-caused and fixed in Stage 5 (dead lineage filter,
+      see `[[project_audit_stage5]]`) — this stage found a *different* bug in
+      the same file, described below.
+- [x] `internal/project/restart.go`, `internal/project/fullstop.go`,
+      `internal/project/resume.go` — read in full. No bugs found.
+      `resume-project`'s "first bead" query has no `status='pending'` filter
+      (unlike the UI's equivalent handler, `internal/ui/handlers.go`'s
+      `handleResumeProject`), but this is currently safe by construction:
+      `paused` status is *only* ever set by `RECONCILE_DECOMPOSITION` before
+      any bead has executed, so every bead is still `pending` at that point.
+      Flagged as drift between two independent implementations of the same
+      operation — worth collapsing into one shared helper if Stage 8 (UI & CLI)
+      finds more of this pattern, not urgent on its own. `fullStopProject`
+      only resets `status='pending'` beads to `full_stopped`; a bead caught
+      mid-`executing` keeps that stale status forever after — inert in
+      practice since a `full_stopped` project is never dispatched again, but
+      cosmetically wrong. Not fixed (low value, no observed harm).
+
+**Bug found — `rewind-bead` discarded structural spec fixes, not just corrupted
+prose, sending affected beads into a silent infinite retry loop.**
+
+`rewindBead` reset a bead's *entire* spec (title, prose, output_files,
+exit_criteria, execution_budget, monitor_override) to bead_revisions
+`revision_number = 1` — literally `DECOMPOSE_SPEC`'s raw, pre-any-fixup output.
+But `output_files`/`exit_criteria` routinely gain *permanent structural
+corrections* after revision 1, before rewind is ever relevant:
+`RECONCILE_DECOMPOSITION`'s mechanical `goFixBeadSpec`
+(`internal/verbs/mechanical_checks.go`) appends a derived test filename to
+`output_files` whenever a bead has a `go test` exit criterion but no declared
+test file — confirmed live in the production DB (`ratchet-projects/ratchet.db`):
+bead 261 gained `main_test.go` and bead 264 gained `handlers_test.go`, both at
+revision 2 via `RECONCILE_DECOMPOSITION`, neither present at revision 1.
+`ADJUDICATE_NEXT_EXECUTION`'s "workspace repair" pattern
+(`prompts.go`: "if the trace shows writes to files outside output_files, name
+those files explicitly in the revised spec with a cleanup instruction") does
+the same thing later in a bead's life.
+
+Reverting to revision 1 silently threw those fixes away. Concretely: a bead
+rewound after gaining a RECONCILE-added test file loses that file from its
+spec entirely; `refine_tests.go`'s `RefineTestsWrite.Run` hard-errors
+(`"no test file paths for bead %d"`) whenever `output_files` has no `_test.go`
+entry; and `dispatch.go` treated *any* `handler.Run` error as a transient
+infra failure — reset straight back to `'pending'` with **zero** attempt
+recorded, zero strike counted, no cap. The job would retry the identical,
+permanently-failing call forever, completely invisible to any dashboard or
+escalation view. Not yet observed live (beads 261/264 haven't been rewound),
+but fully loaded — the next `rewind-bead` on either would trigger it.
+
+**Fix (2026-07-14, both parts confirmed by reproduction, user chose option
+"prose from revision 1 / output_files+exit_criteria from the pre-rewind
+current revision" for the design question, "minimal" for the dispatch fix):**
+
+1. `internal/project/rewind.go` — `rewindBead` now loads *both* revision 1 and
+   the bead's current (pre-rewind) revision, and inserts a merged spec as a
+   fresh `bead_revisions` row (bead-wide `MAX(revision_number)+1`, same
+   pattern every other insert site already uses): `full_text`, `title`,
+   `execution_budget`, `monitor_override` from revision 1 (the clean baseline
+   rewind is meant to restore); `output_files`, `exit_criteria` from the
+   current revision (preserving structural fixes). The on-disk cleanup step
+   (test-file deletion, `WriteScaffoldStubs`) now runs against this merged
+   `output_files`, so a RECONCILE/ADJUDICATE-added file is correctly reset
+   instead of orphaned. Needed a new CHECK-constraint migration
+   (`migrateBeadRevisionVerbsRewind` in `internal/db/db.go`, plus
+   `schema.sql`) since `bead_revisions.created_by_verb` only allowed the four
+   pipeline verb names — added `'REWIND_BEAD'`. Verified against a live copy
+   of `ratchet-projects/ratchet.db`: row count unchanged (744 before/after),
+   new schema correct, a `REWIND_BEAD` insert now accepted. Also extracted the
+   previously `os.Exit`-only logic into a testable `rewindBead` function
+   (mirroring the existing `fullStopProject`/`RunFullStopProjectMain` split) —
+   this file had zero test coverage before this session (Method item 6).
+   Updated `currentLineage`'s comment in `internal/verbs/inputs.go`, which had
+   documented the old "rewind repoints at revision 1 rather than inserting a
+   fresh row" behavior as the reason revision 1 is always kept in the lineage
+   view — that invariant no longer holds structurally, but the lineage filter
+   still works correctly (the new merged row's `created_at` satisfies the
+   `>= rewound_at` clause on its own), so this was a comment fix, not a logic
+   change.
+2. `internal/orchestrator/dispatch.go` — added `recordRunFailure`, mirroring
+   the existing `recordCommitFailure` pattern exactly: a `handler.Run` error
+   now gets the same strike/tolerance accounting as a malformed `Validate`
+   result (an attempt row is written with `validation_result = "run_error:
+   ..."`, counted by the existing `strikeCount` query), so a Run() error that
+   recurs identically on every retry escalates once `tolerance` (2) is
+   exceeded instead of looping forever with no record. A genuinely transient
+   error still just retries — only a *repeating* failure escalates. Left
+   `EXECUTE_BEAD`'s own separate Run-error path (top of `dispatch()`)
+   untouched — it already has its own `infraFailureCap` handling inside
+   `RunExecutionWindow` for the common case (see Stage 4), and generalizing
+   further wasn't part of the confirmed reproduction chain; flagged for
+   whoever does the full Stage 7 pass. Also didn't touch the model-warmup
+   failure paths just above (model lookup, Ollama warmup) — same reasoning,
+   narrower/likely-more-transient case, kept the fix minimal per the user's
+   choice.
+
+Tests added: `internal/project/rewind_test.go`
+(`TestRewindBead_PreservesOutputFilesAddedAfterRevision1` — seeds exactly the
+revision-1/revision-2 split found live, rewinds, and asserts the merged spec
+keeps `game_test.go`, the prose still reverts to revision 1's, and the stale
+on-disk test file is actually deleted rather than orphaned;
+`TestRewindBead_AlreadySucceededErrors`); `internal/orchestrator/dispatch_test.go`
+(`TestRecordRunFailure_UnderTolerance`, `TestRecordRunFailure_EscalatesAtTolerance`).
+`go build ./...`, `go vet ./...`, `go test ./...` all clean. Left uncommitted
+pending user review, per standing practice.
 
 ## Stage 7 — Orchestrator: job queue, dispatch, recovery
 
@@ -793,3 +900,23 @@ othello-v3-f (48), tasklist-v1 (49), chess-v1 (87), chess-v3 (89), goban-v2 (91)
   `completeExecuteBeadJob`) that had zero prior coverage. Left uncommitted
   pending user review, per standing practice. See `[[project_audit_stage4]]`
   memory.
+- 2026-07-14: Stage 6 done. One severe bug found and fixed, confirmed by
+  reproduction (unit tests exercising the exact revision-1/revision-2 split
+  found live in `ratchet-projects/ratchet.db`, plus the CHECK-constraint
+  migration verified against a real DB copy): `rewind-bead` reverted a bead's
+  entire spec — including `output_files`/`exit_criteria`, not just prose — to
+  `DECOMPOSE_SPEC`'s raw revision 1, discarding permanent structural fixes
+  `RECONCILE_DECOMPOSITION`/`ADJUDICATE_NEXT_EXECUTION` had applied since (a
+  missing test file added to `output_files`, confirmed live for beads
+  261/264). Combined with `dispatch.go` treating every `handler.Run` error as
+  a no-strike-counted, no-cap infra retry, a bead rewound after losing its
+  test-file declaration would loop forever on `REFINE_TESTS_WRITE`'s "no test
+  file paths" error, invisibly, with no escalation. User chose "prose from
+  revision 1, output_files/exit_criteria from the pre-rewind current
+  revision" for the rewind design question and "minimal" (strike/tolerance
+  parity with `recordCommitFailure`, not a full transient-vs-deterministic
+  error taxonomy) for the dispatch fix. Both fixed and tested
+  (`go build ./...`, `go vet ./...`, `go test ./...` all clean); new coverage
+  for a file (`rewind.go`) that had zero tests before this session. Left
+  uncommitted pending user review, per standing practice. See
+  `[[project_audit_stage6]]` memory.

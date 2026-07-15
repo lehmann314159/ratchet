@@ -141,6 +141,9 @@ func (db *DB) applyTableMigrations() error {
 	if err := db.migrateAuditReconcileRoundsOutcome(); err != nil {
 		return err
 	}
+	if err := db.migrateBeadRevisionVerbsRewind(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -259,6 +262,58 @@ func (db *DB) migrateBeadRevisionVerbs() error {
 		  execution_budget INTEGER NOT NULL,
 		  monitor_override TEXT    NOT NULL CHECK (monitor_override IN ('honor', 'ignore')),
 		  created_by_verb  TEXT    NOT NULL CHECK (created_by_verb IN ('DECOMPOSE_SPEC', 'RECONCILE_DECOMPOSITION', 'ADJUDICATE_NEXT_EXECUTION', 'REVISE_PENDING')),
+		  created_at       TIMESTAMP NOT NULL
+		)`,
+		`INSERT INTO bead_revisions SELECT * FROM _bead_revisions_old`,
+		`DROP TABLE _bead_revisions_old`,
+		`CREATE INDEX IF NOT EXISTS idx_bead_revisions_bead ON bead_revisions (bead_id, revision_number)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			_, _ = db.Exec(`PRAGMA foreign_keys = ON`)
+			return fmt.Errorf("migrate bead_revisions (%s): %w", truncate(stmt, 40), err)
+		}
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		return fmt.Errorf("re-enable foreign_keys: %w", err)
+	}
+	return nil
+}
+
+// migrateBeadRevisionVerbsRewind updates bead_revisions' created_by_verb CHECK
+// constraint to include 'REWIND_BEAD'. Needed once rewind-bead starts inserting
+// a fresh revision (merging revision 1's prose with the pre-rewind revision's
+// output_files/exit_criteria) instead of repointing current_revision_id directly
+// at the revision-1 row. Separate function (not folded into migrateBeadRevisionVerbs
+// above) because that function's own guard checks for 'REVISE_PENDING', which is
+// already present on any DB that predates this change — reusing it would skip the
+// migration entirely on those DBs.
+func (db *DB) migrateBeadRevisionVerbsRewind() error {
+	var createSQL string
+	if err := db.QueryRow(
+		`SELECT COALESCE(sql, '') FROM sqlite_master WHERE type='table' AND name='bead_revisions'`,
+	).Scan(&createSQL); err != nil {
+		return fmt.Errorf("query bead_revisions schema: %w", err)
+	}
+	if strings.Contains(createSQL, "REWIND_BEAD") {
+		return nil
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		return fmt.Errorf("disable foreign_keys: %w", err)
+	}
+	stmts := []string{
+		`PRAGMA legacy_alter_table = ON`,
+		`ALTER TABLE bead_revisions RENAME TO _bead_revisions_old`,
+		`PRAGMA legacy_alter_table = OFF`,
+		`CREATE TABLE bead_revisions (
+		  id               INTEGER PRIMARY KEY,
+		  project_id       INTEGER NOT NULL REFERENCES projects(id),
+		  bead_id          INTEGER NOT NULL REFERENCES beads(id),
+		  revision_number  INTEGER NOT NULL,
+		  full_text        TEXT    NOT NULL,
+		  execution_budget INTEGER NOT NULL,
+		  monitor_override TEXT    NOT NULL CHECK (monitor_override IN ('honor', 'ignore')),
+		  created_by_verb  TEXT    NOT NULL CHECK (created_by_verb IN ('DECOMPOSE_SPEC', 'RECONCILE_DECOMPOSITION', 'ADJUDICATE_NEXT_EXECUTION', 'REVISE_PENDING', 'REWIND_BEAD')),
 		  created_at       TIMESTAMP NOT NULL
 		)`,
 		`INSERT INTO bead_revisions SELECT * FROM _bead_revisions_old`,
