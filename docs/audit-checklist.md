@@ -274,32 +274,70 @@ orchestrator gap" — all fixed and tested same day (`go build ./...`, `go vet .
 `go test ./...` all clean), including the first-ever tests for the `orchestrator`
 package. Left uncommitted pending user review, per standing practice.
 
-## Stage 3 — Test refinement: REFINE_TESTS_WRITE / REFINE_TESTS_CRITIQUE / REFINE_TESTS_JUDGE
+## Stage 3 — Test refinement: REFINE_TESTS_WRITE / REFINE_TESTS_CRITIQUE / REFINE_TESTS_JUDGE — AUDITED 2026-07-14
 
-Test-first mode's WRITE → CRITIQUE → JUDGE cycle. **Contains a known, confirmed,
-NOT-YET-FIXED bug** — start here, this stage cannot be marked audited until it's
-actually fixed, not just documented.
+Test-first mode's WRITE → CRITIQUE → JUDGE cycle.
 
-- [ ] **Fix the test-clobbering bug**: `internal/verbs/refine_tests.go:317-327`,
-      `RefineTestsWrite.Run`'s `cid == 1` branch calls `splice.Assemble(pkg, funcs)`
+- [x] **Fixed the test-clobbering bug**: `internal/verbs/refine_tests.go:317-327`,
+      `RefineTestsWrite.Run`'s `cid == 1` branch called `splice.Assemble(pkg, funcs)`
       using only the current bead's own written functions, discarding `originalSrc`
-      entirely — silently deletes any prior bead's functions already in a shared test
-      file. The `cid > 1` branch (same-bead later cycles) does this correctly via
-      `splice.Replace` against `originalSrc`; cycle 1 needs equivalent treatment.
-      See `[[project_ratchet]]` 2026-07-14 point 12 for full detail and reproduction.
-- [ ] Once fixed: add `internal/splice/splice_test.go` (does not exist yet) with a
-      test reproducing the exact checkers-v8 case: bead A writes TestFoo to a fresh
-      file, bead B's cycle-1 write must retain TestFoo alongside its own TestBar
-- [ ] `internal/splice/splice.go` — audit `Assemble`, `Replace`, `FuncMap`,
-      `detectImports` for other merge-vs-replace asymmetries beyond the one just found
-- [ ] `internal/verbs/refine_tests.go` — CRITIQUE and JUDGE handlers, including the
-      known cosmetic bug (`prompts.go:364`'s fill-in-the-blank summary template
-      sometimes echoes both branches verbatim — noted in `[[project_checkers]]`,
-      never fixed) and the "JUDGE has no memory of its own prior-cycle verdicts"
-      class of bug (goban bead-568 incident, prompt-level fix already applied —
-      confirm it's holding, hasn't regressed)
-- [ ] Retroactive check (see Stage 9 below too): grep every past `COMPLETE` project's
-      shared test files for evidence of the same clobbering pattern
+      entirely — silently deleted any prior bead's functions already in a shared test
+      file. **Fix**: the branch condition is now "is `originalSrc` empty" rather than
+      "is `cid == 1`" — a fresh path still assembles from scratch, but any path with
+      existing content (whether from this bead's own earlier cycle, or a prior bead
+      sharing the file) now splices via `splice.Replace` instead. Test added:
+      `internal/splice/splice_test.go` (`TestSharedFileClobber`) reproducing the exact
+      checkers-v8 case (bead A's TestFoo surviving bead B's cycle-1 TestBar write).
+- [x] `internal/splice/splice.go` audited (`Assemble`, `Replace`, `FuncMap`,
+      `detectImports`) — **found and fixed two more bugs, same "asymmetry" class**:
+      `Replace` never re-ran import detection (only `Assemble` did), so any revision
+      — same-bead cid>1, or the newly-fixed cross-bead splice path — that added or
+      dropped a package dependency left the import block stale, with no way for the
+      model to fix it (`write_function` only supplies function bodies, never
+      imports); verified by reproduction, both directions. Separately, `detectImports`'s
+      package whitelist was missing common packages, most notably `reflect`. **Fixed**:
+      added `syncImports` (rebuilds the import block from scratch via `detectImports`
+      against the post-edit file, mirroring what `Assemble` already did), wired into
+      `Replace`; expanded the whitelist (`reflect`, `path`, `html/template`,
+      `math/big`, `crypto/sha256`, `crypto/md5`, `encoding/base64`, `encoding/hex`,
+      `runtime`, `flag`). Test added: `TestReplaceSyncsImports` (adds a needed import,
+      then removes it once unused, confirming both directions).
+- [x] `internal/verbs/refine_tests.go` CRITIQUE/JUDGE handlers read in full — no new
+      bugs. Confirmed still holding, not regressed: the goban bead-568 grounding-rule
+      prompt fix (`refineTestsWriteSystemPrompt`/`refineTestsCritiqueSystemPrompt`) is
+      still present; JUDGE genuinely has no cross-cycle memory of its own prior
+      verdicts (mitigated by the prompt fix, not by adding real memory — by design).
+      The known cosmetic bug (`prompts.go:364`'s fill-in-the-blank CRITIQUE summary
+      template, noted in `[[project_checkers]]`) is still present, still low-severity
+      (doesn't affect the `all_correct`/`findings` fields JUDGE and downstream logic
+      actually use) — left unfixed, not urgent.
+- [x] Retroactive check across past `COMPLETE` projects, now that the fix exists to
+      compare against: **confirmed real, live data corruption in two of the five
+      `COMPLETE` projects.** Of the 5, only 3 had beads sharing a test file
+      (othello-v3-f, chess-v1, goban-v2); of those, only chess-v1 and goban-v2 wrote
+      the shared file via `REFINE_TESTS_WRITE` (othello-v3-f's shared files went
+      through plain `EXECUTE_BEAD`, a different path, unaffected) — and both hit the
+      bug. **chess-v1 (project 87), bead 536 (`ai-evaluation`)**: its own exit
+      criterion requires `TestEvaluate` in `ai_test.go`; bead 537 (`ai-search`, same
+      file, cycle 1) clobbered it — `ai_test.go` on disk today has only
+      `TestBestMove`. **goban-v2 (project 91), beads 565 (`group-and-liberties`) and
+      566 (`placement-and-pass`)**: both share `game_test.go` with bead 567
+      (`valid-moves`, cycle 1), which clobbered both — 10 required test functions
+      across the two beads are gone; `game_test.go` on disk today has only
+      `TestValidMoves`. All three beads are marked `succeeded` and were never
+      revisited; re-running each bead's own exit criterion against current on-disk
+      state fails for all three. **Decision (user, 2026-07-14): leave both projects
+      as-is** — they're finished/archival; this is recorded as a known historical
+      data-integrity gap, no remediation performed (no manual test-file restoration,
+      no DB patches). tasklist-v1 and chess-v3 have no shared test files, so were
+      never exposed to this bug regardless of mode.
+
+**Session log (2026-07-14):** One long-known bug fixed (test-clobbering) plus two
+more of the identical "asymmetry" shape found auditing the surrounding code
+(`Replace` not syncing imports; whitelist gaps) — all three fixed and tested same
+session (`go build ./...`, `go vet ./...`, `go test ./...` all clean). Retroactive
+project check surfaced confirmed corruption in 2 of 5 `COMPLETE` projects
+(3 beads total) predating the fix — documented, left unremediated per user decision.
 
 ## Stage 4 — Bead execution: EXECUTE_BEAD / MONITOR_EXECUTION
 
@@ -420,18 +458,26 @@ not just the one code path that was already fixed.
       robustness against the range of malformed JSON this session's own investigation
       surfaced (markdown-fenced, truncated, etc.)
 
-## Stage 10 — Retroactive check across past "COMPLETE" projects
+## Stage 10 — Retroactive check across past "COMPLETE" projects — DONE 2026-07-14 (folded into Stage 3)
 
 Not a code-audit stage — a data-audit stage, only meaningful once Stage 3's fix
-lands. For each project below, re-run its actual exit criteria for every succeeded
-bead that shares an output file with a later bead, against the project's current
-on-disk state, and record pass/fail:
+landed. Performed as part of Stage 3's own retroactive-check item rather than as a
+separate pass — see Stage 3 above for the full findings. Corrected the project list
+below against the live DB first: `othello-v3-e` (project 47) is `full_stopped`, not
+`COMPLETE` — only `othello-v3-f` (project 48) qualifies. Full `COMPLETE` list per
+`sqlite3 ratchet.db "SELECT id,label,status FROM projects WHERE status='complete';"`:
+othello-v3-f (48), tasklist-v1 (49), chess-v1 (87), chess-v3 (89), goban-v2 (91).
 
-- [ ] chess-v3 (project 89)
-- [ ] goban-v2 (project 91)
-- [ ] othello-v3-e (project 47) / othello-v3-f (project 48)
-- [ ] tasklist-v1
-- [ ] any other project marked `COMPLETE` in `sqlite3 ratchet.db "SELECT id,label FROM projects WHERE status='complete';"` not already listed here
+- [x] chess-v3 (project 89) — no beads share a test file; not exposed to this bug.
+- [x] goban-v2 (project 91) — **corrupted**: beads 565/566 clobbered by bead 567 in
+      shared `game_test.go`; both beads' own exit criteria now fail. See Stage 3.
+- [x] othello-v3-f (project 48) — beads share `game_test.go`/`handlers_test.go`, but
+      wrote them via `EXECUTE_BEAD` (test-first `REFINE_TESTS_WRITE` mode wasn't used
+      for these beads) — a different write path, unaffected. All expected functions
+      from every sharing bead confirmed present on disk.
+- [x] tasklist-v1 (project 49) — no beads share a test file; not exposed to this bug.
+- [x] chess-v1 (project 87) — **corrupted**: bead 536 clobbered by bead 537 in shared
+      `ai_test.go`; bead 536's own exit criterion now fails. See Stage 3.
 
 ---
 
@@ -441,3 +487,10 @@ on-disk state, and record pass/fail:
   (verify by reproduction per the Method section above), staged by FSM verb
   boundaries. checkers-v8 (project 98) still running unattended in parallel;
   this audit is separate work, not blocked on it finishing.
+- 2026-07-14: Stage 3 done. Fixed the known test-clobbering bug plus two more
+  bugs of the same shape found auditing `internal/splice/splice.go`
+  (`Replace` not syncing imports; `detectImports` whitelist gaps) — all three
+  fixed and tested. Retroactive check (folded in Stage 10) found confirmed,
+  live corruption in 2 of 5 `COMPLETE` projects (chess-v1 bead 536, goban-v2
+  beads 565/566) predating the fix — user decided to leave both as-is
+  (archival, no remediation). See `[[project_audit_stage3]]` memory.

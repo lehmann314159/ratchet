@@ -319,16 +319,21 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 			continue
 		}
 		var fileContent string
-		if cid == 1 {
+		if originalSrc == "" {
+			// No prior content at this path (fresh file — the common cid==1
+			// case) — assemble from scratch.
 			funcs := make([]string, 0, len(funcOrder))
 			for _, name := range funcOrder {
 				funcs = append(funcs, writtenFuncs[name])
 			}
 			fileContent, _ = splice.Assemble(splice.DetectPackage(folderPath), funcs)
 		} else {
+			// The path already has content — whether from this bead's own
+			// earlier cycle, or from a prior bead sharing this test file —
+			// splice onto it rather than discarding it.
 			fileContent = originalSrc
-			for name, body := range writtenFuncs {
-				fileContent, _ = splice.Replace(fileContent, name, body)
+			for _, name := range funcOrder {
+				fileContent, _ = splice.Replace(fileContent, name, writtenFuncs[name])
 			}
 		}
 		if err := os.WriteFile(testPath, []byte(fileContent), 0o644); err != nil {
