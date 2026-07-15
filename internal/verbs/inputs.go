@@ -180,6 +180,35 @@ func latestAuditCritique(ctx context.Context, d *db.DB, projectID int64) (critiq
 	return critique, roundsSoFar, nil
 }
 
+// nextRoundNumber returns the next collision-free round_number for projectID:
+// a single project-wide sequence spanning every audit_reconcile_rounds row
+// regardless of outcome (mechanical 'redecompose' rows and real debate rounds
+// alike), so every row for a project gets a number no earlier row ever used.
+//
+// This is deliberately NOT the same value as the round-cap comparison (see
+// latestAuditCritique's roundsSoFar / ReconcileDecomposition.Commit's
+// nextRound), which intentionally counts only real debate rounds so a
+// mechanical redecompose retry doesn't eat into the debate round budget.
+// Conflating the two — as both call sites did before this fix, each computing
+// its own COUNT-based value for the stored round_number column — let two
+// different rows land on the same round_number: once between a redecompose
+// row and a real round (they used disjoint COUNT scopes), and once between
+// two real rounds (COUNT-based numbering isn't self-healing once any row's
+// stored round_number has ever drifted from its true ordinal position, e.g.
+// from a requeue after escalation). MAX+1 is collision-proof by construction
+// and self-heals from any prior drift, so this value is now used only for the
+// column DECOMPOSE_SPEC/RECONCILE_DECOMPOSITION actually store.
+func nextRoundNumber(ctx context.Context, tx *sql.Tx, projectID int64) (int, error) {
+	var n int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(round_number), 0) + 1 FROM audit_reconcile_rounds WHERE project_id = ?`,
+		projectID,
+	).Scan(&n); err != nil {
+		return 0, fmt.Errorf("next round number: %w", err)
+	}
+	return n, nil
+}
+
 // loadLatestAnalysis returns the most recent valid ANALYZE_EXECUTION output
 // for beadID.
 func loadLatestAnalysis(ctx context.Context, d *db.DB, beadID int64) (*AnalyzeExecutionOutput, error) {

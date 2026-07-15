@@ -182,12 +182,17 @@ func (h *ReconcileDecomposition) Commit(ctx context.Context, tx *sql.Tx, job *db
 		}
 	}
 
+	roundNumber, err := nextRoundNumber(ctx, tx, job.ProjectID)
+	if err != nil {
+		return err
+	}
+
 	reconciliationJSON, _ := json.Marshal(out)
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO audit_reconcile_rounds
 		  (project_id, round_number, critique_text, reconciliation, outcome, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)`,
-		job.ProjectID, nextRound, h.lastCritique, string(reconciliationJSON), outcome, now,
+		job.ProjectID, roundNumber, h.lastCritique, string(reconciliationJSON), outcome, now,
 	); err != nil {
 		return fmt.Errorf("insert audit_reconcile_round: %w", err)
 	}

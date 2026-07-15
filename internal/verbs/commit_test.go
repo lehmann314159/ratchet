@@ -186,6 +186,41 @@ func TestDecomposeSpecCommit(t *testing.T) {
 	}
 }
 
+// TestDecomposeSpecCommitRedecomposeRoundNumberAfterRealRound is the mirror
+// of TestReconcileDecompositionCommitRoundNumberAfterRedecompose: a project
+// that already has a real debate round (round_number=1) and now gets
+// mechanically redecomposed (forwardFileReferenceChecks found a violation)
+// must not reuse round_number=1 for the redecompose row.
+func TestDecomposeSpecCommitRedecomposeRoundNumberAfterRealRound(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "fixture: redecompose round_number after real round")
+
+	if _, err := d.ExecContext(ctx, `
+		INSERT INTO audit_reconcile_rounds (project_id, round_number, critique_text, reconciliation, outcome, created_at)
+		VALUES (-1, 1, 'a real audit critique', '{"responses":[]}', 'converged', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("seed real round: %v", err)
+	}
+
+	job := seedJob(t, d, -1, db.VerbDecomposeSpec, sql.NullInt64{})
+	inTx(t, d, func(tx *sql.Tx) error {
+		return (&DecomposeSpec{}).commitRedecompose(ctx, tx, job, []string{"bead X references later bead Y's file"}, "2026-01-02T00:00:00Z")
+	})
+
+	if n := countRows(t, d, `SELECT COUNT(*) FROM audit_reconcile_rounds WHERE project_id = -1 AND round_number = 1`); n != 1 {
+		t.Errorf("round_number=1 rows = %d, want exactly 1 (the real round, untouched)", n)
+	}
+	var outcome string
+	if err := d.QueryRowContext(ctx,
+		`SELECT outcome FROM audit_reconcile_rounds WHERE project_id = -1 AND round_number = 2`,
+	).Scan(&outcome); err != nil {
+		t.Fatalf("expected the redecompose row to land at round_number=2, none found: %v", err)
+	}
+	if outcome != "redecompose" {
+		t.Errorf("outcome = %q, want redecompose", outcome)
+	}
+}
+
 // --- AUDIT_DECOMPOSITION ---
 
 func TestAuditDecompositionCommit(t *testing.T) {
@@ -243,6 +278,45 @@ func TestReconcileDecompositionCommitConverged(t *testing.T) {
 	// EXECUTE_BEAD enqueued for the bead.
 	if n := countRows(t, d, `SELECT COUNT(*) FROM handoff_jobs WHERE project_id = -1 AND verb = ? AND bead_id = ?`, db.VerbExecuteBead, beadID); n != 1 {
 		t.Errorf("EXECUTE_BEAD jobs = %d, want 1", n)
+	}
+}
+
+// TestReconcileDecompositionCommitRoundNumberAfterRedecompose reproduces the
+// Stage 2 audit finding confirmed live in project 98 (checkers-v8): a project
+// redecomposed once (a mechanical 'redecompose' row at round_number=1) and
+// then debated for the first time used to also land its first real round at
+// round_number=1 — two rows sharing the same (project_id, round_number),
+// because commitRedecompose and RECONCILE's Commit each counted a disjoint
+// subset of audit_reconcile_rounds instead of sharing one sequence. The real
+// round must now get round_number=2, the next number never used by this
+// project, regardless of the redecompose row's outcome.
+func TestReconcileDecompositionCommitRoundNumberAfterRedecompose(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "fixture: round_number after redecompose")
+	seedBead(t, d, -1, "B01")
+
+	if _, err := d.ExecContext(ctx, `
+		INSERT INTO audit_reconcile_rounds (project_id, round_number, critique_text, reconciliation, outcome, created_at)
+		VALUES (-1, 1, 'Bead ordering violations...', '', 'redecompose', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("seed redecompose row: %v", err)
+	}
+
+	job := seedJob(t, d, -1, db.VerbReconcileDecomposition, sql.NullInt64{})
+	h := &ReconcileDecomposition{lastCritique: "some critique", lastRoundsSoFar: 0}
+	out := ReconcileDecompositionOutput{
+		Responses: []ReconcileResponse{{BeadTitle: "B01", Action: "disagree", Reason: "finding is wrong"}},
+	}
+	inTx(t, d, func(tx *sql.Tx) error { return h.Commit(ctx, tx, job, out) })
+
+	if n := countRows(t, d, `SELECT COUNT(*) FROM audit_reconcile_rounds WHERE project_id = -1 AND round_number = 1`); n != 1 {
+		t.Errorf("round_number=1 rows = %d, want exactly 1 (the redecompose row, untouched)", n)
+	}
+	var outcome string
+	if err := d.QueryRowContext(ctx,
+		`SELECT outcome FROM audit_reconcile_rounds WHERE project_id = -1 AND round_number = 2`,
+	).Scan(&outcome); err != nil {
+		t.Fatalf("expected the real round to land at round_number=2, none found: %v", err)
 	}
 }
 

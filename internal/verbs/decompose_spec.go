@@ -217,13 +217,18 @@ func (h *DecomposeSpec) commitRedecompose(ctx context.Context, tx *sql.Tx, job *
 	}
 	attemptCount++
 
+	roundNumber, err := nextRoundNumber(ctx, tx, job.ProjectID)
+	if err != nil {
+		return err
+	}
+
 	critique := "Bead ordering violations (structural, mechanically detected — not a model judgment call):\n- " +
 		strings.Join(violations, "\n- ")
 
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO audit_reconcile_rounds (project_id, round_number, critique_text, reconciliation, outcome, created_at)
 		VALUES (?, ?, ?, '', 'redecompose', ?)`,
-		job.ProjectID, attemptCount, critique, now,
+		job.ProjectID, roundNumber, critique, now,
 	); err != nil {
 		return fmt.Errorf("insert redecompose round: %w", err)
 	}
@@ -237,7 +242,7 @@ func (h *DecomposeSpec) commitRedecompose(ctx context.Context, tx *sql.Tx, job *
 		return err
 	}
 
-	_, err := tx.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
 		VALUES (?, ?, NULL, 'pending', ?, ?)`,
 		job.ProjectID, db.VerbDecomposeSpec, now, now)
