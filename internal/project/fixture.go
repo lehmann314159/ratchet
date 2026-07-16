@@ -67,25 +67,30 @@ func RunSaveFixtureMain(args []string) {
 
 // saveFixture converts a live project into a fixture: a frozen, reusable
 // starting point the orchestrator will never dispatch again. It renumbers the
-// project (and every project-scoped table's rows) in place to the negative of
-// its own ID — cheap, no row duplication, no folder copy — rather than
+// project (and every project-scoped table's rows) in place to a fresh
+// negative ID — cheap, no row duplication, no folder copy — rather than
 // copying data. Returns the new (negative) ID and the fixture's label.
 //
-// Preconditions: projectID must be positive (a fixture ID passed back in is
-// almost certainly a mistake — negating it again would produce a positive ID
-// that could collide with a real project), the project must exist, it must
-// have zero 'running' handoff_jobs (renumbering out from under an in-flight
-// job would corrupt whichever row the running job later tries to write back
-// to), and -projectID must not already be taken by an earlier fixture.
+// The new ID is allocated sequentially — one less than the current lowest
+// (most negative) fixture ID, or -1 if there are no fixtures yet — rather
+// than derived from projectID itself. An earlier version negated projectID
+// directly (N -> -N); that scheme collided in practice, because
+// projects.id has no AUTOINCREMENT, so SQLite reuses the lowest freed id,
+// and save-fixture is exactly the operation that frees one (renumbering N
+// to -N leaves N available again). A later project reusing that freed N
+// would then try to claim the same -N a prior fixture already occupied —
+// confirmed live twice, 2026-07-16 (chess-v4 reusing checkers-v9's freed
+// id 99; goban-v3 reusing chess-v5's freed id 100). Sequential allocation
+// makes this collision structurally impossible instead of merely detected:
+// the new ID is always strictly less than every existing fixture ID by
+// construction. The one tradeoff is that a fixture's ID no longer directly
+// reveals its source project's original positive ID — the label carries
+// that context instead (e.g. "fixture: checkers post-RECONCILE").
 //
-// That last check matters because projects.id has no AUTOINCREMENT: SQLite
-// reuses the lowest freed id, and save-fixture is exactly the operation that
-// frees one (renumbering N to -N leaves N available again). A later project
-// can land back on the same N a prior fixture was saved from — confirmed
-// live (chess-v4, 2026-07-16, reused id 99 freed by checkers-v9's -99
-// fixture). Without this check, the renumber UPDATE below would fail on the
-// table's own UNIQUE constraint mid-transaction (rolled back safely, but
-// with a raw SQL error instead of an actionable one).
+// Preconditions: projectID must be positive (a fixture ID passed back in is
+// almost certainly a mistake), the project must exist, and it must have zero
+// 'running' handoff_jobs (renumbering out from under an in-flight job would
+// corrupt whichever row the running job later tries to write back to).
 func saveFixture(ctx context.Context, d *db.DB, projectID int64, labelSuffix string) (newID int64, label string, err error) {
 	if projectID <= 0 {
 		return 0, "", fmt.Errorf("project ID must be positive (got %d) — already a fixture?", projectID)
@@ -100,15 +105,6 @@ func saveFixture(ctx context.Context, d *db.DB, projectID int64, labelSuffix str
 		return 0, "", fmt.Errorf("query project: %w", err)
 	}
 
-	var conflictLabel string
-	if err = d.QueryRowContext(ctx,
-		`SELECT label FROM projects WHERE id = ?`, -projectID,
-	).Scan(&conflictLabel); err == nil {
-		return 0, "", fmt.Errorf("fixture id %d is already taken by %q — a project previously freed id %d by becoming this fixture, and a later project reused it; rename or remove the existing fixture first", -projectID, conflictLabel, projectID)
-	} else if err != sql.ErrNoRows {
-		return 0, "", fmt.Errorf("check existing fixture: %w", err)
-	}
-
 	var runningCount int
 	if err = d.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM handoff_jobs WHERE project_id = ? AND status = 'running'`, projectID,
@@ -119,7 +115,6 @@ func saveFixture(ctx context.Context, d *db.DB, projectID int64, labelSuffix str
 		return 0, "", fmt.Errorf("project %d has %d running job(s) — wait for them to finish before saving a fixture", projectID, runningCount)
 	}
 
-	newID = -projectID
 	descriptor := origLabel
 	if labelSuffix != "" {
 		descriptor = labelSuffix
@@ -147,21 +142,62 @@ func saveFixture(ctx context.Context, d *db.DB, projectID int64, labelSuffix str
 		return 0, "", fmt.Errorf("begin tx: %w", err)
 	}
 
+	// Allocate the new fixture ID inside the same transaction as the rename,
+	// so a concurrent save-fixture can't compute the same "next" ID twice —
+	// SQLite's single-writer setup (db.go's SetMaxOpenConns(1)) serializes
+	// this with any other in-flight write anyway, but computing it here
+	// keeps the invariant obviously true rather than incidentally true.
+	var minFixtureID sql.NullInt64
+	if err = tx.QueryRowContext(ctx, `SELECT MIN(id) FROM projects WHERE id < 0`).Scan(&minFixtureID); err != nil {
+		_ = tx.Rollback()
+		return 0, "", fmt.Errorf("compute next fixture id: %w", err)
+	}
+	newID = -1
+	if minFixtureID.Valid {
+		newID = minFixtureID.Int64 - 1
+	}
+
+	if err = renumberFixtureID(ctx, tx, projectID, newID, now); err != nil {
+		_ = tx.Rollback()
+		return 0, "", err
+	}
+
 	if _, err = tx.ExecContext(ctx,
-		`UPDATE projects SET id = ?, label = ?, status = 'fixture', updated_at = ? WHERE id = ?`,
-		newID, label, now, projectID,
+		`UPDATE projects SET label = ?, status = 'fixture', updated_at = ? WHERE id = ?`,
+		label, now, newID,
 	); err != nil {
 		_ = tx.Rollback()
-		return 0, "", fmt.Errorf("renumber project row: %w", err)
+		return 0, "", fmt.Errorf("set fixture label/status: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return 0, "", fmt.Errorf("commit: %w", err)
+	}
+
+	return newID, label, nil
+}
+
+// renumberFixtureID moves oldID's project row (and every project-scoped
+// table's rows, plus any recovered_from_project_id backreference) to newID
+// within tx. Callers must run this inside a transaction with
+// PRAGMA foreign_keys=OFF already toggled (SQLite refuses to toggle it
+// mid-transaction), and must handle any other fields on the projects row
+// (label, status) themselves, in the same transaction — this only moves the
+// ID and everything that has a live FK into it.
+func renumberFixtureID(ctx context.Context, tx *sql.Tx, oldID, newID int64, now string) error {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE projects SET id = ?, updated_at = ? WHERE id = ?`,
+		newID, now, oldID,
+	); err != nil {
+		return fmt.Errorf("renumber project row: %w", err)
 	}
 
 	for _, table := range fixtureScopedTables {
-		if _, err = tx.ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			fmt.Sprintf(`UPDATE %s SET project_id = ? WHERE project_id = ?`, table),
-			newID, projectID,
+			newID, oldID,
 		); err != nil {
-			_ = tx.Rollback()
-			return 0, "", fmt.Errorf("renumber %s: %w", table, err)
+			return fmt.Errorf("renumber %s: %w", table, err)
 		}
 	}
 
@@ -170,17 +206,12 @@ func saveFixture(ctx context.Context, d *db.DB, projectID int64, labelSuffix str
 	// already takes for this same backreference (it nulls it out there since
 	// the referenced project is gone; here it's just renumbered, so repoint
 	// instead of null).
-	if _, err = tx.ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE projects SET recovered_from_project_id = ? WHERE recovered_from_project_id = ?`,
-		newID, projectID,
+		newID, oldID,
 	); err != nil {
-		_ = tx.Rollback()
-		return 0, "", fmt.Errorf("repoint recovered_from_project_id: %w", err)
+		return fmt.Errorf("repoint recovered_from_project_id: %w", err)
 	}
 
-	if err = tx.Commit(); err != nil {
-		return 0, "", fmt.Errorf("commit: %w", err)
-	}
-
-	return newID, label, nil
+	return nil
 }

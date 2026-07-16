@@ -99,13 +99,24 @@ Converts a live project into a **fixture**: a frozen, reusable starting point
 the orchestrator will never dispatch again. It's an **in-place renumber, not
 a copy** — cheap, no row duplication, no folder copy:
 
-- `projects.id` is negated (`98` → `-98`). `projects.id` is a plain
-  `INTEGER PRIMARY KEY` with no `AUTOINCREMENT`, so this doesn't perturb
-  SQLite's next-rowid computation for future real projects.
+- `projects.id` is renumbered to a fresh negative ID, allocated
+  **sequentially**: one less than the current lowest (most negative) fixture
+  ID, or `-1` if there are no fixtures yet. An earlier version negated the
+  source project's own ID directly (`98` → `-98`); that collided in
+  practice, since `projects.id` has no `AUTOINCREMENT` and SQLite reuses the
+  lowest freed ID, so a later project could land back on the exact ID an
+  earlier fixture had already claimed the negation of. Sequential allocation
+  makes that collision structurally impossible — the new ID is always
+  strictly less than every existing fixture ID by construction — at the cost
+  of a fixture's ID no longer directly revealing its source project's
+  original positive ID (the label carries that context instead).
 - Every project-scoped table's `project_id` FK is renumbered to match
   (`fixtureScopedTables` in `internal/project/fixture.go` — 13 tables, kept
   as the single source of truth for "what counts as project-scoped"; cross-
-  checked directly against the live schema, not assumed from a summary).
+  checked directly against the live schema, not assumed from a summary). The
+  shared FK-cascade logic lives in `renumberFixtureID`, used both by
+  `save-fixture` itself and by the one-time migration that moved the two
+  original fixtures (`98`-derived, `99`-derived) onto this scheme.
 - `projects.status` becomes `'fixture'` — the orchestrator's poll already
   filters `WHERE status = 'active'`, so this alone is what makes a fixture
   mechanically undispatchable; no separate "ignore negative IDs" guard exists
@@ -115,8 +126,7 @@ a copy** — cheap, no row duplication, no folder copy:
   post-RECONCILE"`), or falls back to the project's own original label.
 
 **Preconditions**: `--project` must be a positive ID (rejects re-fixturing an
-already-negative ID — that would produce a positive ID that could collide
-with a real project) and the project must have zero `'running'`
+already-negative ID) and the project must have zero `'running'`
 `handoff_jobs`. A paused project's inert `'pending'` job does **not** block
 saving a fixture — that's exactly the state you're usually saving from.
 
@@ -207,11 +217,13 @@ ratchet start --db=ratchet.db --ollama=...
 
 # Freeze it. Say the project landed at id 98.
 ratchet save-fixture --db=ratchet.db --project=98 --label="checkers post-RECONCILE"
-# -> fixture saved at id -98
+# -> fixture saved at the next sequential negative id, e.g. -1 if this is
+#    the first fixture, or one less than the current lowest fixture id
+#    otherwise — not derived from 98 itself.
 
 # Clone it as many times as you want, each one an independent, mutable copy.
-ratchet clone-project --db=ratchet.db --from=-98 --label=checkers-try-1 --folder=/path/to/try-1
-ratchet clone-project --db=ratchet.db --from=-98 --label=checkers-try-2 --folder=/path/to/try-2
+ratchet clone-project --db=ratchet.db --from=-1 --label=checkers-try-1 --folder=/path/to/try-1
+ratchet clone-project --db=ratchet.db --from=-1 --label=checkers-try-2 --folder=/path/to/try-2
 # Each clone comes up status=active with its own copy of every bead spec,
 # ready for the orchestrator to dispatch bead execution immediately —
 # decomposition never re-runs.

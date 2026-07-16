@@ -3,7 +3,6 @@ package project
 import (
 	"context"
 	"database/sql"
-	"strings"
 	"testing"
 
 	"ratchet/internal/db"
@@ -145,15 +144,15 @@ func TestSaveFixture_RenumbersEveryScopedTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("saveFixture: %v", err)
 	}
-	if newID != -98 {
-		t.Errorf("newID = %d, want -98", newID)
+	if newID != -1 {
+		t.Errorf("newID = %d, want -1 (first fixture ever, sequential allocation)", newID)
 	}
 	if label != "fixture: checkers post-RECONCILE" {
 		t.Errorf("label = %q, want %q", label, "fixture: checkers post-RECONCILE")
 	}
 
 	var status, gotLabel string
-	if err := d.QueryRowContext(ctx, `SELECT status, label FROM projects WHERE id = -98`).Scan(&status, &gotLabel); err != nil {
+	if err := d.QueryRowContext(ctx, `SELECT status, label FROM projects WHERE id = -1`).Scan(&status, &gotLabel); err != nil {
 		t.Fatalf("query renumbered project: %v", err)
 	}
 	if status != "fixture" {
@@ -172,8 +171,8 @@ func TestSaveFixture_RenumbersEveryScopedTable(t *testing.T) {
 	}
 
 	for _, table := range fixtureScopedTables {
-		if n := countProjectScoped(t, d, table, -98); n != 1 {
-			t.Errorf("%s: rows under new id -98 = %d, want 1", table, n)
+		if n := countProjectScoped(t, d, table, -1); n != 1 {
+			t.Errorf("%s: rows under new id -1 = %d, want 1", table, n)
 		}
 		if n := countProjectScoped(t, d, table, 98); n != 0 {
 			t.Errorf("%s: rows still under old id 98 = %d, want 0 (orphaned)", table, n)
@@ -255,52 +254,47 @@ func TestSaveFixture_NotFound(t *testing.T) {
 	}
 }
 
-// TestSaveFixture_RejectsIDReuseCollision reproduces the live scenario found
-// 2026-07-16 (checkers-v9 -> -99, then chess-v4 reused freed id 99): saving a
-// second project as a fixture when -projectID is already taken by an earlier
-// fixture must fail with a clear, actionable error instead of a raw SQLite
-// UNIQUE constraint violation, and must leave both the earlier fixture and
-// the second project completely untouched.
-func TestSaveFixture_RejectsIDReuseCollision(t *testing.T) {
+// TestSaveFixture_AllocatesSequentialIDs confirms fixture IDs are allocated
+// sequentially (one less than the current lowest fixture ID, or -1 if none
+// exist) rather than derived from the source project's own ID. This is what
+// makes a later project reusing a freed positive ID (projects.id has no
+// AUTOINCREMENT, so SQLite reuses the lowest freed id) structurally unable
+// to collide with an earlier fixture — confirmed live 2026-07-16 (chess-v4
+// reusing checkers-v9's freed id 99; goban-v3 reusing chess-v5's freed id
+// 100) before this scheme replaced the original "-projectID" one.
+func TestSaveFixture_AllocatesSequentialIDs(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 
-	seedFixtureBaseProject(t, d, 99, "active")
-	firstFixtureID, firstLabel, err := saveFixture(ctx, d, 99, "first fixture")
+	seedFixtureBaseProject(t, d, 50, "active")
+	firstID, _, err := saveFixture(ctx, d, 50, "first")
 	if err != nil {
 		t.Fatalf("first saveFixture: %v", err)
 	}
-	if firstFixtureID != -99 {
-		t.Fatalf("firstFixtureID = %d, want -99", firstFixtureID)
+	if firstID != -1 {
+		t.Errorf("firstID = %d, want -1 (first fixture ever)", firstID)
 	}
 
-	// Reuse the freed id 99, exactly as SQLite's own INTEGER PRIMARY KEY
+	// Reuse the freed id 50, exactly as SQLite's own INTEGER PRIMARY KEY
 	// (no AUTOINCREMENT) does in practice once the lowest id is freed.
-	seedFixtureBaseProject(t, d, 99, "active")
-
-	_, _, err = saveFixture(ctx, d, 99, "second fixture")
-	if err == nil {
-		t.Fatal("expected error for a fixture id collision, got nil")
+	seedFixtureBaseProject(t, d, 50, "active")
+	secondID, _, err := saveFixture(ctx, d, 50, "second")
+	if err != nil {
+		t.Fatalf("second saveFixture: %v", err)
 	}
-	if !strings.Contains(err.Error(), "already taken") {
-		t.Errorf("error = %q, want a clear message mentioning the id is already taken", err.Error())
-	}
-
-	// The earlier fixture must be untouched.
-	var status, label string
-	if err := d.QueryRowContext(ctx, `SELECT status, label FROM projects WHERE id = -99`).Scan(&status, &label); err != nil {
-		t.Fatalf("query first fixture: %v", err)
-	}
-	if status != "fixture" || label != firstLabel {
-		t.Errorf("first fixture disturbed: status=%q label=%q, want status=fixture label=%q", status, label, firstLabel)
+	if secondID != -2 {
+		t.Errorf("secondID = %d, want -2 (sequential, not re-derived from source id 50)", secondID)
 	}
 
-	// The second project must be untouched too (still active, still id 99).
-	if err := d.QueryRowContext(ctx, `SELECT status FROM projects WHERE id = 99`).Scan(&status); err != nil {
-		t.Fatalf("query second project: %v", err)
+	// A third fixture from an unrelated source id still lands at -3 — the
+	// allocation depends only on existing fixture IDs, never on the source.
+	seedFixtureBaseProject(t, d, 12345, "active")
+	thirdID, _, err := saveFixture(ctx, d, 12345, "third")
+	if err != nil {
+		t.Fatalf("third saveFixture: %v", err)
 	}
-	if status != "active" {
-		t.Errorf("second project status = %q, want active (untouched)", status)
+	if thirdID != -3 {
+		t.Errorf("thirdID = %d, want -3", thirdID)
 	}
 }
 
