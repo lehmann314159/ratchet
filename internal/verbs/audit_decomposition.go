@@ -119,7 +119,7 @@ func (h *AuditDecomposition) Commit(ctx context.Context, tx *sql.Tx, job *db.Han
 	out := parsed.(AuditDecompositionOutput)
 
 	if out.OverallVerdict == "no_issues" {
-		return enqueueFirstBeadForExecution(ctx, tx, job.ProjectID, now)
+		return enqueueDecompositionApproved(ctx, tx, job.ProjectID, now)
 	}
 
 	_, err := tx.ExecContext(ctx, `

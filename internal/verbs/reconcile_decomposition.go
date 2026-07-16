@@ -270,23 +270,7 @@ func (h *ReconcileDecomposition) Commit(ctx context.Context, tx *sql.Tx, job *db
 
 	switch outcome {
 	case "converged":
-		if err := enqueueFirstBeadForExecution(ctx, tx, job.ProjectID, now); err != nil {
-			return err
-		}
-		var pauseAfterReconcile bool
-		if err := tx.QueryRowContext(ctx,
-			`SELECT pause_after_reconcile FROM projects WHERE id = ?`, job.ProjectID,
-		).Scan(&pauseAfterReconcile); err != nil {
-			return fmt.Errorf("load pause_after_reconcile: %w", err)
-		}
-		pauseAfterVerb, err := shouldPauseAfterVerb(ctx, tx, job.ProjectID, db.VerbReconcileDecomposition)
-		if err != nil {
-			return err
-		}
-		if pauseAfterReconcile || pauseAfterVerb {
-			return pauseProject(ctx, tx, job.ProjectID, now)
-		}
-		return nil
+		return enqueueDecompositionApproved(ctx, tx, job.ProjectID, now)
 	case "disagreed_continuing":
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
@@ -472,17 +456,4 @@ func (h *ReconcileDecomposition) commitReject(ctx context.Context, tx *sql.Tx, j
 		return fmt.Errorf("enqueue retry %s: %w", db.VerbReconcileDecomposition, err)
 	}
 	return nil
-}
-
-// enqueueFirstBeadForExecution enqueues the first bead for execution. If the
-// bead has test files, REFINE_TESTS_A runs first to certify them; otherwise
-// EXECUTE_BEAD is enqueued directly.
-func enqueueFirstBeadForExecution(ctx context.Context, tx *sql.Tx, projectID int64, now string) error {
-	var beadID int64
-	if err := tx.QueryRowContext(ctx,
-		`SELECT id FROM beads WHERE project_id = ? ORDER BY id LIMIT 1`, projectID,
-	).Scan(&beadID); err != nil {
-		return fmt.Errorf("find first bead: %w", err)
-	}
-	return enqueueBeadExecution(ctx, tx, projectID, beadID, now)
 }

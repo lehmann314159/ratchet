@@ -104,6 +104,78 @@ func TestReconcileDecompositionCommitConvergedNoPauseByDefault(t *testing.T) {
 	}
 }
 
+// --- AUDIT_DECOMPOSITION (no_issues path) ---
+//
+// These three mirror the RECONCILE_DECOMPOSITION converged pause tests above.
+// Before enqueueDecompositionApproved existed, AuditDecomposition.Commit's
+// no_issues branch called enqueueFirstBeadForExecution directly with no pause
+// check at all — a decomposition AUDIT approved on the first pass (skipping
+// RECONCILE_DECOMPOSITION entirely) never paused, even with pause_after_verb
+// or pause_after_reconcile set. Confirmed live, chess-v4 (project 99),
+// 2026-07-16 — this gap had zero test coverage before, since it was never
+// previously exercised.
+
+func TestAuditDecompositionCommitNoIssuesPausesOnPauseAfterVerb(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "fixture: AUDIT_DECOMPOSITION no_issues/pause_after_verb")
+	setPauseAfterVerb(t, d, -1, db.VerbReconcileDecomposition)
+	beadID, _ := seedBead(t, d, -1, "B01")
+
+	job := seedJob(t, d, -1, db.VerbAuditDecomposition, sql.NullInt64{})
+	out := AuditDecompositionOutput{OverallVerdict: "no_issues"}
+	inTx(t, d, func(tx *sql.Tx) error {
+		return (&AuditDecomposition{}).Commit(ctx, tx, job, out)
+	})
+
+	if n := countRows(t, d, `SELECT COUNT(*) FROM handoff_jobs WHERE project_id = -1 AND verb = ? AND bead_id = ?`, db.VerbExecuteBead, beadID); n != 1 {
+		t.Errorf("EXECUTE_BEAD jobs = %d, want 1 (still enqueued even though pausing)", n)
+	}
+	if status := projectStatus(t, d, -1); status != "paused" {
+		t.Errorf("project status = %q, want paused", status)
+	}
+}
+
+func TestAuditDecompositionCommitNoIssuesPauseAfterReconcileStillWorks(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "fixture: AUDIT_DECOMPOSITION no_issues/pause_after_reconcile")
+	if _, err := d.ExecContext(ctx, `UPDATE projects SET pause_after_reconcile = 1 WHERE id = -1`); err != nil {
+		t.Fatalf("set pause_after_reconcile: %v", err)
+	}
+	beadID, _ := seedBead(t, d, -1, "B01")
+
+	job := seedJob(t, d, -1, db.VerbAuditDecomposition, sql.NullInt64{})
+	out := AuditDecompositionOutput{OverallVerdict: "no_issues"}
+	inTx(t, d, func(tx *sql.Tx) error {
+		return (&AuditDecomposition{}).Commit(ctx, tx, job, out)
+	})
+
+	if n := countRows(t, d, `SELECT COUNT(*) FROM handoff_jobs WHERE project_id = -1 AND verb = ? AND bead_id = ?`, db.VerbExecuteBead, beadID); n != 1 {
+		t.Errorf("EXECUTE_BEAD jobs = %d, want 1 (still enqueued even though pausing)", n)
+	}
+	if status := projectStatus(t, d, -1); status != "paused" {
+		t.Errorf("project status = %q, want paused", status)
+	}
+}
+
+func TestAuditDecompositionCommitNoIssuesNoPauseByDefault(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "fixture: AUDIT_DECOMPOSITION no_issues/no pause configured")
+	seedBead(t, d, -1, "B01")
+
+	job := seedJob(t, d, -1, db.VerbAuditDecomposition, sql.NullInt64{})
+	out := AuditDecompositionOutput{OverallVerdict: "no_issues"}
+	inTx(t, d, func(tx *sql.Tx) error {
+		return (&AuditDecomposition{}).Commit(ctx, tx, job, out)
+	})
+
+	if status := projectStatus(t, d, -1); status != "active" {
+		t.Errorf("project status = %q, want active (no pause configured)", status)
+	}
+}
+
 // --- VERIFY_MANIFEST ---
 
 func TestVerifyManifestCommitPausesOnPauseAfterVerb(t *testing.T) {

@@ -390,6 +390,52 @@ func enqueueBeadExecution(ctx context.Context, tx *sql.Tx, projectID, beadID int
 	return err
 }
 
+// enqueueFirstBeadForExecution enqueues the first bead for execution. If the
+// bead has test files, REFINE_TESTS_WRITE runs first to certify them;
+// otherwise EXECUTE_BEAD is enqueued directly.
+func enqueueFirstBeadForExecution(ctx context.Context, tx *sql.Tx, projectID int64, now string) error {
+	var beadID int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT id FROM beads WHERE project_id = ? ORDER BY id LIMIT 1`, projectID,
+	).Scan(&beadID); err != nil {
+		return fmt.Errorf("find first bead: %w", err)
+	}
+	return enqueueBeadExecution(ctx, tx, projectID, beadID, now)
+}
+
+// enqueueDecompositionApproved enqueues the first bead for execution and then
+// checks whether the project should pause instead of actually starting bead
+// execution. This is the single invariant checkpoint both FSM paths that
+// leave decomposition converge on: AuditDecomposition.Commit's no_issues
+// branch (AUDIT found nothing to fix, RECONCILE never runs) and
+// ReconcileDecomposition.Commit's converged branch (RECONCILE fixed
+// everything AUDIT found). pause_after_verb=RECONCILE_DECOMPOSITION and the
+// older pause_after_reconcile both mean "pause once decomposition is
+// approved" — they must fire the same way regardless of which of these two
+// branches actually got here. Before this, the pause check only lived inside
+// RECONCILE's own Commit, so a decomposition AUDIT approved on the first
+// pass (no RECONCILE round at all) never paused, even with either flag set —
+// confirmed live, chess-v4 (project 99), 2026-07-16.
+func enqueueDecompositionApproved(ctx context.Context, tx *sql.Tx, projectID int64, now string) error {
+	if err := enqueueFirstBeadForExecution(ctx, tx, projectID, now); err != nil {
+		return err
+	}
+	var pauseAfterReconcile bool
+	if err := tx.QueryRowContext(ctx,
+		`SELECT pause_after_reconcile FROM projects WHERE id = ?`, projectID,
+	).Scan(&pauseAfterReconcile); err != nil {
+		return fmt.Errorf("load pause_after_reconcile: %w", err)
+	}
+	pauseAfterVerb, err := shouldPauseAfterVerb(ctx, tx, projectID, db.VerbReconcileDecomposition)
+	if err != nil {
+		return err
+	}
+	if pauseAfterReconcile || pauseAfterVerb {
+		return pauseProject(ctx, tx, projectID, now)
+	}
+	return nil
+}
+
 // shouldPauseAfterVerb reports whether projectID's pause_after_verb matches verb.
 // Callers must enqueue the verb's normal next handoff_job *before* calling this
 // and, if it returns true, call pauseProject instead of returning nil — the
