@@ -73,10 +73,19 @@ func RunSaveFixtureMain(args []string) {
 //
 // Preconditions: projectID must be positive (a fixture ID passed back in is
 // almost certainly a mistake — negating it again would produce a positive ID
-// that could collide with a real project), the project must exist, and it
-// must have zero 'running' handoff_jobs (renumbering out from under an
-// in-flight job would corrupt whichever row the running job later tries to
-// write back to).
+// that could collide with a real project), the project must exist, it must
+// have zero 'running' handoff_jobs (renumbering out from under an in-flight
+// job would corrupt whichever row the running job later tries to write back
+// to), and -projectID must not already be taken by an earlier fixture.
+//
+// That last check matters because projects.id has no AUTOINCREMENT: SQLite
+// reuses the lowest freed id, and save-fixture is exactly the operation that
+// frees one (renumbering N to -N leaves N available again). A later project
+// can land back on the same N a prior fixture was saved from — confirmed
+// live (chess-v4, 2026-07-16, reused id 99 freed by checkers-v9's -99
+// fixture). Without this check, the renumber UPDATE below would fail on the
+// table's own UNIQUE constraint mid-transaction (rolled back safely, but
+// with a raw SQL error instead of an actionable one).
 func saveFixture(ctx context.Context, d *db.DB, projectID int64, labelSuffix string) (newID int64, label string, err error) {
 	if projectID <= 0 {
 		return 0, "", fmt.Errorf("project ID must be positive (got %d) — already a fixture?", projectID)
@@ -89,6 +98,15 @@ func saveFixture(ctx context.Context, d *db.DB, projectID int64, labelSuffix str
 		return 0, "", fmt.Errorf("project not found: %d", projectID)
 	} else if err != nil {
 		return 0, "", fmt.Errorf("query project: %w", err)
+	}
+
+	var conflictLabel string
+	if err = d.QueryRowContext(ctx,
+		`SELECT label FROM projects WHERE id = ?`, -projectID,
+	).Scan(&conflictLabel); err == nil {
+		return 0, "", fmt.Errorf("fixture id %d is already taken by %q — a project previously freed id %d by becoming this fixture, and a later project reused it; rename or remove the existing fixture first", -projectID, conflictLabel, projectID)
+	} else if err != sql.ErrNoRows {
+		return 0, "", fmt.Errorf("check existing fixture: %w", err)
 	}
 
 	var runningCount int

@@ -3,6 +3,7 @@ package project
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 
 	"ratchet/internal/db"
@@ -251,6 +252,55 @@ func TestSaveFixture_NotFound(t *testing.T) {
 	d := openTestDB(t)
 	if _, _, err := saveFixture(context.Background(), d, 999, ""); err == nil {
 		t.Error("expected error for unknown project ID, got nil")
+	}
+}
+
+// TestSaveFixture_RejectsIDReuseCollision reproduces the live scenario found
+// 2026-07-16 (checkers-v9 -> -99, then chess-v4 reused freed id 99): saving a
+// second project as a fixture when -projectID is already taken by an earlier
+// fixture must fail with a clear, actionable error instead of a raw SQLite
+// UNIQUE constraint violation, and must leave both the earlier fixture and
+// the second project completely untouched.
+func TestSaveFixture_RejectsIDReuseCollision(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	seedFixtureBaseProject(t, d, 99, "active")
+	firstFixtureID, firstLabel, err := saveFixture(ctx, d, 99, "first fixture")
+	if err != nil {
+		t.Fatalf("first saveFixture: %v", err)
+	}
+	if firstFixtureID != -99 {
+		t.Fatalf("firstFixtureID = %d, want -99", firstFixtureID)
+	}
+
+	// Reuse the freed id 99, exactly as SQLite's own INTEGER PRIMARY KEY
+	// (no AUTOINCREMENT) does in practice once the lowest id is freed.
+	seedFixtureBaseProject(t, d, 99, "active")
+
+	_, _, err = saveFixture(ctx, d, 99, "second fixture")
+	if err == nil {
+		t.Fatal("expected error for a fixture id collision, got nil")
+	}
+	if !strings.Contains(err.Error(), "already taken") {
+		t.Errorf("error = %q, want a clear message mentioning the id is already taken", err.Error())
+	}
+
+	// The earlier fixture must be untouched.
+	var status, label string
+	if err := d.QueryRowContext(ctx, `SELECT status, label FROM projects WHERE id = -99`).Scan(&status, &label); err != nil {
+		t.Fatalf("query first fixture: %v", err)
+	}
+	if status != "fixture" || label != firstLabel {
+		t.Errorf("first fixture disturbed: status=%q label=%q, want status=fixture label=%q", status, label, firstLabel)
+	}
+
+	// The second project must be untouched too (still active, still id 99).
+	if err := d.QueryRowContext(ctx, `SELECT status FROM projects WHERE id = 99`).Scan(&status); err != nil {
+		t.Fatalf("query second project: %v", err)
+	}
+	if status != "active" {
+		t.Errorf("second project status = %q, want active (untouched)", status)
 	}
 }
 
