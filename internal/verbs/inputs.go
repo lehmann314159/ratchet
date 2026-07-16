@@ -174,7 +174,7 @@ func latestAuditCritique(ctx context.Context, d *db.DB, projectID int64) (critiq
 		return "", 0, fmt.Errorf("latest audit critique: %w", err)
 	}
 	if err = d.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM audit_reconcile_rounds WHERE project_id = ? AND outcome != 'redecompose'`,
+		`SELECT COUNT(*) FROM audit_reconcile_rounds WHERE project_id = ? AND outcome NOT IN ('redecompose', 'reconcile_rejected')`,
 		projectID,
 	).Scan(&roundsSoFar); err != nil {
 		return "", 0, fmt.Errorf("round count: %w", err)

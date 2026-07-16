@@ -246,6 +246,37 @@ func TestMigrateAuditReconcileRoundsOutcomePreservesData(t *testing.T) {
 	  VALUES (2,1,2,'crit','','redecompose','2026-01-01T00:00:00Z')`)
 }
 
+func TestMigrateAuditReconcileRoundsRejectedPreservesData(t *testing.T) {
+	ctx := context.Background()
+	d := openRawTestDB(t)
+	mustExec(t, d, `CREATE TABLE projects (id INTEGER PRIMARY KEY)`)
+	mustExec(t, d, `INSERT INTO projects (id) VALUES (1)`)
+	mustExec(t, d, `CREATE TABLE audit_reconcile_rounds (
+	  id INTEGER PRIMARY KEY,
+	  project_id INTEGER NOT NULL REFERENCES projects(id),
+	  round_number INTEGER NOT NULL,
+	  critique_text TEXT NOT NULL,
+	  reconciliation TEXT NOT NULL,
+	  outcome TEXT NOT NULL CHECK (outcome IN ('converged','disagreed_continuing','escalated','redecompose')),
+	  created_at TIMESTAMP NOT NULL
+	)`)
+	mustExec(t, d, `INSERT INTO audit_reconcile_rounds (id,project_id,round_number,critique_text,reconciliation,outcome,created_at)
+	  VALUES (1,1,1,'crit','recon','escalated','2026-01-01T00:00:00Z')`)
+
+	if err := d.migrateAuditReconcileRoundsRejected(); err != nil {
+		t.Fatalf("migrateAuditReconcileRoundsRejected: %v", err)
+	}
+	var outcome string
+	if err := d.QueryRowContext(ctx, `SELECT outcome FROM audit_reconcile_rounds WHERE id = 1`).Scan(&outcome); err != nil {
+		t.Fatalf("row lost: %v", err)
+	}
+	if outcome != "escalated" {
+		t.Errorf("data corrupted: outcome=%q", outcome)
+	}
+	mustExec(t, d, `INSERT INTO audit_reconcile_rounds (id,project_id,round_number,critique_text,reconciliation,outcome,created_at)
+	  VALUES (2,1,2,'crit','{"responses":[]}','reconcile_rejected','2026-01-01T00:00:00Z')`)
+}
+
 func TestMigrateAdjudicationsDecisionPreservesData(t *testing.T) {
 	ctx := context.Background()
 	d := openRawTestDB(t)

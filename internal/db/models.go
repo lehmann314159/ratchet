@@ -98,7 +98,7 @@ type AuditReconcileRound struct {
 	RoundNumber    int
 	CritiqueText   string
 	Reconciliation string
-	Outcome        string // 'converged' | 'disagreed_continuing' | 'escalated'
+	Outcome        string // 'converged' | 'disagreed_continuing' | 'escalated' | 'redecompose' | 'reconcile_rejected'
 	CreatedAt      time.Time
 }
 

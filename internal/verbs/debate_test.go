@@ -94,7 +94,7 @@ func TestFormatReconcileResponsesInvalidJSON(t *testing.T) {
 
 func TestBuildReconcileUserMsgNoHistory(t *testing.T) {
 	beads := []beadState{{BeadID: 1, Title: "B01", FullText: "spec text"}}
-	msg := buildReconcileUserMsg("design doc content", beads, nil, "audit critique text")
+	msg := buildReconcileUserMsg("design doc content", beads, nil, "audit critique text", "")
 
 	if !strings.Contains(msg, "## Design Document") {
 		t.Error("missing Design Document section")
@@ -124,7 +124,7 @@ func TestBuildReconcileUserMsgWithHistory(t *testing.T) {
 			Outcome:        "disagreed_continuing",
 		},
 	}
-	msg := buildReconcileUserMsg("design doc", beads, history, "round 2 critique: still wrong")
+	msg := buildReconcileUserMsg("design doc", beads, history, "round 2 critique: still wrong", "")
 
 	if !strings.Contains(msg, "## Previous Debate History") {
 		t.Error("missing Previous Debate History section")

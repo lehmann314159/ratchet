@@ -5,12 +5,23 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	"ratchet/internal/db"
 	"ratchet/internal/ollama"
 )
+
+// reconcileRejectCap bounds how many times RECONCILE_DECOMPOSITION's own
+// proposed fix will be mechanically rejected and retried after
+// forwardFileReferenceChecks finds a bead-ordering violation in it, before
+// escalating for human review. Mirrors decomposeRedecomposeCap's shape
+// (decompose_spec.go) but escalates the job rather than full-stopping the
+// project: by this stage the decomposition already passed the same check
+// once (at DECOMPOSE_SPEC commit); only this specific RECONCILE attempt is
+// broken, so there's no reason to discard the whole decomposition over it.
+const reconcileRejectCap = 3
 
 // ReconcileDecomposition stores critique context between Run and Commit so
 // Commit can write the round row without a second in-transaction query.
@@ -19,6 +30,7 @@ type ReconcileDecomposition struct {
 	lastCritique    string
 	lastRoundsSoFar int
 	lastHistory     []debateRound
+	lastBeads       []beadState
 	knownTitles     map[string]bool
 	budgetDefault   int
 	folderPath      string
@@ -43,6 +55,10 @@ func (h *ReconcileDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.C
 	if err != nil {
 		return "", err
 	}
+	rejectFeedback, err := latestReconcileRejectFeedback(ctx, d, job.ProjectID)
+	if err != nil {
+		return "", err
+	}
 	model, err := loadVerbModel(ctx, d, job.ProjectID, db.VerbReconcileDecomposition)
 	if err != nil {
 		return "", err
@@ -56,6 +72,7 @@ func (h *ReconcileDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.C
 	h.lastCritique = critique
 	h.lastRoundsSoFar = roundsSoFar
 	h.lastHistory = history
+	h.lastBeads = beads
 	h.knownTitles = make(map[string]bool, len(beads))
 	for _, b := range beads {
 		h.knownTitles[b.Title] = true
@@ -65,15 +82,46 @@ func (h *ReconcileDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.C
 
 	return oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: reconcileDecompositionSystemPrompt(detectLang(project.FolderPath, beadOutputFiles(beads)))},
-		{Role: "user", Content: buildReconcileUserMsg(doc, beads, history, critique)},
+		{Role: "user", Content: buildReconcileUserMsg(doc, beads, history, critique, rejectFeedback)},
 	}, nil)
+}
+
+// latestReconcileRejectFeedback returns the critique_text of the most recent
+// 'reconcile_rejected' audit_reconcile_rounds row for projectID, or "" if
+// RECONCILE's own proposed fix has never been mechanically rejected. Mirrors
+// decompose_spec.go's latestRedecomposeFeedback.
+func latestReconcileRejectFeedback(ctx context.Context, d *db.DB, projectID int64) (string, error) {
+	var text string
+	err := d.QueryRowContext(ctx,
+		`SELECT critique_text FROM audit_reconcile_rounds
+		 WHERE project_id = ? AND outcome = 'reconcile_rejected'
+		 ORDER BY id DESC LIMIT 1`, projectID,
+	).Scan(&text)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("load reconcile reject feedback: %w", err)
+	}
+	return text, nil
 }
 
 // buildReconcileUserMsg constructs the user message for RECONCILE_DECOMPOSITION.
 // When previous debate rounds are present (round 2+), they are included so
 // the model can see what was already argued before responding to the new critique.
-func buildReconcileUserMsg(doc string, beads []beadState, history []debateRound, critique string) string {
+// rejectFeedback is non-empty only immediately after this project's own prior
+// RECONCILE attempt was mechanically rejected (see commitReject) — surfaced
+// first and separately from the debate history, since it's feedback on
+// RECONCILE's own output, not another round of AUDIT's critique.
+func buildReconcileUserMsg(doc string, beads []beadState, history []debateRound, critique, rejectFeedback string) string {
 	var sb strings.Builder
+	if rejectFeedback != "" {
+		sb.WriteString("## Your Previous Fix Attempt Was Rejected\n\n")
+		sb.WriteString("Your last response introduced a bead-ordering violation that would make a bead ")
+		sb.WriteString("structurally unable to pass no matter how many times it is executed. Fix this in your new response:\n\n")
+		sb.WriteString(rejectFeedback)
+		sb.WriteString("\n\n")
+	}
 	sb.WriteString("## Design Document\n\n")
 	sb.WriteString(doc)
 	sb.WriteString("\n\n## Current Decomposition\n\n")
@@ -159,6 +207,17 @@ func (h *ReconcileDecomposition) Validate(raw string) (string, any) {
 func (h *ReconcileDecomposition) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJob, parsed any) error {
 	out := parsed.(ReconcileDecompositionOutput)
 	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Re-run the same mechanical ordering check DECOMPOSE_SPEC runs on its own
+	// output (forwardFileReferenceChecks), this time against the *proposed*
+	// decomposition RECONCILE's agree_and_fix edits would produce if
+	// committed. Nothing else ever re-checks this after DECOMPOSE_SPEC's own
+	// commit, so RECONCILE moving a file's ownership between beads without
+	// also fixing dispatch order previously went uncaught until AUDIT (or a
+	// real bead execution) discovered the symptom rounds later.
+	if violations := forwardFileReferenceChecks(mergeProposedBeads(h.lastBeads, out)); len(violations) > 0 {
+		return h.commitReject(ctx, tx, job, out, violations, now)
+	}
 
 	var roundCap int
 	if err := tx.QueryRowContext(ctx,
@@ -321,6 +380,96 @@ func (h *ReconcileDecomposition) applyFixes(ctx context.Context, tx *sql.Tx, pro
 			`UPDATE beads SET current_revision_id = ? WHERE id = ?`, revID, beadID); err != nil {
 			return fmt.Errorf("update bead %q current_revision_id: %w", title, err)
 		}
+	}
+	return nil
+}
+
+// mergeProposedBeads builds the full decomposition RECONCILE's response would
+// produce if committed: current beads in dispatch order, with each
+// agree_and_fix response's updated_bead substituted in by title. Used to
+// mechanically re-check the *proposed whole* decomposition, not just the
+// beads this round touched — the violation can involve a bead the round
+// never touched (e.g. an earlier bead whose full_text references a file
+// whose ownership only moved onto a different, later bead this round, as
+// happened with checkers-v9's "templates"/"http-handlers" pair).
+func mergeProposedBeads(current []beadState, out ReconcileDecompositionOutput) []ParsedBead {
+	updates := make(map[string]*ParsedBead, len(out.Responses))
+	for i := range out.Responses {
+		r := &out.Responses[i]
+		if r.Action == "agree_and_fix" && r.UpdatedBead != nil {
+			updates[r.UpdatedBead.Title] = r.UpdatedBead
+		}
+	}
+	merged := make([]ParsedBead, len(current))
+	for i, b := range current {
+		if u, ok := updates[b.Title]; ok {
+			merged[i] = *u
+			continue
+		}
+		merged[i] = ParsedBead{
+			Title:           b.Title,
+			FullText:        b.FullText,
+			ExecutionBudget: b.ExecutionBudget,
+			MonitorOverride: b.MonitorOverride,
+			OutputFiles:     b.OutputFiles,
+			ExitCriteria:    b.ExitCriteria,
+		}
+	}
+	return merged
+}
+
+// commitReject rejects a RECONCILE_DECOMPOSITION response whose own
+// agree_and_fix edits would reintroduce a bead-ordering violation: none of
+// the proposed bead_revisions are written, a 'reconcile_rejected'
+// audit_reconcile_rounds row records the violations (read back by
+// latestReconcileRejectFeedback on the next attempt, and rendered into the
+// next attempt's prompt), and either another RECONCILE_DECOMPOSITION job is
+// enqueued or, once reconcileRejectCap is reached, this job is escalated for
+// human review — mirroring DecomposeSpec.commitRedecompose's reject-then-
+// retry-then-give-up shape, but escalating the job rather than full-stopping
+// the project (see reconcileRejectCap's doc comment for why).
+func (h *ReconcileDecomposition) commitReject(ctx context.Context, tx *sql.Tx, job *db.HandoffJob, out ReconcileDecompositionOutput, violations []string, now string) error {
+	var attemptCount int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM audit_reconcile_rounds WHERE project_id = ? AND outcome = 'reconcile_rejected'`,
+		job.ProjectID,
+	).Scan(&attemptCount); err != nil {
+		return fmt.Errorf("count reconcile_rejected attempts: %w", err)
+	}
+	attemptCount++
+
+	roundNumber, err := nextRoundNumber(ctx, tx, job.ProjectID)
+	if err != nil {
+		return err
+	}
+
+	critique := "Bead ordering violations in your proposed fix (structural, mechanically detected — not a model judgment call):\n- " +
+		strings.Join(violations, "\n- ")
+	reconciliationJSON, _ := json.Marshal(out)
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO audit_reconcile_rounds (project_id, round_number, critique_text, reconciliation, outcome, created_at)
+		VALUES (?, ?, ?, ?, 'reconcile_rejected', ?)`,
+		job.ProjectID, roundNumber, critique, string(reconciliationJSON), now,
+	); err != nil {
+		return fmt.Errorf("insert reconcile_rejected round: %w", err)
+	}
+
+	if attemptCount >= reconcileRejectCap {
+		slog.Error("ESCALATION — RECONCILE_DECOMPOSITION: bead-ordering violations persisted in its own fix after cap",
+			"project_id", job.ProjectID, "cap", reconcileRejectCap, "violations", violations)
+		_, err := tx.ExecContext(ctx,
+			`UPDATE handoff_jobs SET status = 'escalated', updated_at = ? WHERE id = ?`,
+			now, job.ID)
+		return err
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
+		VALUES (?, ?, NULL, 'pending', ?, ?)`,
+		job.ProjectID, db.VerbReconcileDecomposition, now, now)
+	if err != nil {
+		return fmt.Errorf("enqueue retry %s: %w", db.VerbReconcileDecomposition, err)
 	}
 	return nil
 }

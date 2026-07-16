@@ -143,6 +143,9 @@ func (db *DB) applyTableMigrations() error {
 	if err := db.migrateAuditReconcileRoundsOutcome(); err != nil {
 		return err
 	}
+	if err := db.migrateAuditReconcileRoundsRejected(); err != nil {
+		return err
+	}
 	if err := db.migrateBeadRevisionVerbsRewind(); err != nil {
 		return err
 	}
@@ -242,6 +245,47 @@ func (db *DB) migrateAuditReconcileRoundsOutcome() error {
 		  critique_text  TEXT    NOT NULL,
 		  reconciliation TEXT    NOT NULL,
 		  outcome        TEXT    NOT NULL CHECK (outcome IN ('converged', 'disagreed_continuing', 'escalated', 'redecompose')),
+		  created_at     TIMESTAMP NOT NULL
+		)`,
+		`INSERT INTO audit_reconcile_rounds SELECT * FROM _audit_reconcile_rounds_old`,
+		`DROP TABLE _audit_reconcile_rounds_old`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("migrate audit_reconcile_rounds (%s): %w", truncate(stmt, 40), err)
+		}
+	}
+	return nil
+}
+
+// migrateAuditReconcileRoundsRejected updates audit_reconcile_rounds' outcome
+// CHECK constraint to include 'reconcile_rejected', written when
+// ReconcileDecomposition.Commit finds its own proposed agree_and_fix edits
+// would reintroduce a bead-ordering violation (forwardFileReferenceChecks
+// re-run against the merged proposed decomposition, mirroring
+// DecomposeSpec.commitRedecompose's use of the same check on its own output).
+// Same plain rename+recreate+copy+drop as migrateAuditReconcileRoundsOutcome
+// (audit_reconcile_rounds has no self-referencing FK and no columnMigrations
+// entries, so SELECT * is safe here).
+func (db *DB) migrateAuditReconcileRoundsRejected() error {
+	var createSQL string
+	if err := db.QueryRow(
+		`SELECT COALESCE(sql, '') FROM sqlite_master WHERE type='table' AND name='audit_reconcile_rounds'`,
+	).Scan(&createSQL); err != nil {
+		return fmt.Errorf("query audit_reconcile_rounds schema: %w", err)
+	}
+	if strings.Contains(createSQL, "reconcile_rejected") {
+		return nil
+	}
+	stmts := []string{
+		`ALTER TABLE audit_reconcile_rounds RENAME TO _audit_reconcile_rounds_old`,
+		`CREATE TABLE audit_reconcile_rounds (
+		  id             INTEGER PRIMARY KEY,
+		  project_id     INTEGER NOT NULL REFERENCES projects(id),
+		  round_number   INTEGER NOT NULL,
+		  critique_text  TEXT    NOT NULL,
+		  reconciliation TEXT    NOT NULL,
+		  outcome        TEXT    NOT NULL CHECK (outcome IN ('converged', 'disagreed_continuing', 'escalated', 'redecompose', 'reconcile_rejected')),
 		  created_at     TIMESTAMP NOT NULL
 		)`,
 		`INSERT INTO audit_reconcile_rounds SELECT * FROM _audit_reconcile_rounds_old`,

@@ -55,16 +55,26 @@ CREATE TABLE IF NOT EXISTS bead_revisions (
 );
 
 -- Full text on every round. A 2-round cap means this is not unbounded.
--- 'redecompose' rows are written directly by DECOMPOSE_SPEC.Commit (never by
--- RECONCILE) when forwardFileReferenceChecks finds a bead-ordering violation;
--- reconciliation is always '' for those rows since no reconciliation ran.
+-- 'redecompose' rows are written directly by DECOMPOSE_SPEC.Commit when
+-- forwardFileReferenceChecks finds a bead-ordering violation in its own
+-- output, and reconciliation is always '' for those rows since no
+-- reconciliation ran. 'reconcile_rejected' rows are the
+-- RECONCILE_DECOMPOSITION analog: written by ReconcileDecomposition.Commit
+-- when the same mechanical check, re-run against RECONCILE's own proposed
+-- agree_and_fix edits merged into the current decomposition, finds
+-- RECONCILE's fix would itself introduce a bead-ordering violation.
+-- reconciliation is non-empty for these rows (it's RECONCILE's rejected
+-- output, kept for feedback on the retry) and they don't count toward
+-- audit_reconcile_round_cap (see reconcileRejectCap, a separate, smaller cap
+-- that mirrors decomposeRedecomposeCap's independence from the
+-- AUDIT/RECONCILE debate round counter).
 CREATE TABLE IF NOT EXISTS audit_reconcile_rounds (
   id             INTEGER PRIMARY KEY,
   project_id     INTEGER NOT NULL REFERENCES projects(id),
   round_number   INTEGER NOT NULL,
   critique_text  TEXT    NOT NULL,
   reconciliation TEXT    NOT NULL,
-  outcome        TEXT    NOT NULL CHECK (outcome IN ('converged', 'disagreed_continuing', 'escalated', 'redecompose')),
+  outcome        TEXT    NOT NULL CHECK (outcome IN ('converged', 'disagreed_continuing', 'escalated', 'redecompose', 'reconcile_rejected')),
   created_at     TIMESTAMP NOT NULL
 );
 
