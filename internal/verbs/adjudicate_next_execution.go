@@ -765,8 +765,14 @@ func (h *AdjudicateNextExecution) Validate(raw string) (string, any) {
 		if len(out.RevisedBead.OutputFiles) == 0 {
 			return "malformed: revised_bead output_files is missing or empty", nil
 		}
+		if idx := firstEmptyStringIndex(out.RevisedBead.OutputFiles); idx != -1 {
+			return fmt.Sprintf("malformed: revised_bead output_files[%d] is an empty string", idx), nil
+		}
 		if len(out.RevisedBead.ExitCriteria) == 0 {
 			return "malformed: revised_bead exit_criteria is missing or empty", nil
+		}
+		if idx := firstEmptyStringIndex(out.RevisedBead.ExitCriteria); idx != -1 {
+			return fmt.Sprintf("malformed: revised_bead exit_criteria[%d] is an empty string", idx), nil
 		}
 	}
 

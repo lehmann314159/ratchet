@@ -119,8 +119,14 @@ func (h *DecomposeSpec) Validate(raw string) (string, any) {
 		if len(b.OutputFiles) == 0 {
 			return fmt.Sprintf("malformed: bead[%d] (%s) output_files is missing or empty", i, b.Title), nil
 		}
+		if idx := firstEmptyStringIndex(b.OutputFiles); idx != -1 {
+			return fmt.Sprintf("malformed: bead[%d] (%s) output_files[%d] is an empty string", i, b.Title, idx), nil
+		}
 		if len(b.ExitCriteria) == 0 {
 			return fmt.Sprintf("malformed: bead[%d] (%s) exit_criteria is missing or empty", i, b.Title), nil
+		}
+		if idx := firstEmptyStringIndex(b.ExitCriteria); idx != -1 {
+			return fmt.Sprintf("malformed: bead[%d] (%s) exit_criteria[%d] is an empty string", i, b.Title, idx), nil
 		}
 		// Every downstream title-keyed lookup (RevisePending's revisionMap,
 		// AUDIT/RECONCILE's own per-title maps) assumes titles are unique

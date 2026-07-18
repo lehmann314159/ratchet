@@ -31,6 +31,23 @@ func TestDecomposeSpecValidate(t *testing.T) {
 		{"monitor_override invalid", `{"beads":[{"title":"B01","full_text":"x","execution_budget":60,"monitor_override":"maybe"}]}`, false},
 		{"not JSON", `not json`, false},
 		{
+			// bash -c "" exits 0, so a blank exit_criteria entry would
+			// mechanically succeed instantly regardless of implementation.
+			"exit_criteria contains an empty string",
+			`{"beads":[{"title":"B01","full_text":"x","execution_budget":60,"monitor_override":"honor","output_files":["a.go"],"exit_criteria":["go build ./...",""]}]}`,
+			false,
+		},
+		{
+			"exit_criteria contains a whitespace-only string",
+			`{"beads":[{"title":"B01","full_text":"x","execution_budget":60,"monitor_override":"honor","output_files":["a.go"],"exit_criteria":["   "]}]}`,
+			false,
+		},
+		{
+			"output_files contains an empty string",
+			`{"beads":[{"title":"B01","full_text":"x","execution_budget":60,"monitor_override":"honor","output_files":["a.go",""],"exit_criteria":["go build ./..."]}]}`,
+			false,
+		},
+		{
 			"duplicate bead titles",
 			`{"beads":[
 				{"title":"B01","full_text":"a","execution_budget":60,"monitor_override":"honor","output_files":["a.go"],"exit_criteria":["go build ./..."]},
@@ -282,6 +299,19 @@ func TestAdjudicateNextExecutionValidate(t *testing.T) {
 		{
 			"execute_revised invalid monitor_override",
 			`{"trend":"same","bead_spec_fit":"bead_problem","reasoning":"x","decision":"execute_revised","revised_bead":{"title":"B01","full_text":"x","execution_budget":60,"monitor_override":"maybe"}}`,
+			false,
+		},
+		{
+			// Same ParsedBead type as DECOMPOSE_SPEC's beads — same vacuous-pass
+			// gap: bash -c "" exits 0, so a blank exit_criteria entry here would
+			// mechanically succeed regardless of what execution actually did.
+			"execute_revised exit_criteria contains an empty string",
+			`{"trend":"same","bead_spec_fit":"bead_problem","reasoning":"x","decision":"execute_revised","revised_bead":{"title":"B01","full_text":"x","execution_budget":60,"monitor_override":"honor","output_files":["b01.go"],"exit_criteria":["go build ./...",""]}}`,
+			false,
+		},
+		{
+			"execute_revised output_files contains an empty string",
+			`{"trend":"same","bead_spec_fit":"bead_problem","reasoning":"x","decision":"execute_revised","revised_bead":{"title":"B01","full_text":"x","execution_budget":60,"monitor_override":"honor","output_files":["b01.go",""],"exit_criteria":["go build ./..."]}}`,
 			false,
 		},
 		// declare_success: trend and bead_spec_fit may be "not_applicable" or any valid value —
