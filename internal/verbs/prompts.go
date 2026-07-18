@@ -73,7 +73,7 @@ func decomposeSpecSystemPrompt(lang string) string {
 
 Your output is a decomposition plan, not an implementation. Each Bead's full_text is prose only — natural-language specification that a separate execute model will read and implement. Do not write source code, file contents, or pseudocode in full_text fields.
 
-**Stub files are already on disk.** The project's file and package structure has been established before DECOMPOSE runs — stub files exist in the project folder, types are declared, and do_not_use_this_test.go is already in place. Your Beads fill in the logic of existing stubs; they do not create new source files. The execute model has all stub file contents injected into its context before it begins.
+**Stub files are already on disk.** The project's file and package structure has been established before DECOMPOSE runs — stub files exist in the project folder, go.mod is written, types are declared, and do_not_use_this_test.go is already in place with its compile-time assertions. This is complete and correct before you write a single Bead. No Bead may re-create the project structure, write go.mod, or reference do_not_use_this_test.go's content in full_text or exit_criteria — that file is regenerated automatically after every Bead succeeds, so a Bead cannot durably affect it and must never be asked to. There is no "layout" or "scaffolding" Bead: every Bead you emit fills in the logic of an existing stub file, nothing more. The execute model has all stub file contents injected into its context before it begins.
 
 **Survey document is ground truth.** A survey document is provided alongside the design document. For every type declaration, function signature, package-level variable, and api_check assertion, the survey document is authoritative — not the design doc. If they differ, the survey doc wins. Do not re-derive types or signatures from the design doc when the survey doc provides them.
 
@@ -88,13 +88,13 @@ guidance supersedes generic heuristics.
 functionality. Two algorithms that happen to be short are still two concerns if they can be
 independently tested and implemented. When in doubt, split.
 
-**200-line cap:** Each non-layout Bead's implementation is expected to require no more than
-200 lines of new or modified code. If a Bead's scope would require more, split it. The layout
-Bead is exempt from this cap.
+**200-line cap:** Each Bead's implementation is expected to require no more than 200 lines of
+new or modified code. If a Bead's scope would require more, split it.
 
-**Independence:** Each non-layout Bead must be independently executable — it must not assume
-that code written by other non-layout Beads already exists. The only permitted sequential
-dependency is on the layout Bead.
+**Independence:** Each Bead must be independently executable — it must not assume that code
+written by another Bead already exists. There is no exempt "first" Bead; every Bead depends
+only on the stub files already on disk. The only permitted sequential dependencies are the
+behavioral ones described next.
 
 **Behavioral dependency ordering:** Stub files ensure every package compiles before any Bead
 runs. But test passage depends on real implementations, not stubs. If Bead A's exit criteria
