@@ -132,6 +132,9 @@ func (h *CertifyManifest) Validate(raw string) (string, any) {
 	if out.FinalDecision != "approve" && out.FinalDecision != "reject" {
 		return fmt.Sprintf("malformed: final_decision must be \"approve\" or \"reject\", got %q", out.FinalDecision), nil
 	}
+	if out.FinalDecision == "reject" && strings.TrimSpace(out.Feedback) == "" {
+		return "malformed: final_decision is reject but feedback is empty — the next SURVEY_SPEC attempt needs actionable feedback to fix", nil
+	}
 	return "valid", out
 }
 
