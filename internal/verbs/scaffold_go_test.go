@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"ratchet/internal/db"
@@ -113,5 +114,46 @@ func TestWriteScaffoldStubs_MissingNonManifestFileIsNotAnError(t *testing.T) {
 	// calls this path for files absent from disk.
 	if _, _, err := WriteScaffoldStubs(context.Background(), d, 1, dir, []string{"templates/index.html"}); err != nil {
 		t.Errorf("expected no error deleting an already-absent file, got %v", err)
+	}
+}
+
+// TestWriteAPICheckTest_ProtectsExportedConstants reproduces the gap the
+// audit found: every game project here declares an exported const enum
+// (Color/Status/Move) with no regression protection, because
+// exportedAssertions only ever handled token.VAR. This writes a real
+// manifest file with an exported const block, an unexported const, and an
+// exported function, then asserts on the actual generated file content that
+// every exported const got a "_ = X" assertion and the unexported one did
+// not (matching the existing var behavior for unexported identifiers).
+func TestWriteAPICheckTest_ProtectsExportedConstants(t *testing.T) {
+	dir := t.TempDir()
+	files := []SurveyManifestFile{{
+		Path: "game.go",
+		Declarations: `type Color int
+
+const (
+	Black Color = 1
+	White Color = 2
+	unexportedHidden Color = 3
+)
+
+func NewGame() *Color { return nil }
+`,
+	}}
+	if err := writeAPICheckTest("main", dir, files); err != nil {
+		t.Fatalf("writeAPICheckTest: %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(dir, apiCheckTestFilename))
+	if err != nil {
+		t.Fatalf("read generated file: %v", err)
+	}
+	got := string(content)
+	for _, want := range []string{"_ = Black", "_ = White", "_ = NewGame"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("generated %s missing %q\ngot:\n%s", apiCheckTestFilename, want, got)
+		}
+	}
+	if strings.Contains(got, "unexportedHidden") {
+		t.Errorf("generated %s must not assert unexported identifiers\ngot:\n%s", apiCheckTestFilename, got)
 	}
 }

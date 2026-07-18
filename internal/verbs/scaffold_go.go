@@ -247,9 +247,9 @@ func inferImports(declarations string) []string {
 }
 
 // writeAPICheckTest generates apiCheckTestFilename containing one "var _ = X"
-// assertion per exported function and exported package-level variable across
-// all manifest files. For package main these reference symbols directly (no
-// import needed since we're in the same package).
+// assertion per exported function and exported package-level variable or
+// constant across all manifest files. For package main these reference
+// symbols directly (no import needed since we're in the same package).
 func writeAPICheckTest(pkg, folderPath string, files []SurveyManifestFile) error {
 	var assertions []string
 	for _, f := range files {
@@ -278,7 +278,8 @@ func writeAPICheckTest(pkg, folderPath string, files []SurveyManifestFile) error
 }
 
 // exportedAssertions returns a right-hand side expression for "var _ = X" for
-// each exported function and each exported package-level variable in the file.
+// each exported function and each exported package-level variable or constant
+// in the file.
 func exportedAssertions(f *ast.File) []string {
 	var out []string
 	for _, decl := range f.Decls {
@@ -296,7 +297,7 @@ func exportedAssertions(f *ast.File) []string {
 			}
 
 		case *ast.GenDecl:
-			if d.Tok != token.VAR {
+			if d.Tok != token.VAR && d.Tok != token.CONST {
 				continue
 			}
 			for _, spec := range d.Specs {
