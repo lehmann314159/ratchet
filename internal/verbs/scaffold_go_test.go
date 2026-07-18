@@ -104,6 +104,52 @@ func TestWriteScaffoldStubs_ManifestFileOverwrittenWithStub(t *testing.T) {
 	}
 }
 
+// TestWriteScaffoldStubs_GoModRegeneratedNotDeleted reproduces the
+// checkers-try-1 bead-684 incident: rewind-bead deleted go.mod because it's
+// never part of the SURVEY manifest's per-file declarations (scaffoldGoProject
+// writes it mechanically from module+goVer, not from a manifest entry), even
+// though it has a perfectly deterministic baseline. Deleting it left the
+// package permanently uncompilable — REFINE_TESTS_WRITE's own compile check
+// failed 3 times with "go.mod file not found" and escalated without ever
+// reaching EXECUTE_BEAD.
+func TestWriteScaffoldStubs_GoModRegeneratedNotDeleted(t *testing.T) {
+	d := openTestDB(t)
+	seedProject(t, d, 1, "scaffold-stubs-gomod")
+	seedSurveyManifest(t, d, 1, SurveySpecOutput{
+		Module: "example.com/checkers", Package: "main",
+		Files: []SurveyManifestFile{{Path: "game.go", Declarations: "func NewGame() *Game { return &Game{} }\n\ntype Game struct{}\n"}},
+	})
+
+	dir := t.TempDir()
+	writeGoFile(t, dir, "game.go", "package main\n\nfunc NewGame() *Game { return nil }\n")
+	// go.mod deliberately absent, matching rewind-bead's delete-then-restore flow.
+
+	stubbed, deleted, err := WriteScaffoldStubs(context.Background(), d, 1, dir,
+		[]string{"game.go", "go.mod"})
+	if err != nil {
+		t.Fatalf("WriteScaffoldStubs: %v", err)
+	}
+	if len(deleted) != 0 {
+		t.Errorf("expected go.mod not to be deleted, got deleted = %v", deleted)
+	}
+	found := false
+	for _, f := range stubbed {
+		if f == "go.mod" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected go.mod reported as stubbed, got %v", stubbed)
+	}
+	content, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		t.Fatalf("expected go.mod to exist on disk: %v", err)
+	}
+	if !strings.Contains(string(content), "module example.com/checkers") {
+		t.Errorf("go.mod content = %q, want it to declare the manifest's module", content)
+	}
+}
+
 func TestWriteScaffoldStubs_MissingNonManifestFileIsNotAnError(t *testing.T) {
 	d := openTestDB(t)
 	seedProject(t, d, 1, "scaffold-stubs-missing")

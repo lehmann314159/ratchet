@@ -108,7 +108,7 @@ func scaffoldGoProject(pkg, module, folderPath string, files []SurveyManifestFil
 		}
 	}
 
-	goMod := fmt.Sprintf("module %s\n\ngo %s\n", module, goVer)
+	goMod := goModContent(module, goVer)
 	if err := os.WriteFile(filepath.Join(folderPath, "go.mod"), []byte(goMod), 0644); err != nil {
 		return fmt.Errorf("write go.mod: %w", err)
 	}
@@ -144,6 +144,21 @@ func WriteScaffoldStubs(ctx context.Context, d *db.DB, projectID int64, folderPa
 	}
 	for _, f := range outputFiles {
 		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		if f == "go.mod" {
+			// go.mod is never one of the manifest's per-file declarations —
+			// scaffoldGoProject (VERIFY_MANIFEST) writes it mechanically from
+			// the module name + host Go version, not from a manifest entry.
+			// It still has a deterministic baseline; regenerate it the same
+			// way instead of falling into the "no baseline, delete" branch
+			// below, which would leave the package permanently uncompilable
+			// (every downstream compile check needs go.mod to exist).
+			goMod := goModContent(manifest.Module, goRuntimeVersion())
+			if err := os.WriteFile(filepath.Join(folderPath, f), []byte(goMod), 0644); err != nil {
+				return stubbed, deleted, fmt.Errorf("write scaffold go.mod: %w", err)
+			}
+			stubbed = append(stubbed, f)
 			continue
 		}
 		decl, ok := declByPath[f]
@@ -336,6 +351,15 @@ func receiverTypeName(recv *ast.FieldList) string {
 // isExportedIdent reports whether name is an exported Go identifier.
 func isExportedIdent(name string) bool {
 	return name != "" && unicode.IsUpper(rune(name[0]))
+}
+
+// goModContent returns the content of a mechanically-generated go.mod for
+// module at Go version goVer. Shared by scaffoldGoProject (initial scaffold,
+// at VERIFY_MANIFEST) and WriteScaffoldStubs (rewind-bead's reset-to-baseline
+// path) so the two never drift out of sync on what "the baseline go.mod"
+// actually contains.
+func goModContent(module, goVer string) string {
+	return fmt.Sprintf("module %s\n\ngo %s\n", module, goVer)
 }
 
 // goRuntimeVersion returns the current Go version in "M.N" form (e.g. "1.24").
