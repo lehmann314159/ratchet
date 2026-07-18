@@ -29,7 +29,6 @@ const reconcileRejectCap = 3
 type ReconcileDecomposition struct {
 	lastCritique    string
 	lastRoundsSoFar int
-	lastHistory     []debateRound
 	lastBeads       []beadState
 	knownTitles     map[string]bool
 	budgetDefault   int
@@ -71,7 +70,6 @@ func (h *ReconcileDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.C
 	// Cache for Validate/Commit (single-goroutine orchestrator; no race).
 	h.lastCritique = critique
 	h.lastRoundsSoFar = roundsSoFar
-	h.lastHistory = history
 	h.lastBeads = beads
 	h.knownTitles = make(map[string]bool, len(beads))
 	for _, b := range beads {
@@ -183,6 +181,9 @@ func (h *ReconcileDecomposition) Validate(raw string) (string, any) {
 		if r.Action == "disagree" && strings.TrimSpace(r.Reason) == "" {
 			return fmt.Sprintf("malformed: responses[%d] action is disagree but reason is empty", i), nil
 		}
+		if r.AlreadyAddressed && r.Action != "disagree" {
+			return fmt.Sprintf("malformed: responses[%d] already_addressed is true but action is %q, not disagree", i, r.Action), nil
+		}
 	}
 	return "valid", out
 }
@@ -195,15 +196,21 @@ func (h *ReconcileDecomposition) Validate(raw string) (string, any) {
 // if the round cap is reached. RECONCILE is explicitly not given authority
 // to declare convergence itself — the comparator is this code, not a model.
 //
-// One exception: if every current-round disagree is a verbatim repeat of a
-// finding AUDIT already raised in an earlier round and RECONCILE already
-// disagreed with (isRepeatDisagreement) — i.e. AUDIT re-raised the same
-// complaint without engaging with RECONCILE's prior rebuttal — the tie is
-// broken in RECONCILE's favor and the round converges immediately, rather
-// than burning further rounds or escalating on an unchanged disagreement.
-// This does not apply when AUDIT raises anything new or restates a finding
-// with a new argument; that still follows the normal continue-or-escalate
-// path above.
+// One exception: a disagree response with AlreadyAddressed set does not
+// count against convergence — RECONCILE is self-certifying, in the same
+// single judgment call that produced the disagreement, that this is a finding
+// it already disputed in an earlier round with no new argument from AUDIT.
+// This used to be inferred mechanically by comparing finding text across
+// rounds (isRepeatDisagreement), which was fragile to AUDIT paraphrasing an
+// already-conceded finding (project 105/fractal-smoke-2: AUDIT reworded a
+// finding to acknowledge it was fixed but still listed it, and the
+// text-comparison missed the paraphrase, forcing an unnecessary escalation).
+// Asking RECONCILE to state the judgment directly and reading it mechanically
+// is both simpler and more robust than inferring it from a text-similarity
+// proxy. This does not apply when AUDIT raises anything new or restates a
+// finding with a new argument — RECONCILE is expected to leave
+// AlreadyAddressed false in that case, which still follows the normal
+// continue-or-escalate path below.
 func (h *ReconcileDecomposition) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJob, parsed any) error {
 	out := parsed.(ReconcileDecompositionOutput)
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -228,13 +235,12 @@ func (h *ReconcileDecomposition) Commit(ctx context.Context, tx *sql.Tx, job *db
 	}
 
 	nextRound := h.lastRoundsSoFar + 1
-	currentFindings := findingsByBead(h.lastCritique)
 	hasDisagree := false
 	allDisagreesAreRepeats := true
 	for _, r := range out.Responses {
 		if r.Action == "disagree" {
 			hasDisagree = true
-			if !isRepeatDisagreement(r.BeadTitle, currentFindings, h.lastHistory) {
+			if !r.AlreadyAddressed {
 				allDisagreesAreRepeats = false
 			}
 		}

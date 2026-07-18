@@ -214,6 +214,19 @@ func TestReconcileDecompositionValidate(t *testing.T) {
 			`{"responses":[]}`,
 			false,
 		},
+		{
+			"disagree with already_addressed true is valid",
+			`{"responses":[{"bead_title":"B01","action":"disagree","reason":"same complaint as round 1, no new argument","already_addressed":true}]}`,
+			true,
+		},
+		{
+			// already_addressed only makes sense alongside disagree — an
+			// agree_and_fix response conceding the finding is nonsensical to
+			// also mark as "already addressed and disputed."
+			"agree_and_fix with already_addressed true is invalid",
+			`{"responses":[{"bead_title":"B01","action":"agree_and_fix","reason":"correct","already_addressed":true,"updated_bead":{"title":"B01","full_text":"fixed","execution_budget":60,"monitor_override":"honor","output_files":["b01.go"],"exit_criteria":["go build ./..."]}}]}`,
+			false,
+		},
 		{"not JSON", `not json`, false},
 	}
 	runValidate(t, h.Validate, tests)

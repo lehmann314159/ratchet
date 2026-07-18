@@ -97,10 +97,20 @@ type AuditDecompositionOutput struct {
 // --- RECONCILE_DECOMPOSITION ---
 
 type ReconcileResponse struct {
-	BeadTitle   string      `json:"bead_title"`
-	Action      string      `json:"action"`               // "agree_and_fix" | "disagree"
-	Reason      string      `json:"reason"`
-	UpdatedBead *ParsedBead `json:"updated_bead,omitempty"` // present only when action == "agree_and_fix"
+	BeadTitle string `json:"bead_title"`
+	Action    string `json:"action"` // "agree_and_fix" | "disagree"
+	Reason    string `json:"reason"`
+	// AlreadyAddressed is meaningful only when Action == "disagree". RECONCILE
+	// sets it true when this exact finding was already raised and disputed in
+	// an earlier round with no new argument from AUDIT — self-certifying, in
+	// its own single judgment call, that there is nothing new to respond to.
+	// The mechanical convergence comparator (ReconcileDecomposition.Commit)
+	// reads this directly instead of inferring repetition from finding text,
+	// which is fragile to paraphrasing (see the fractal-smoke-2 incident,
+	// project 105: AUDIT reworded an already-conceded finding and a
+	// text-comparison check missed it, forcing an unnecessary escalation).
+	AlreadyAddressed bool        `json:"already_addressed,omitempty"`
+	UpdatedBead      *ParsedBead `json:"updated_bead,omitempty"` // present only when action == "agree_and_fix"
 }
 
 type ReconcileDecompositionOutput struct {

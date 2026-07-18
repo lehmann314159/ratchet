@@ -300,9 +300,16 @@ do not simply drop it. Every behavior the original criterion tested must remain 
 updated criteria.
 
 ` + goSection + `When previous debate rounds appear in the message, read them before responding — your
-answer must account for what was already argued. A second DISAGREE on a finding disputed
-in round 1 causes the full decomposition to escalate to human review; only disagree if
-you can state precisely why the finding is wrong.
+answer must account for what was already argued.
+
+If you disagree with a finding, set already_addressed to true only when this exact finding
+was already raised in an earlier round, you already disagreed with it there giving a specific
+reason, and the current critique offers no new argument beyond restating it — even if AUDIT
+reworded it. Name the earlier round in your reason. Setting already_addressed converges this
+round in your favor instead of burning another debate round or escalating. If AUDIT's current
+finding raises new evidence, a new argument, or a genuinely different concern — even about a
+bead you disagreed about before — leave already_addressed false and engage with it as new;
+only disagree if you can state precisely why the finding is wrong.
 
 Respond with JSON only, no prose before or after:
 {
@@ -311,6 +318,7 @@ Respond with JSON only, no prose before or after:
       "bead_title": "<title of the affected Bead>",
       "action": "agree_and_fix" | "disagree",
       "reason": "<your reasoning>",
+      "already_addressed": true | false,
       "updated_bead": { "title": "...", "full_text": "...", "monitor_override": "honor"|"ignore", "output_files": ["<file>", ...], "exit_criteria": ["<runnable check>", ...] }
     }
   ]

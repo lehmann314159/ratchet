@@ -331,6 +331,79 @@ func TestDebateLoopTwoRoundsEscalated(t *testing.T) {
 	}
 }
 
+// TestDebateLoopTwoRoundsAlreadyAddressedConverges reproduces the
+// fractal-smoke-2 (project 105) incident: AUDIT re-raised a finding in round
+// 2 that RECONCILE had already disputed in round 1 with no new argument.
+// Before AlreadyAddressed existed, the round-cap comparator inferred
+// repetition by comparing AUDIT's finding text across rounds — fragile to
+// paraphrasing, and it broke here because AUDIT reworded an unrelated
+// finding for a different bead in the same round (not exercised by this
+// test directly, but the mechanism was global text comparison). Now
+// RECONCILE self-certifies repetition directly: a disagree at the round cap
+// with AlreadyAddressed=true must converge, not escalate — even though on
+// its own a second disagree at the cap would normally escalate (see
+// TestDebateLoopTwoRoundsEscalated, which is the AlreadyAddressed=false
+// case at the identical cap and round number).
+func TestDebateLoopTwoRoundsAlreadyAddressedConverges(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "fixture: debate loop/already-addressed converges")
+	seedBead(t, d, -1, "B01")
+
+	// --- Round 1: RECONCILE disagrees, stating a specific reason ---
+	seedAuditComplete(t, d, -1, auditFindingsJSON, "2026-01-01T00:00:00Z")
+	reconcile1Job := seedJob(t, d, -1, db.VerbReconcileDecomposition, sql.NullInt64{})
+	h1 := &ReconcileDecomposition{lastCritique: auditFindingsJSON, lastRoundsSoFar: 0}
+	inTx(t, d, func(tx *sql.Tx) error {
+		return h1.Commit(ctx, tx, reconcile1Job, ReconcileDecompositionOutput{
+			Responses: []ReconcileResponse{{BeadTitle: "B01", Action: "disagree", Reason: "finding is wrong: §3.1 specifies this"}},
+		})
+	})
+	var r1outcome string
+	_ = d.QueryRowContext(ctx, `SELECT outcome FROM audit_reconcile_rounds WHERE round_number=1 AND project_id=-1`).Scan(&r1outcome)
+	if r1outcome != "disagreed_continuing" {
+		t.Fatalf("expected disagreed_continuing after round 1, got %q", r1outcome)
+	}
+
+	// --- Round 2: AUDIT re-raises the same complaint (reworded); RECONCILE
+	// self-certifies it as already addressed → must converge despite being
+	// at the round cap (2), unlike TestDebateLoopTwoRoundsEscalated. ---
+	seedAuditComplete(t, d, -1, auditFindingsJSON, "2026-01-01T00:01:00Z")
+	reconcile2Job := seedJob(t, d, -1, db.VerbReconcileDecomposition, sql.NullInt64{})
+	h2 := &ReconcileDecomposition{lastCritique: auditFindingsJSON, lastRoundsSoFar: 1}
+	inTx(t, d, func(tx *sql.Tx) error {
+		return h2.Commit(ctx, tx, reconcile2Job, ReconcileDecompositionOutput{
+			Responses: []ReconcileResponse{{
+				BeadTitle: "B01", Action: "disagree",
+				Reason:           "same complaint as round 1, still no new argument from AUDIT",
+				AlreadyAddressed: true,
+			}},
+		})
+	})
+
+	var r2outcome string
+	if err := d.QueryRowContext(ctx,
+		`SELECT outcome FROM audit_reconcile_rounds WHERE round_number=2 AND project_id=-1`,
+	).Scan(&r2outcome); err != nil {
+		t.Fatalf("round 2 row missing: %v", err)
+	}
+	if r2outcome != "converged" {
+		t.Errorf("round 2 outcome = %q, want converged", r2outcome)
+	}
+	var jobStatus string
+	if err := d.QueryRowContext(ctx,
+		`SELECT status FROM handoff_jobs WHERE id = ?`, reconcile2Job.ID,
+	).Scan(&jobStatus); err != nil {
+		t.Fatalf("reconcile job row: %v", err)
+	}
+	if jobStatus == "escalated" {
+		t.Errorf("reconcile job status = %q, must not escalate when the disagreement is self-certified as already addressed", jobStatus)
+	}
+	if n := countRows(t, d, `SELECT COUNT(*) FROM handoff_jobs WHERE project_id = -1 AND verb = 'EXECUTE_BEAD'`); n != 1 {
+		t.Errorf("EXECUTE_BEAD jobs after convergence = %d, want 1", n)
+	}
+}
+
 // TestDebateLoopSingleRoundConverged: AUDIT finds issues, RECONCILE agrees to
 // all → converged in one round, no re-audit needed.
 func TestDebateLoopSingleRoundConverged(t *testing.T) {
