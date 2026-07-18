@@ -177,8 +177,16 @@ two package-level variables, SURVEY may generate it with empty declarations (val
 fails). List its contents explicitly even if minimal.
 
 If you omit this section, SURVEY will still produce a reasonable file layout. Include it
-when you have a strong opinion about file organization or when the project has a non-obvious
-structure (e.g., multiple packages, a cmd/ subdirectory).
+when you have a strong opinion about file organization within the single root package —
+for example, how to split a large domain across multiple same-package files.
+
+**Go projects in this pipeline are always a single flat package — never propose
+subdirectories.** `CERTIFY_MANIFEST` unconditionally rejects any source file placed in a
+subdirectory (no `cmd/`, no per-concern packages, no nested module layout), even though
+that split is idiomatic Go elsewhere. All `.go` files share one package (`main` unless
+this doc says otherwise) and live directly in the project root. If a project feels large
+enough to want subpackages, split across files instead — use the file-ownership rules
+above to keep that split legible.
 
 Note that `go.mod` and `do_not_use_this_test.go` are always generated automatically by the
 scaffolding step — do not list them as SURVEY outputs or include them in the manifest.
