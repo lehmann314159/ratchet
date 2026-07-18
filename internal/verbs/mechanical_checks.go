@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"ratchet/internal/guidance"
@@ -193,14 +194,12 @@ func applyMechanicalBeadFixes(lang string, bead *ParsedBead) bool {
 func goFixBeadSpec(bead *ParsedBead) bool {
 	fixed := false
 
-	// When apiCheckTestFilename is owned by this bead, ensure the exit criterion
-	// uses go test -c (not go build) and carries the grep guard for package-scope
-	// var_ assertions. go build cannot compile test files, so type errors in
-	// apiCheckTestFilename are silently missed. go test -c compiles all *_test.go
-	// files and exits 0/1 without executing any tests.
+	// When apiCheckTestFilename is owned by this bead, ensure any "go build"
+	// exit criterion is upgraded to "go test -c" so type errors inside
+	// apiCheckTestFilename get caught by compilation (go build cannot compile
+	// test files at all, so it silently misses them). This does NOT grep the
+	// file's content — see stripAPICheckFileContentChecks below for why.
 	if hasNamedFile(bead.OutputFiles, apiCheckTestFilename) {
-		apiPath := apiCheckTestFilePath(bead.OutputFiles)
-		grepSuffix := " && grep -q '^var _' " + apiPath
 		for i, c := range bead.ExitCriteria {
 			result := c
 			// Upgrade any go build form to go test -c. Check longest-first to avoid
@@ -211,14 +210,51 @@ func goFixBeadSpec(bead *ParsedBead) bool {
 					break
 				}
 			}
-			// Add grep guard for package-scope var_ assertion check.
-			if strings.Contains(result, "go test") && !strings.Contains(result, "grep -q '^var _'") {
-				result += grepSuffix
-			}
 			if result != c {
 				bead.ExitCriteria[i] = result
 				fixed = true
 			}
+		}
+	}
+
+	// apiCheckTestFilename's content is fully deterministic: writeAPICheckTest
+	// generates it from the SURVEY manifest's exported symbols, both at
+	// scaffold time (scaffoldGoProject) and after every declare_success
+	// (regenerateAPICheckTest) — no bead ever hand-authors it, and the agent
+	// has no lasting way to affect it since regenerateAPICheckTest overwrites
+	// it the moment any bead succeeds. A bead's exit criteria must never gate
+	// on its content: the checkers-try-1 bead-684 incident traced back to
+	// exactly this — a "must be present in do_not_use_this_test.go, must be
+	// absent from game.go" pair (the natural way to express "move this
+	// assertion out of the impl file") that a naive bare-grep file-assignment
+	// heuristic collapsed onto the same file, producing a criterion that could
+	// never be satisfied. Strip any grep clause (positive or negated) that
+	// targets this file's content unconditionally, regardless of which verb
+	// wrote it (DECOMPOSE, RECONCILE, or ADJUDICATE's execute_revised have all
+	// been observed generating one).
+	for i, c := range bead.ExitCriteria {
+		if result, ok := stripAPICheckFileContentChecks(c); ok {
+			bead.ExitCriteria[i] = result
+			fixed = true
+		}
+	}
+
+	// Escape stray asterisks in grep patterns. A Go pointer-receiver or
+	// pointer-return signature (`func (g *Game) FindFlips`, `var _ func()
+	// *Game = ...`) contains a literal `*`, but grep's default (POSIX basic)
+	// regex treats an unescaped `*` as "repeat the preceding character," not a
+	// literal asterisk — so `grep -q 'func (g *Game) FindFlips' game.go` can
+	// never match, regardless of whether the method exists. Confirmed live:
+	// the othello fixture's beads 670-673 (game-flips, game-valid-moves,
+	// game-place-stone, game-state) all carry this exact unescaped form from
+	// their original decomposition, making them unsatisfiable the moment any
+	// othello-try-N clone reaches them. Runs on every grep clause regardless
+	// of whether it already has a filename attached (unlike fixBareGrepFile),
+	// since DECOMPOSE/RECONCILE generate these fully-qualified from the start.
+	for i, c := range bead.ExitCriteria {
+		if result, ok := escapeStrayGrepAsterisks(c); ok {
+			bead.ExitCriteria[i] = result
+			fixed = true
 		}
 	}
 
@@ -520,34 +556,91 @@ func hasNamedFile(files []string, name string) bool {
 	return false
 }
 
+// parseBareGrep checks whether an " && "-split criterion subcommand is a
+// `grep -q 'PATTERN'` (optionally negated with a leading "! ") that has no
+// filename argument yet — a filename is absent when nothing follows the
+// closing quote, or when only a shell connective (&&, ||, |) follows.
+// Returns the pattern text, whether it was negated, and whether it matched.
+func parseBareGrep(part string) (pattern string, negated bool, ok bool) {
+	const grepPrefix = "grep -q '"
+	const negationPrefix = "! "
+	negated = strings.HasPrefix(part, negationPrefix)
+	body := part
+	if negated {
+		body = strings.TrimPrefix(part, negationPrefix)
+	}
+	if !strings.HasPrefix(body, grepPrefix) {
+		return "", false, false
+	}
+	after := body[len(grepPrefix):]
+	closeIdx := strings.Index(after, "'")
+	if closeIdx < 0 {
+		return "", false, false
+	}
+	pattern = after[:closeIdx]
+	afterClose := strings.TrimLeft(after[closeIdx+1:], " \t")
+	if afterClose != "" &&
+		!strings.HasPrefix(afterClose, "&&") &&
+		!strings.HasPrefix(afterClose, "||") &&
+		!strings.HasPrefix(afterClose, "|") {
+		return "", false, false // already has a filename argument
+	}
+	return pattern, negated, true
+}
+
 // fixBareGrepFile adds a filename argument to each `grep -q 'func Foo'`
-// subcommand in criterion that is missing one. The criterion is split on " && "
-// to process each subcommand independently; results are rejoined. Function
-// names beginning with "Test" are directed to the appropriate *_test.go via
-// testFileForName; other function names go to the first non-test .go file.
+// subcommand in criterion that is missing one — including a negated
+// `! grep -q '...'` form (e.g. ADJUDICATE generating a "this assertion must
+// no longer be present" check). Without an explicit file, `grep -q` reads an
+// empty stdin, always finds no match, and the leading `!` then makes the
+// subcommand vacuously exit 0 regardless of the real file content — the same
+// "shell construct that cannot fail" class of bug that motivated
+// execcheck.VerifyExitCriteria, except here it's baked into the criterion
+// text itself, so re-running it mechanically doesn't help.
+//
+// Before assigning files, it also collapses a bare positive/negated pair that
+// share the identical pattern text — e.g. `grep -q 'PATTERN' && ! grep -q
+// 'PATTERN'` — down to just the negated clause. That pair is the natural way
+// to express "this assertion must move out of the impl file" (present
+// somewhere else, absent here); with no distinguishing information, naively
+// assigning a file to both clauses independently sends them to the same file
+// and produces a criterion that can never be satisfied (checkers-try-1 bead
+// 684: both clauses resolved to game.go, requiring the identical line to be
+// simultaneously present and absent in it). The positive half is dropped
+// rather than routed elsewhere because the only place these compile-time
+// assertions could legitimately be checked for presence is
+// apiCheckTestFilename, whose content is deterministically generated and must
+// never be exit-criteria-checked at all (see stripAPICheckFileContentChecks).
+//
+// The criterion is split on " && " to process each subcommand independently;
+// results are rejoined. Function names beginning with "Test" are directed to
+// the appropriate *_test.go via testFileForName; other function names (and
+// non-func patterns like `var _ ...`) go to the first non-test .go file.
 // Returns the fixed criterion and true if any change was made.
 func fixBareGrepFile(criterion string, outputFiles []string) (string, bool) {
-	const grepPrefix = "grep -q '"
 	parts := strings.Split(criterion, " && ")
 	fixed := false
+
+	negatedPatterns := map[string]bool{}
+	for _, part := range parts {
+		if pattern, negated, ok := parseBareGrep(part); ok && negated {
+			negatedPatterns[pattern] = true
+		}
+	}
+	deduped := parts[:0]
+	for _, part := range parts {
+		if pattern, negated, ok := parseBareGrep(part); ok && !negated && negatedPatterns[pattern] {
+			fixed = true
+			continue
+		}
+		deduped = append(deduped, part)
+	}
+	parts = deduped
+
 	for i, part := range parts {
-		if !strings.HasPrefix(part, grepPrefix) {
+		pattern, negated, ok := parseBareGrep(part)
+		if !ok {
 			continue
-		}
-		after := part[len(grepPrefix):]
-		closeIdx := strings.Index(after, "'")
-		if closeIdx < 0 {
-			continue
-		}
-		pattern := after[:closeIdx]
-		afterClose := strings.TrimLeft(after[closeIdx+1:], " \t")
-		// A filename is absent when nothing follows the closing quote, or when
-		// only a shell connective (&&, ||, |) follows.
-		if afterClose != "" &&
-			!strings.HasPrefix(afterClose, "&&") &&
-			!strings.HasPrefix(afterClose, "||") &&
-			!strings.HasPrefix(afterClose, "|") {
-			continue // already has a filename argument
 		}
 		funcName := strings.TrimPrefix(pattern, "func ")
 		var file string
@@ -559,13 +652,100 @@ func fixBareGrepFile(criterion string, outputFiles []string) (string, bool) {
 		if file == "" {
 			continue
 		}
-		parts[i] = grepPrefix + pattern + "' " + file
+		newBody := "grep -q '" + pattern + "' " + file
+		if negated {
+			newBody = "! " + newBody
+		}
+		parts[i] = newBody
 		fixed = true
 	}
 	if !fixed {
 		return criterion, false
 	}
 	return strings.Join(parts, " && "), true
+}
+
+// stripAPICheckFileContentChecks removes any grep clause (positive or
+// negated, bare or already file-qualified) that targets apiCheckTestFilename.
+// That file's content is fully deterministic — writeAPICheckTest generates it
+// from the SURVEY manifest's exported symbols, both at scaffold time
+// (scaffoldGoProject) and after every declare_success
+// (regenerateAPICheckTest) — so no bead's exit criteria should ever gate on
+// it: doing so either duplicates guaranteed work, or (since
+// regenerateAPICheckTest overwrites the file the moment any bead succeeds)
+// checks content the agent has no lasting ability to affect. Leaves the
+// criterion unchanged if stripping would remove every clause, since an empty
+// exit criterion is a vacuous pass.
+func stripAPICheckFileContentChecks(criterion string) (string, bool) {
+	parts := strings.Split(criterion, " && ")
+	kept := parts[:0]
+	changed := false
+	for _, part := range parts {
+		body := strings.TrimPrefix(part, "! ")
+		if strings.HasPrefix(body, "grep -q '") && strings.Contains(body, apiCheckTestFilename) {
+			changed = true
+			continue
+		}
+		kept = append(kept, part)
+	}
+	if !changed || len(kept) == 0 {
+		return criterion, false
+	}
+	return strings.Join(kept, " && "), true
+}
+
+// grepPatternRe matches a `grep -q '...'` pattern body regardless of what
+// precedes it (bare, negated, or already carrying a trailing filename) —
+// unlike parseBareGrep, which only recognizes the fileless form. Assumes the
+// pattern itself never contains a literal single quote, consistent with
+// every other grep-pattern helper in this file.
+var grepPatternRe = regexp.MustCompile(`grep -q '([^']*)'`)
+
+// escapeStrayGrepAsterisks escapes any unescaped `*` inside a grep -q
+// pattern. grep's default POSIX basic regex treats a bare `*` as "repeat the
+// preceding character," not a literal asterisk, so a pattern built directly
+// from a Go signature — `func (g *Game) FindFlips`, `var _ func() *Game =
+// NewGame` — silently never matches: a positive check can never pass, and a
+// negated check vacuously always passes, regardless of the real file
+// content. These patterns are always meant as literal substring checks
+// against generated Go source, never real wildcard matching, so escaping
+// every bare asterisk is always correct here.
+func escapeStrayGrepAsterisks(criterion string) (string, bool) {
+	changed := false
+	result := grepPatternRe.ReplaceAllStringFunc(criterion, func(match string) string {
+		sub := grepPatternRe.FindStringSubmatch(match)
+		escaped := escapeBareAsterisks(sub[1])
+		if escaped != sub[1] {
+			changed = true
+		}
+		return "grep -q '" + escaped + "'"
+	})
+	if !changed {
+		return criterion, false
+	}
+	return result, true
+}
+
+// escapeBareAsterisks inserts a backslash before every `*` not already
+// preceded by one, leaving already-escaped `\*` sequences untouched.
+func escapeBareAsterisks(pattern string) string {
+	var b strings.Builder
+	i := 0
+	for i < len(pattern) {
+		c := pattern[i]
+		if c == '\\' && i+1 < len(pattern) {
+			b.WriteByte(c)
+			b.WriteByte(pattern[i+1])
+			i += 2
+			continue
+		}
+		if c == '*' {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(c)
+		i++
+	}
+	return b.String()
 }
 
 // firstSourceGoFile returns the first non-test .go file in outputFiles.
