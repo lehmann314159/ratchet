@@ -10,14 +10,15 @@ import (
 	"go/token"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"ratchet/internal/db"
+	"ratchet/internal/execcheck"
 	"ratchet/internal/guidance"
 	"ratchet/internal/ollama"
 	"ratchet/internal/report"
@@ -171,40 +172,6 @@ func vacuousPassNote(bead *beadState, mechanicalFindings string) string {
 		"(file exists, content is correct for the bead's stated purpose)."
 }
 
-// verifyExitCriteriaMechanically re-runs a bead's exit_criteria commands
-// against the current on-disk state, independent of anything the model
-// reported during execution or analysis. This is the hard, non-model-
-// overridable gate behind declare_success: ADJUDICATE's own narrative
-// interpretation of a trace can be wrong even when the mechanical findings
-// already contain the correct signal.
-//
-// Real-world case this catches (checkers-v8, project 98, bead 627): the exit
-// criterion's own literal run failed early in the attempt, but the model's
-// own later self-check command (`grep ... && echo Pass || echo Fail`) always
-// exits 0 regardless of the grep result — that shell construct cannot fail —
-// and the analyzer misread the ambiguous "exit 0" as the criterion having
-// passed, even though the literal criterion itself was never re-run to a
-// passing state. Re-running it here removes all such ambiguity: no model
-// narrative involved, matching the "mechanical, not model" philosophy behind
-// forwardFileReferenceChecks and the AUDIT/RECONCILE convergence comparator.
-func verifyExitCriteriaMechanically(ctx context.Context, folderPath string, exitCriteria []string) (bool, string) {
-	for _, criterion := range exitCriteria {
-		cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-		cmd := exec.CommandContext(cctx, "bash", "-c", criterion)
-		cmd.Dir = folderPath
-		out, err := cmd.CombinedOutput()
-		cancel()
-		if err != nil {
-			detail := fmt.Sprintf("exit criterion %q currently fails on disk (%v)", criterion, err)
-			if trimmed := strings.TrimSpace(string(out)); trimmed != "" {
-				detail += ":\n" + trimmed
-			}
-			return false, detail
-		}
-	}
-	return true, ""
-}
-
 // orientationOnlyNote detects the pattern where the latest execution ended with
 // no write_file calls at all — the agent spent its entire budget on read-only
 // orientation commands and never began writing. Covers both timeout and
@@ -352,6 +319,9 @@ func isZeroValueExpr(expr ast.Expr) bool {
 		switch e.Kind {
 		case token.INT:
 			return e.Value == "0"
+		case token.FLOAT:
+			f, err := strconv.ParseFloat(e.Value, 64)
+			return err == nil && f == 0
 		case token.STRING:
 			return e.Value == `""` || e.Value == "``"
 		}
@@ -1073,7 +1043,7 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 		if err := json.Unmarshal([]byte(currentFullText), &currentBead); err != nil {
 			return fmt.Errorf("parse current bead spec for exit-criteria gate: %w", err)
 		}
-		if ok, detail := verifyExitCriteriaMechanically(ctx, h.folderPath, currentBead.ExitCriteria); !ok {
+		if ok, detail := execcheck.VerifyExitCriteria(ctx, h.folderPath, currentBead.ExitCriteria); !ok {
 			slog.Warn("ADJUDICATE declare_success rejected by mechanical exit-criteria gate",
 				"bead_id", beadID, "detail", detail)
 			if atCap, err := h.atExecutionCap(ctx, tx, job.ProjectID, beadID, now, job.ID); err != nil || atCap {
