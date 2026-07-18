@@ -186,6 +186,73 @@ func TestDecomposeSpecCommit(t *testing.T) {
 	}
 }
 
+// TestDecomposeSpecCommitAmbiguitiesGoInDedicatedColumn reproduces the
+// AMBIGUITIES-in-label bug: DECOMPOSE_SPEC's ambiguities used to be appended
+// directly onto the project's label (an identifier, not a notes field) via
+// `label = label || ...`, corrupting it and growing unboundedly across
+// repeated redecompose attempts. Ambiguities must land in their own column
+// and never touch label.
+func TestDecomposeSpecCommitAmbiguitiesGoInDedicatedColumn(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "fixture: ambiguities column")
+
+	job := seedJob(t, d, -1, db.VerbDecomposeSpec, sql.NullInt64{})
+	out := DecomposeSpecOutput{
+		Beads: []ParsedBead{
+			{Title: "B01", FullText: "build the widget", ExecutionBudget: 300, MonitorOverride: "honor"},
+		},
+		Ambiguities: []string{"unclear whether X or Y", "spec doesn't say Z"},
+	}
+	inTx(t, d, func(tx *sql.Tx) error {
+		return (&DecomposeSpec{}).Commit(ctx, tx, job, out)
+	})
+
+	var label string
+	var ambiguities sql.NullString
+	if err := d.QueryRowContext(ctx, `SELECT label, decompose_ambiguities FROM projects WHERE id = -1`).Scan(&label, &ambiguities); err != nil {
+		t.Fatalf("query project: %v", err)
+	}
+	if label != "fixture: ambiguities column" {
+		t.Errorf("label = %q, want unchanged %q", label, "fixture: ambiguities column")
+	}
+	want := "unclear whether X or Y; spec doesn't say Z"
+	if !ambiguities.Valid || ambiguities.String != want {
+		t.Errorf("decompose_ambiguities = %v, want %q", ambiguities, want)
+	}
+}
+
+// TestDecomposeSpecCommitNoAmbiguitiesClearsColumn ensures a later
+// DECOMPOSE_SPEC attempt with no ambiguities clears a stale note from an
+// earlier attempt, rather than leaving it to accumulate indefinitely.
+func TestDecomposeSpecCommitNoAmbiguitiesClearsColumn(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "fixture: ambiguities cleared")
+
+	if _, err := d.ExecContext(ctx, `UPDATE projects SET decompose_ambiguities = 'stale note from a prior attempt' WHERE id = -1`); err != nil {
+		t.Fatalf("seed stale ambiguities: %v", err)
+	}
+
+	job := seedJob(t, d, -1, db.VerbDecomposeSpec, sql.NullInt64{})
+	out := DecomposeSpecOutput{
+		Beads: []ParsedBead{
+			{Title: "B01", FullText: "build the widget", ExecutionBudget: 300, MonitorOverride: "honor"},
+		},
+	}
+	inTx(t, d, func(tx *sql.Tx) error {
+		return (&DecomposeSpec{}).Commit(ctx, tx, job, out)
+	})
+
+	var ambiguities sql.NullString
+	if err := d.QueryRowContext(ctx, `SELECT decompose_ambiguities FROM projects WHERE id = -1`).Scan(&ambiguities); err != nil {
+		t.Fatalf("query project: %v", err)
+	}
+	if ambiguities.Valid {
+		t.Errorf("decompose_ambiguities = %q, want NULL after a no-ambiguities attempt", ambiguities.String)
+	}
+}
+
 // TestDecomposeSpecCommitRedecomposeRoundNumberAfterRealRound is the mirror
 // of TestReconcileDecompositionCommitRoundNumberAfterRedecompose: a project
 // that already has a real debate round (round_number=1) and now gets

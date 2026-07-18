@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS projects (
   pause_after_reconcile       INTEGER NOT NULL DEFAULT 0,
   pause_after_verb            TEXT,
   pause_after_bead_id         INTEGER,
+  decompose_ambiguities       TEXT,
   created_at                  TIMESTAMP NOT NULL,
   updated_at                  TIMESTAMP NOT NULL
 );

@@ -200,16 +200,20 @@ func (h *DecomposeSpec) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJ
 		return fmt.Errorf("enqueue %s: %w", db.VerbAuditDecomposition, err)
 	}
 
-	// Log ambiguities if any.
+	// Record this decomposition's ambiguities (if any) in their own column —
+	// never mutate the project's label, which is an identifier, not a notes
+	// field. Overwrites rather than accumulates: this reflects the current
+	// decomposition's ambiguities, not a running log across every historical
+	// DECOMPOSE_SPEC attempt (which would grow unboundedly across redecompose
+	// cycles).
+	var ambiguities any
 	if len(out.Ambiguities) > 0 {
-		// Store as a project-level note in the project label for now;
-		// a dedicated table is a future enhancement.
-		note := "AMBIGUITIES: " + strings.Join(out.Ambiguities, "; ")
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE projects SET label = label || ? WHERE id = ?`,
-			" | "+note, job.ProjectID); err != nil {
-			return fmt.Errorf("record ambiguities: %w", err)
-		}
+		ambiguities = strings.Join(out.Ambiguities, "; ")
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE projects SET decompose_ambiguities = ? WHERE id = ?`,
+		ambiguities, job.ProjectID); err != nil {
+		return fmt.Errorf("record ambiguities: %w", err)
 	}
 
 	return nil

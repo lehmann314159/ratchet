@@ -33,6 +33,7 @@ var columnMigrations = []columnMigration{
 	{"beads", "rewound_at", "TIMESTAMP"},
 	{"projects", "pause_after_verb", "TEXT"},
 	{"projects", "pause_after_bead_id", "INTEGER"},
+	{"projects", "decompose_ambiguities", "TEXT"},
 }
 
 //go:embed schema.sql
