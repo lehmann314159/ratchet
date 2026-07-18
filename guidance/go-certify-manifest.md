@@ -7,15 +7,17 @@ You are certifying a Go project manifest. Apply these language-specific rules:
      assertion (var _ = form at file scope — assertions inside test functions are insufficient)
 
 **Compile-time assertions:**
-The do_not_use_this_test.go file locks exported function signatures using package-level
+The do_not_use_this_test.go file locks exported symbol existence using package-level
 blank-identifier assignments at file scope:
 
-  var _ func(n int) (int, error) = Fib
-  var _ func(src image.Image, msg string) (image.Image, error) = Encode
+  var (
+      _ = Fib
+      _ = Encode
+  )
 
 These must appear at file scope (not inside any Test function). Package-level declarations
-fail the build immediately if a signature is wrong; assertions inside test functions only
-fire when tests run.
+fail the build immediately if the referenced symbol is missing or renamed; assertions inside
+test functions only fire when tests run.
 
 **Package structure for Go — no subdirectories:**
 A single-package Go project (package main) must have all source files in the root directory.

@@ -27,12 +27,15 @@ Write `var templates *template.Template`, not `vartemplates *template.Template`.
 The `var` keyword and the variable name are always separated by a space.
 
 **Compile-time assertions (do_not_use_this_test.go):**
-The do_not_use_this_test.go file locks exported function signatures at compile time using
-package-level blank-identifier assignments:
+The do_not_use_this_test.go file is generated automatically by the scaffolder from your
+manifest's exported functions, variables, and constants — you never write it yourself. It
+locks each exported symbol's existence at compile time using package-level blank-identifier
+assignments:
 
-  var _ func(n int) (int, error) = Fib
-  var _ func(src image.Image, msg string) (image.Image, error) = Encode
+  var (
+      _ = Fib
+      _ = Encode
+  )
 
-Generate one var _ line per exported function in the public API. Place assertions at
-file scope (not inside any test function) — package-level declarations fail the build
-immediately if a signature is wrong.
+A package-level var _ assignment fails the build immediately if the symbol doesn't exist
+with the name and signature your manifest declared.

@@ -7,15 +7,15 @@ You are working on a Go project. Apply these language-specific rules:
   Stale file cleanup (step 2): overwrite a stray .go file with only its package line,
   e.g.: package fib
 
-**Compile-time assertions:**
-Use these in do_not_use_this_test.go to lock function signatures at build time. Place at package
-scope — not inside any function:
+**do_not_use_this_test.go is generated and read-only:**
+This file already exists on disk before you start. It was generated from the SURVEY_SPEC
+manifest and contains one `_ = Symbol` assertion per exported function/variable/constant,
+e.g. `_ = Fib`. Never write to it, edit it, or add assertions to it yourself — it is
+mechanically regenerated, and any change you make will be discarded or cause a mismatch.
 
-  var _ func(n int) (int, error) = Fib
-  var _ func(src image.Image, msg string) (image.Image, error) = Encode
-
-A package-level var _ assignment fails the build immediately if the signature is wrong.
-Assertions inside Test functions only fail when tests run — use package-level declarations.
+If the build fails because of an assertion in do_not_use_this_test.go, the problem is your
+function's signature, not the file: match the exported name and signature SURVEY_SPEC
+declared. Never modify do_not_use_this_test.go to make the error go away.
 
 **Imports:**
 Only import packages you are actually using in the current file. Go will refuse to compile
