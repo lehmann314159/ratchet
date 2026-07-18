@@ -60,6 +60,20 @@ type ParsedBead struct {
 	ExitCriteria    []string `json:"exit_criteria"`    // concrete, runnable checks that define done
 }
 
+// firstEmptyStringIndex returns the index of the first empty (or all-whitespace)
+// entry in ss, or -1 if every entry is non-empty. A JSON array can satisfy
+// len(ss) != 0 while still containing "" — e.g. exit_criteria: [""] — which
+// would otherwise pass validation and then mechanically succeed instantly
+// (bash -c "" exits 0) regardless of what the bead actually implements.
+func firstEmptyStringIndex(ss []string) int {
+	for i, s := range ss {
+		if strings.TrimSpace(s) == "" {
+			return i
+		}
+	}
+	return -1
+}
+
 // --- DECOMPOSE_SPEC ---
 
 type DecomposeSpecOutput struct {
