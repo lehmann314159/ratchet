@@ -72,6 +72,42 @@ func TestSurveySpecValidate(t *testing.T) {
 	runValidate(t, h.Validate, tests)
 }
 
+func TestCertifyManifestValidate(t *testing.T) {
+	h := &CertifyManifest{}
+	tests := []struct {
+		name  string
+		input string
+		valid bool
+	}{
+		{
+			"valid approve",
+			`{"preliminary_decision":"approve","final_decision":"approve"}`,
+			true,
+		},
+		{
+			"valid reject with feedback",
+			`{"preliminary_decision":"reject","final_decision":"reject","feedback":"handlers.go is missing InitTemplates"}`,
+			true,
+		},
+		{"invalid preliminary_decision", `{"preliminary_decision":"maybe","final_decision":"approve"}`, false},
+		{"invalid final_decision", `{"preliminary_decision":"approve","final_decision":"maybe"}`, false},
+		{
+			// A model could reject with no actionable feedback, leaving the next
+			// SURVEY_SPEC retry nothing new to fix — must be caught here.
+			"reject with no feedback",
+			`{"preliminary_decision":"reject","final_decision":"reject"}`,
+			false,
+		},
+		{
+			"reject with whitespace-only feedback",
+			`{"preliminary_decision":"reject","final_decision":"reject","feedback":"   "}`,
+			false,
+		},
+		{"not JSON", `not json`, false},
+	}
+	runValidate(t, h.Validate, tests)
+}
+
 func TestAuditDecompositionValidate(t *testing.T) {
 	h := &AuditDecomposition{}
 	tests := []struct {
