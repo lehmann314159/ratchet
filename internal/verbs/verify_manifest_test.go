@@ -74,6 +74,45 @@ func TestCheckStubPurity_EachBannedStatementKind(t *testing.T) {
 	}
 }
 
+// TestCheckStubPurity_CatchesVarAssignedFuncLiteral reproduces the audit gap:
+// checkStubPurity only ever walked *ast.FuncDecl bodies, so a package-level
+// var whose initializer is a func literal with real control flow (e.g.
+// `var Handler = func(x int) int { if x > 0 { return x }; return 0 }`) sailed
+// through with zero violations, even though the identical logic in a normal
+// func declaration is caught by TestCheckStubPurity_CatchesRealImplementation.
+func TestCheckStubPurity_CatchesVarAssignedFuncLiteral(t *testing.T) {
+	dir := t.TempDir()
+	writeGoFile(t, dir, "handler.go", `package main
+
+var Handler = func(x int) int {
+	if x > 0 {
+		return x
+	}
+	return 0
+}
+`)
+	manifest := &SurveySpecOutput{Files: []SurveyManifestFile{{Path: "handler.go"}}}
+	got := checkStubPurity(dir, manifest)
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 violation for a var-assigned func literal with control flow, got %v", got)
+	}
+}
+
+// TestCheckStubPurity_PureVarAssignedFuncLiteralPasses is the companion
+// non-regression case: a func-literal var with a pure stub body must still
+// pass, so the new GenDecl walk doesn't over-flag legitimate stubs.
+func TestCheckStubPurity_PureVarAssignedFuncLiteralPasses(t *testing.T) {
+	dir := t.TempDir()
+	writeGoFile(t, dir, "handler.go", `package main
+
+var Handler = func(x int) int { return 0 }
+`)
+	manifest := &SurveySpecOutput{Files: []SurveyManifestFile{{Path: "handler.go"}}}
+	if got := checkStubPurity(dir, manifest); len(got) != 0 {
+		t.Errorf("expected no violations for a pure func-literal stub, got %v", got)
+	}
+}
+
 func TestCheckStubPurity_SkipsAPICheckFile(t *testing.T) {
 	dir := t.TempDir()
 	// The generated api_check file is never model-authored declarations, and

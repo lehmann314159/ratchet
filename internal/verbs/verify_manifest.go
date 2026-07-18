@@ -209,10 +209,11 @@ func verifyCompile(ctx context.Context, folderPath string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// checkStubPurity returns one violation string per function body (in a
-// manifest source file) that contains control flow. Stub bodies must be an
-// empty block or a bare return of zero values — no if/for/range/switch/
-// select. Parse errors are skipped; the compile check already surfaces them.
+// checkStubPurity returns one violation string per function body or
+// package-level func-literal variable (in a manifest source file) that
+// contains control flow. Stub bodies must be an empty block or a bare return
+// of zero values — no if/for/range/switch/select. Parse errors are skipped;
+// the compile check already surfaces them.
 func checkStubPurity(folderPath string, manifest *SurveySpecOutput) []string {
 	var violations []string
 	fset := token.NewFileSet()
@@ -225,12 +226,37 @@ func checkStubPurity(folderPath string, manifest *SurveySpecOutput) []string {
 			continue
 		}
 		for _, decl := range astFile.Decls {
-			fd, ok := decl.(*ast.FuncDecl)
-			if !ok || fd.Body == nil {
-				continue
-			}
-			if kind := findControlFlow(fd.Body); kind != "" {
-				violations = append(violations, fmt.Sprintf("%s: %s contains %s (stub bodies must be a bare return or empty body only)", f.Path, fd.Name.Name, kind))
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Body == nil {
+					continue
+				}
+				if kind := findControlFlow(d.Body); kind != "" {
+					violations = append(violations, fmt.Sprintf("%s: %s contains %s (stub bodies must be a bare return or empty body only)", f.Path, d.Name.Name, kind))
+				}
+
+			case *ast.GenDecl:
+				if d.Tok != token.VAR {
+					continue
+				}
+				for _, spec := range d.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					for i, name := range vs.Names {
+						if i >= len(vs.Values) {
+							continue
+						}
+						funcLit, ok := vs.Values[i].(*ast.FuncLit)
+						if !ok {
+							continue
+						}
+						if kind := findControlFlow(funcLit.Body); kind != "" {
+							violations = append(violations, fmt.Sprintf("%s: %s contains %s (stub bodies must be a bare return or empty body only)", f.Path, name.Name, kind))
+						}
+					}
+				}
 			}
 		}
 	}
