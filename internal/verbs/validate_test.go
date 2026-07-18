@@ -42,6 +42,36 @@ func TestDecomposeSpecValidate(t *testing.T) {
 	runValidate(t, h.Validate, tests)
 }
 
+func TestSurveySpecValidate(t *testing.T) {
+	h := &SurveySpec{}
+	tests := []struct {
+		name  string
+		input string
+		valid bool
+	}{
+		{
+			"valid with one file",
+			`{"module":"example.com/m","package":"main","files":[{"path":"game.go","declarations":"func Foo() {}"}]}`,
+			true,
+		},
+		{"missing module", `{"package":"main","files":[{"path":"game.go","declarations":"x"}]}`, false},
+		{"missing package", `{"module":"example.com/m","files":[{"path":"game.go","declarations":"x"}]}`, false},
+		{"empty files array", `{"module":"example.com/m","package":"main","files":[]}`, false},
+		{"file missing path", `{"module":"example.com/m","package":"main","files":[{"declarations":"x"}]}`, false},
+		{"file missing declarations", `{"module":"example.com/m","package":"main","files":[{"path":"game.go"}]}`, false},
+		{
+			// buildGoFile writes one file per path — a duplicate would silently
+			// overwrite the first declaration's content during scaffolding with
+			// no error anywhere.
+			"duplicate file paths",
+			`{"module":"example.com/m","package":"main","files":[{"path":"game.go","declarations":"a"},{"path":"game.go","declarations":"b"}]}`,
+			false,
+		},
+		{"not JSON", `not json`, false},
+	}
+	runValidate(t, h.Validate, tests)
+}
+
 func TestAuditDecompositionValidate(t *testing.T) {
 	h := &AuditDecomposition{}
 	tests := []struct {
