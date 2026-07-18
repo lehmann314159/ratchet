@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"ratchet/internal/db"
+	"ratchet/internal/execcheck"
 	"ratchet/internal/guidance"
 	"ratchet/internal/ollama"
 )
@@ -206,6 +207,20 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 		}
 
 		if len(msg.ToolCalls) == 0 {
+			// Before treating a zero-tool-call turn as a stall, check whether the
+			// bead's own exit criteria already pass on disk — a prior attempt may
+			// have already finished the job (e.g. after ADJUDICATE's "don't
+			// rewrite files that are already correct" guidance), in which case
+			// there is genuinely nothing left to write and the no-write warning
+			// below would force the model into rewriting already-correct files
+			// or terminating as a false 'no_write'. This is the same ground-truth
+			// check ADJUDICATE's declare_success gate uses, run here instead of
+			// only after the fact.
+			if ok, _ := execcheck.VerifyExitCriteria(ctx, folderPath, parsedBead.ExitCriteria); ok {
+				writeLine(traceFile, "[done — exit criteria already satisfied on disk; no write needed]")
+				return writeTerminationCause(d, execID, "success")
+			}
+
 			// If the model declared done without calling write_file at all, it
 			// likely output code as prose instead of as a tool call. Inject a
 			// one-time warning and force another turn so it can correct itself
