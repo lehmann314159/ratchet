@@ -1,4 +1,4 @@
-package verbs
+package execcheck
 
 import (
 	"context"
@@ -7,18 +7,18 @@ import (
 	"testing"
 )
 
-func TestVerifyExitCriteriaMechanically(t *testing.T) {
+func TestVerifyExitCriteria(t *testing.T) {
 	dir := t.TempDir()
 
 	t.Run("all criteria pass", func(t *testing.T) {
-		ok, detail := verifyExitCriteriaMechanically(context.Background(), dir, []string{"true", "echo hi"})
+		ok, detail := VerifyExitCriteria(context.Background(), dir, []string{"true", "echo hi"})
 		if !ok {
 			t.Errorf("expected pass, got failure detail: %q", detail)
 		}
 	})
 
 	t.Run("a failing criterion is reported with output", func(t *testing.T) {
-		ok, detail := verifyExitCriteriaMechanically(context.Background(), dir, []string{"echo Fail && false"})
+		ok, detail := VerifyExitCriteria(context.Background(), dir, []string{"echo Fail && false"})
 		if ok {
 			t.Fatal("expected the criterion to fail")
 		}
@@ -28,7 +28,7 @@ func TestVerifyExitCriteriaMechanically(t *testing.T) {
 	})
 
 	t.Run("no criteria vacuously passes", func(t *testing.T) {
-		ok, _ := verifyExitCriteriaMechanically(context.Background(), dir, nil)
+		ok, _ := VerifyExitCriteria(context.Background(), dir, nil)
 		if !ok {
 			t.Error("expected an empty exit_criteria list to pass")
 		}
@@ -50,7 +50,7 @@ func TestVerifyExitCriteriaMechanically(t *testing.T) {
 			t.Fatal(err)
 		}
 		criteria := []string{"go test -c -o /dev/null ./... && grep -q '^var _' do_not_use_this_test.go"}
-		ok, detail := verifyExitCriteriaMechanically(context.Background(), blockDir, criteria)
+		ok, detail := VerifyExitCriteria(context.Background(), blockDir, criteria)
 		if ok {
 			t.Fatal("expected the literal grep pattern to fail against block-style var assertions")
 		}
