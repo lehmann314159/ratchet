@@ -83,6 +83,7 @@ func (h *SurveySpec) Validate(raw string) (string, any) {
 	if len(out.Files) == 0 {
 		return "malformed: files array is empty", nil
 	}
+	seenPaths := make(map[string]int, len(out.Files))
 	for i, f := range out.Files {
 		if f.Path == "" {
 			return fmt.Sprintf("malformed: files[%d] missing path", i), nil
@@ -90,6 +91,14 @@ func (h *SurveySpec) Validate(raw string) (string, any) {
 		if f.Declarations == "" {
 			return fmt.Sprintf("malformed: files[%d] (%s) missing declarations", i, f.Path), nil
 		}
+		// A duplicate path would silently overwrite the first declaration's
+		// content during scaffolding (buildGoFile writes one file per path) with
+		// no error anywhere — same class of bug as DecomposeSpec's duplicate
+		// bead-title check.
+		if prev, dup := seenPaths[f.Path]; dup {
+			return fmt.Sprintf("malformed: files[%d] and files[%d] both use path %q — every file path must be unique", prev, i, f.Path), nil
+		}
+		seenPaths[f.Path] = i
 	}
 	return "valid", out
 }
