@@ -177,3 +177,34 @@ func TestSyncImportsIgnoresShadowedLocalVar(t *testing.T) {
 		t.Fatalf("expected net/url import for genuine url.Parse call:\n%s", out2)
 	}
 }
+
+// TestAssembleResolvesUnlistedStdlibPackage proves import resolution is no
+// longer bounded by a hand-maintained name table. crypto/sha512 and
+// net/textproto were never entries in the old detectImports "known" map (nor
+// in scaffold_go.go's sibling stdlibPkgToImport map) — exactly the class of
+// gap that let a real project (fractal-smoke, needing image/png and
+// image/color) escalate a bead with an unwinnable compile failure, since
+// write_function forbids the model from writing its own imports. Using
+// packages absent from both old maps (rather than re-adding the specific
+// image family) demonstrates the fix closes the whole class, not just the
+// one instance that happened to be found.
+func TestAssembleResolvesUnlistedStdlibPackage(t *testing.T) {
+	body := `func TestHash(t *testing.T) {
+	sum := sha512.Sum512([]byte("x"))
+	r := textproto.NewReader(nil)
+	_ = r
+	if len(sum) == 0 {
+		t.Fatal("bad")
+	}
+}`
+	out, err := Assemble("pkg", []string{body})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if !strings.Contains(out, `"crypto/sha512"`) {
+		t.Fatalf("expected crypto/sha512 import to be resolved:\n%s", out)
+	}
+	if !strings.Contains(out, `"net/textproto"`) {
+		t.Fatalf("expected net/textproto import to be resolved:\n%s", out)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -160,6 +161,78 @@ func TestWriteScaffoldStubs_MissingNonManifestFileIsNotAnError(t *testing.T) {
 	// calls this path for files absent from disk.
 	if _, _, err := WriteScaffoldStubs(context.Background(), d, 1, dir, []string{"templates/index.html"}); err != nil {
 		t.Errorf("expected no error deleting an already-absent file, got %v", err)
+	}
+}
+
+// TestBuildGoFile_ImagePNGStubCompiles reproduces and confirms the fix for a
+// gap the audit found while scoping a PNG-generating stress-test project:
+// stdlibPkgToImport had no entries for "image", "image/color", "image/png",
+// or "image/draw". Unlike a missing entry for a package only ever used
+// inside a real implementation (EXECUTE_BEAD manages its own imports and
+// isn't affected), a type used in an exported *signature* — image.Image or
+// color.RGBA as a return/field type — is resolved at SURVEY's mechanical
+// stub-generation step (buildGoFile/inferImports), which SURVEY has no
+// ability to fix itself (its guidance forbids writing imports). Before this
+// fix, a design doc needing image.Image in a signature would fail
+// VERIFY_MANIFEST's compile check every single SURVEY_SPEC retry with the
+// identical error, eventually exhausting CERTIFY's reject cap and
+// full-stopping the project — not self-correcting the way a missing
+// implementation-only import is. This test writes real declaration text
+// through the actual production scaffolding path and compiles it for real,
+// not just checking that the import map has the right strings.
+func TestBuildGoFile_ImagePNGStubCompiles(t *testing.T) {
+	dir := t.TempDir()
+	decl := `func NewCanvas(width, height int) image.Image { return nil }
+
+func SetPixel(img *image.RGBA, x, y int, c color.RGBA) {}
+
+func EncodePNG(img image.Image, w io.Writer) error { return nil }
+`
+	content := buildGoFile("fractal", decl)
+	if err := os.WriteFile(filepath.Join(dir, "canvas.go"), []byte(content), 0644); err != nil {
+		t.Fatalf("write canvas.go: %v", err)
+	}
+	goMod := goModContent("fractal", goRuntimeVersion())
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+
+	cmd := exec.Command("go", "build", "./...")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("generated file does not compile: %v\n%s\n--- generated content ---\n%s", err, out, content)
+	}
+}
+
+// TestBuildGoFile_UnlistedStdlibPackageCompiles proves import resolution is
+// no longer bounded by a hand-maintained name table (the fix applied after
+// TestBuildGoFile_ImagePNGStubCompiles above). crypto/sha512 and
+// net/textproto were never entries in the old stdlibPkgToImport map. Using
+// packages absent from that map — rather than re-testing the specific image
+// family that was already fixed — demonstrates the fix closes the whole
+// class of "signature needs an unlisted stdlib package" bugs, not just the
+// one instance a prior stress-test project happened to surface.
+func TestBuildGoFile_UnlistedStdlibPackageCompiles(t *testing.T) {
+	dir := t.TempDir()
+	decl := `func Hash(data []byte) [64]byte { return sha512.Sum512(data) }
+
+func NewProtoReader(r io.Reader) *textproto.Reader { return textproto.NewReader(bufio.NewReader(r)) }
+`
+	content := buildGoFile("fractal", decl)
+	if err := os.WriteFile(filepath.Join(dir, "hash.go"), []byte(content), 0644); err != nil {
+		t.Fatalf("write hash.go: %v", err)
+	}
+	goMod := goModContent("fractal", goRuntimeVersion())
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+
+	cmd := exec.Command("go", "build", "./...")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("generated file does not compile: %v\n%s\n--- generated content ---\n%s", err, out, content)
 	}
 }
 
