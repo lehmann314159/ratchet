@@ -41,7 +41,7 @@ func TestResumeProject_PureStatusFlip(t *testing.T) {
 		t.Fatalf("seed pending job: %v", err)
 	}
 
-	label, nextVerb, nextBeadID, err := resumeProject(ctx, d, 1)
+	label, nextVerb, nextBeadID, err := ResumeProject(ctx, d, 1)
 	if err != nil {
 		t.Fatalf("resumeProject: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestResumeProject_VerbLevelPauseNoBeadID(t *testing.T) {
 		t.Fatalf("seed pending job: %v", err)
 	}
 
-	_, nextVerb, nextBeadID, err := resumeProject(ctx, d, 1)
+	_, nextVerb, nextBeadID, err := ResumeProject(ctx, d, 1)
 	if err != nil {
 		t.Fatalf("resumeProject: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestResumeProject_RejectsNonPausedProject(t *testing.T) {
 	ctx := context.Background()
 	seedResumeProject(t, d, 1, "active")
 
-	if _, _, _, err := resumeProject(ctx, d, 1); err == nil {
+	if _, _, _, err := ResumeProject(ctx, d, 1); err == nil {
 		t.Error("expected error resuming an active (non-paused) project, got nil")
 	}
 
@@ -124,7 +124,7 @@ func TestResumeProject_RejectsNonPausedProject(t *testing.T) {
 // TestResumeProject_NotFound confirms a clear error for an unknown project ID.
 func TestResumeProject_NotFound(t *testing.T) {
 	d := openTestDB(t)
-	if _, _, _, err := resumeProject(context.Background(), d, 999); err == nil {
+	if _, _, _, err := ResumeProject(context.Background(), d, 999); err == nil {
 		t.Error("expected error for unknown project ID, got nil")
 	}
 }

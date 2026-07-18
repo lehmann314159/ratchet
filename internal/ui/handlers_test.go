@@ -414,3 +414,53 @@ func TestHandleRemoveProject_WithTestRefinementsSucceeds(t *testing.T) {
 		t.Errorf("test_refinements rows still present after remove")
 	}
 }
+
+// --- handleResumeProject ---
+
+// TestHandleResumeProject_PreDecompositionPauseSucceeds reproduces the
+// fractal-smoke-2 (project 105) incident: the web UI's resume button hit a
+// handler that assumed a bead already existed and tried to hand-pick one to
+// enqueue EXECUTE_BEAD for, which fails with "sql: no rows in result set" for
+// any pause before DECOMPOSE_SPEC has run (pause_after_verb=CERTIFY_MANIFEST,
+// zero beads yet). The handler now delegates to project.ResumeProject, the
+// same status-flip-only logic `ratchet resume-project` already used
+// correctly.
+func TestHandleResumeProject_PreDecompositionPauseSucceeds(t *testing.T) {
+	s, d := openTestServer(t)
+	pid := seedProject(t, d)
+	if _, err := d.ExecContext(context.Background(),
+		`UPDATE projects SET status = 'paused' WHERE id = ?`, pid); err != nil {
+		t.Fatalf("set project paused: %v", err)
+	}
+	if _, err := d.ExecContext(context.Background(), `
+		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
+		VALUES (?, 'DECOMPOSE_SPEC', NULL, 'pending', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		pid); err != nil {
+		t.Fatalf("seed pending DECOMPOSE_SPEC job: %v", err)
+	}
+
+	rec := doPost(t, s, "/projects/"+strconv.FormatInt(pid, 10)+"/resume", nil)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 redirect, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var status string
+	if err := d.QueryRowContext(context.Background(),
+		`SELECT status FROM projects WHERE id = ?`, pid,
+	).Scan(&status); err != nil {
+		t.Fatalf("query status: %v", err)
+	}
+	if status != "active" {
+		t.Errorf("status = %q, want active", status)
+	}
+
+	var jobCount int
+	if err := d.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM handoff_jobs WHERE project_id = ?`, pid,
+	).Scan(&jobCount); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if jobCount != 1 {
+		t.Errorf("handoff_jobs count = %d, want 1 (resume must not enqueue a second job)", jobCount)
+	}
+}

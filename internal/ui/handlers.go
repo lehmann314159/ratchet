@@ -8,6 +8,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"ratchet/internal/project"
 )
 
 // baseData is included in every page render so the layout can show the
@@ -416,45 +418,17 @@ func (s *server) handleResumeProject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid project id", http.StatusBadRequest)
 		return
 	}
-	ctx := r.Context()
-	now := time.Now().UTC().Format(time.RFC3339)
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("begin tx: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE projects SET status = 'active', updated_at = ? WHERE id = ? AND status = 'paused'`,
-		now, id,
-	); err != nil {
-		_ = tx.Rollback()
+	// Delegate to the same logic as `ratchet resume-project`: every pause
+	// point always enqueues its normal next handoff_job *before* pausing, so
+	// resuming is nothing more than a status flip — there is no next-job
+	// state to reconstruct. The previous version of this handler assumed a
+	// bead already existed and tried to hand-pick one to enqueue EXECUTE_BEAD
+	// for, which broke for any pause before DECOMPOSE_SPEC has run (no beads
+	// exist yet) and duplicated a job the pause mechanism had already queued
+	// for every other pause point.
+	if _, _, _, err := project.ResumeProject(r.Context(), s.db, id); err != nil {
 		http.Error(w, fmt.Sprintf("resume project: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	var beadID int64
-	if err := tx.QueryRowContext(ctx,
-		`SELECT id FROM beads WHERE project_id = ? AND status = 'pending' ORDER BY id LIMIT 1`, id,
-	).Scan(&beadID); err != nil {
-		_ = tx.Rollback()
-		http.Error(w, fmt.Sprintf("find first pending bead: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
-		VALUES (?, 'EXECUTE_BEAD', ?, 'pending', ?, ?)`,
-		id, beadID, now, now,
-	); err != nil {
-		_ = tx.Rollback()
-		http.Error(w, fmt.Sprintf("enqueue first bead: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	if err := tx.Commit(); err != nil {
-		http.Error(w, fmt.Sprintf("commit: %v", err), http.StatusInternalServerError)
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)

@@ -31,7 +31,7 @@ func RunResumeProjectMain(args []string) {
 	}
 	defer d.Close()
 
-	label, nextVerb, nextBeadID, err := resumeProject(context.Background(), d, *projectID)
+	label, nextVerb, nextBeadID, err := ResumeProject(context.Background(), d, *projectID)
 	if err != nil {
 		slog.Error("resume-project", "error", err)
 		os.Exit(1)
@@ -51,7 +51,7 @@ func RunResumeProjectMain(args []string) {
 	}
 }
 
-// resumeProject transitions a paused project back to active.
+// ResumeProject transitions a paused project back to active.
 //
 // Every pause point (pause_after_reconcile, pause_after_verb,
 // pause_after_bead_id) always enqueues its normal next handoff_job *before*
@@ -63,7 +63,7 @@ func RunResumeProjectMain(args []string) {
 // The returned nextVerb/nextBeadID are informational only (for the CLI
 // printout) — the pending job that was already enqueued right before the
 // project paused, found by querying rather than reconstructed.
-func resumeProject(ctx context.Context, d *db.DB, projectID int64) (label, nextVerb string, nextBeadID sql.NullInt64, err error) {
+func ResumeProject(ctx context.Context, d *db.DB, projectID int64) (label, nextVerb string, nextBeadID sql.NullInt64, err error) {
 	var status string
 	if err = d.QueryRowContext(ctx,
 		`SELECT label, status FROM projects WHERE id = ?`, projectID,
