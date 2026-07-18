@@ -19,10 +19,11 @@ import (
 // RunRewindBeadMain is the entry point for `ratchet rewind-bead`.
 //
 // It resets an escalated (or stuck) bead to a clean state:
-//   - prose (full_text) rolled back to revision 1; output_files and
-//     exit_criteria kept from the current revision, since those can carry
-//     permanent structural fixes (a RECONCILE-added missing test file, an
-//     ADJUDICATE stray-file cleanup target) that revision 1 never had
+//   - prose (full_text) rolled back to revision 1; everything else (title,
+//     output_files, exit_criteria, execution_budget, monitor_override) kept
+//     from the current revision, since those can carry permanent corrections
+//     (a RECONCILE-added missing test file, an ADJUDICATE stray-file cleanup
+//     target, a budget doubled after a timeout) that revision 1 never had
 //   - execution attempt budget extended by max_execution_attempts
 //   - test files deleted and test_refinements cleared
 //   - impl files replaced with scaffold stubs (always compilable baseline)
@@ -59,7 +60,7 @@ func RunRewindBeadMain(args []string) {
 	fmt.Printf("bead rewound\n")
 	fmt.Printf("  bead-id:        %d\n", *beadID)
 	fmt.Printf("  project-id:     %d\n", result.ProjectID)
-	fmt.Printf("  spec reset to:  revision 1 prose, current output_files/exit_criteria\n")
+	fmt.Printf("  spec reset to:  revision 1 prose, current revision for everything else\n")
 	fmt.Printf("  attempt budget: %d → %d\n", result.BudgetFrom, result.BudgetTo)
 	fmt.Printf("  next verb:      REFINE_TESTS_WRITE\n")
 	if len(result.DeletedTests) > 0 {
@@ -120,9 +121,9 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64) (*rewindResult, err
 		return nil, fmt.Errorf("query project: %w", err)
 	}
 
-	// Find the first (original DECOMPOSE) revision for this bead — its prose
-	// (full_text) is what rewind restores, since that's what execute_revised's
-	// verbatim patches corrupt.
+	// Find the first (original DECOMPOSE) revision's prose — full_text is the
+	// one field rewind actually needs to restore, since that's what
+	// execute_revised's verbatim patches corrupt over repeated attempts.
 	var firstRevisionFullText string
 	if err := d.QueryRowContext(ctx,
 		`SELECT full_text FROM bead_revisions WHERE bead_id = ? ORDER BY revision_number ASC LIMIT 1`,
@@ -131,20 +132,33 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64) (*rewindResult, err
 		return nil, fmt.Errorf("find first revision: %w", err)
 	}
 
-	// Find the current (pre-rewind) revision's full_text too. output_files and
-	// exit_criteria can pick up permanent structural corrections after revision
-	// 1 — RECONCILE_DECOMPOSITION's goFixBeadSpec adding a missing test file, or
-	// ADJUDICATE's "workspace repair" adding a stray-file cleanup target — and
-	// those are not the kind of prose drift rewind is meant to undo. Reverting
-	// past them silently re-creates the exact bug they fixed: a bead whose
-	// output_files no longer matches what refine_tests.go/mechanical checks
-	// expect, and (for the missing-test-file case) an unrecoverable REFINE_TESTS
-	// job that hard-errors forever since Run() errors are retried as infra
-	// failures with no strike count or escalation (see dispatch.go).
-	var currentRevisionFullText string
+	// Load the current (pre-rewind) revision's full_text plus its real
+	// execution_budget/monitor_override DB columns — not the same-named
+	// fields embedded in the JSON full_text blob, which are vestigial: every
+	// revision-creating verb writes the authoritative value to its own DB
+	// column at INSERT time, and nothing downstream ever reads the JSON copy
+	// back out. Everything about the current revision — output_files,
+	// exit_criteria, title, budget, monitor_override — can carry permanent
+	// corrections picked up after revision 1 (RECONCILE_DECOMPOSITION's
+	// goFixBeadSpec adding a missing test file, ADJUDICATE's "workspace
+	// repair" adding a stray-file cleanup target, a budget doubled after a
+	// timeout) and none of that is the kind of prose drift rewind is meant to
+	// undo. Reverting past it silently re-creates the exact bugs those fixes
+	// addressed: a bead whose output_files no longer matches what
+	// refine_tests.go/mechanical checks expect, or — the checkers-try-1
+	// bead-684 incident — an execution_budget reset to a stale placeholder
+	// value from the original DECOMPOSE_SPEC output, instantly timing out
+	// every rewound bead's first EXECUTE_BEAD attempt. The merge below
+	// therefore defaults to the current revision for every field and reverts
+	// only full_text — the one field known to actually go stale — instead of
+	// defaulting to revision 1 and hand-listing exceptions, which is what let
+	// both of those bugs go unnoticed.
+	var currentRevisionFullText, currentMonitorOverride string
+	var currentExecutionBudget int
 	if err := d.QueryRowContext(ctx,
-		`SELECT full_text FROM bead_revisions WHERE id = ?`, currentRevisionID,
-	).Scan(&currentRevisionFullText); err != nil {
+		`SELECT full_text, execution_budget, monitor_override FROM bead_revisions WHERE id = ?`,
+		currentRevisionID,
+	).Scan(&currentRevisionFullText, &currentExecutionBudget, &currentMonitorOverride); err != nil {
 		return nil, fmt.Errorf("load current revision: %w", err)
 	}
 
@@ -156,12 +170,25 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64) (*rewindResult, err
 		return nil, fmt.Errorf("parse current revision: %w", err)
 	}
 
-	// Merge: prose (full_text), title, execution_budget, and monitor_override
-	// come from revision 1 (the clean baseline); output_files and exit_criteria
-	// come from the current revision (preserving structural fixes).
-	mergedSpec := firstSpec
-	mergedSpec.OutputFiles = currentSpec.OutputFiles
-	mergedSpec.ExitCriteria = currentSpec.ExitCriteria
+	// Merge: default to the current revision for every field, then revert
+	// only full_text (prose) to revision 1. Keep the JSON blob's own
+	// execution_budget/monitor_override fields in sync with the real DB
+	// columns written below, so the stored spec text never disagrees with
+	// the actual effective values.
+	mergedSpec := currentSpec
+	mergedSpec.FullText = firstSpec.FullText
+	mergedSpec.ExecutionBudget = currentExecutionBudget
+	mergedSpec.MonitorOverride = currentMonitorOverride
+
+	// Re-run the mechanical exit-criteria fixes (asterisk-escaping,
+	// apiCheckTestFilename content-check stripping, bare-grep file assignment,
+	// ...) over the inherited exit_criteria. The current revision's
+	// exit_criteria may predate a mechanical fix landing in mechanical_checks.go
+	// — carrying it forward unchanged would silently re-ship whatever bug that
+	// fix addressed. This is what lets rewind-bead self-heal a bead like
+	// checkers-try-1's 684 instead of requiring a manual DB patch.
+	verbs.ApplyMechanicalBeadFixes(projectFolder, &mergedSpec)
+
 	mergedFullText, err := json.Marshal(mergedSpec)
 	if err != nil {
 		return nil, fmt.Errorf("marshal merged revision: %w", err)
@@ -194,9 +221,9 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64) (*rewindResult, err
 		return nil, fmt.Errorf("cancel jobs: %w", err)
 	}
 
-	// Insert the merged spec (revision-1 prose + current output_files/exit_criteria)
-	// as a fresh revision, bead-wide MAX(revision_number)+1 like every other
-	// bead_revisions insert site, to avoid numbering collisions.
+	// Insert the merged spec (revision-1 prose + current revision for
+	// everything else) as a fresh revision, bead-wide MAX(revision_number)+1
+	// like every other bead_revisions insert site, to avoid numbering collisions.
 	var maxRevNum int
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COALESCE(MAX(revision_number), 0) FROM bead_revisions WHERE bead_id = ?`, beadID,
@@ -210,7 +237,7 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64) (*rewindResult, err
 		   execution_budget, monitor_override, created_by_verb, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, 'REWIND_BEAD', ?)`,
 		projectID, beadID, maxRevNum+1, string(mergedFullText),
-		firstSpec.ExecutionBudget, firstSpec.MonitorOverride, now,
+		currentExecutionBudget, currentMonitorOverride, now,
 	)
 	if err != nil {
 		_ = tx.Rollback()
@@ -310,4 +337,3 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64) (*rewindResult, err
 		DeletedFiles: deletedFiles,
 	}, nil
 }
-

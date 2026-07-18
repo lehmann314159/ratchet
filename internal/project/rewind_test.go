@@ -222,6 +222,189 @@ func TestRewindBead_PreservesOutputFilesAddedAfterRevision1(t *testing.T) {
 	}
 }
 
+// TestRewindBead_UsesCurrentRevisionExecutionBudgetNotStaleJSONField
+// reproduces the checkers-try-1 bead-684 incident: revision 1's full_text
+// JSON blob carries a vestigial "execution_budget" field (DECOMPOSE_SPEC's
+// own placeholder — the framework never reads it back; the real value lives
+// in the execution_budget DB column, set correctly by whichever verb creates
+// each revision). Before this fix, rewind sourced the new revision's budget
+// from that stale JSON field, silently resetting a bead whose budget had been
+// doubled after real timeouts back down to a placeholder value — 0 in this
+// bead's case, which fired the budget timer almost instantly on the very
+// next EXECUTE_BEAD attempt. Verifies the merged revision's real DB column
+// (and the JSON blob's own field, kept in sync) come from the current
+// revision, not revision 1.
+func TestRewindBead_UsesCurrentRevisionExecutionBudgetNotStaleJSONField(t *testing.T) {
+	d := openTestDB(t)
+	folder := t.TempDir()
+	seedRewindProject(t, d, 1, folder)
+	ctx := context.Background()
+
+	res, err := d.ExecContext(ctx,
+		`INSERT INTO beads (project_id, status) VALUES (1, 'pending')`)
+	if err != nil {
+		t.Fatalf("seed bead: %v", err)
+	}
+	beadID, _ := res.LastInsertId()
+
+	rev1 := verbs.ParsedBead{
+		Title: "layout", FullText: "create the layout", ExecutionBudget: 0,
+		MonitorOverride: "honor", OutputFiles: []string{"game.go"},
+		ExitCriteria: []string{"go build ./..."},
+	}
+	if _, err := d.ExecContext(ctx, `
+		INSERT INTO bead_revisions
+		  (project_id, bead_id, revision_number, full_text, execution_budget,
+		   monitor_override, created_by_verb, created_at)
+		VALUES (1, ?, 1, ?, 900, 'honor', 'DECOMPOSE_SPEC', '2026-01-01T00:00:00Z')`,
+		beadID, mustMarshal(t, rev1)); err != nil {
+		t.Fatalf("seed revision 1: %v", err)
+	}
+
+	// ADJUDICATE doubled the budget after a real timeout — its DB column
+	// (1800) is the authoritative value for this revision.
+	rev2 := rev1
+	rev2.ExecutionBudget = 1800
+	rev2.MonitorOverride = "ignore"
+	res2, err := d.ExecContext(ctx, `
+		INSERT INTO bead_revisions
+		  (project_id, bead_id, revision_number, full_text, execution_budget,
+		   monitor_override, created_by_verb, created_at)
+		VALUES (1, ?, 2, ?, 1800, 'ignore', 'ADJUDICATE_NEXT_EXECUTION', '2026-01-01T01:00:00Z')`,
+		beadID, mustMarshal(t, rev2))
+	if err != nil {
+		t.Fatalf("seed revision 2: %v", err)
+	}
+	rev2ID, _ := res2.LastInsertId()
+
+	if _, err := d.ExecContext(ctx,
+		`UPDATE beads SET current_revision_id = ? WHERE id = ?`, rev2ID, beadID,
+	); err != nil {
+		t.Fatalf("point bead at revision 2: %v", err)
+	}
+
+	if _, err := rewindBead(ctx, d, beadID); err != nil {
+		t.Fatalf("rewindBead: %v", err)
+	}
+
+	var newBudget int
+	var newMonitorOverride, newFullText string
+	if err := d.QueryRowContext(ctx, `
+		SELECT br.execution_budget, br.monitor_override, br.full_text FROM beads b
+		JOIN bead_revisions br ON br.id = b.current_revision_id
+		WHERE b.id = ?`, beadID,
+	).Scan(&newBudget, &newMonitorOverride, &newFullText); err != nil {
+		t.Fatalf("query post-rewind revision: %v", err)
+	}
+	if newBudget != 1800 {
+		t.Errorf("execution_budget = %d, want 1800 (current revision's real value, not revision 1's stale JSON field of 0)", newBudget)
+	}
+	if newMonitorOverride != "ignore" {
+		t.Errorf("monitor_override = %q, want %q (current revision's value)", newMonitorOverride, "ignore")
+	}
+
+	// The JSON blob's own execution_budget/monitor_override fields must agree
+	// with the real DB columns above — otherwise the stored spec text lies
+	// about its own effective values.
+	var merged verbs.ParsedBead
+	if err := json.Unmarshal([]byte(newFullText), &merged); err != nil {
+		t.Fatalf("parse merged spec: %v", err)
+	}
+	if merged.ExecutionBudget != 1800 {
+		t.Errorf("merged spec JSON execution_budget = %d, want 1800 (in sync with the DB column)", merged.ExecutionBudget)
+	}
+	if merged.MonitorOverride != "ignore" {
+		t.Errorf("merged spec JSON monitor_override = %q, want %q (in sync with the DB column)", merged.MonitorOverride, "ignore")
+	}
+	// full_text prose still reverts to revision 1 — the one field rewind is
+	// actually meant to undo.
+	if merged.FullText != rev1.FullText {
+		t.Errorf("full_text = %q, want revision 1's prose %q", merged.FullText, rev1.FullText)
+	}
+}
+
+// TestRewindBead_SelfHealsInheritedBrokenExitCriteria reproduces the
+// checkers-try-1 bead-684 incident from the other direction: the current
+// revision's exit_criteria already carries a bug that a mechanical fix in
+// mechanical_checks.go now knows how to repair (here, the othello-fixture
+// unescaped-asterisk bug — a pointer-receiver grep pattern that can never
+// match real Go source, see escapeStrayGrepAsterisks). Before wiring
+// verbs.ApplyMechanicalBeadFixes into the merge, rewind carried the current
+// revision's exit_criteria forward completely unchanged, so a bead escalating
+// specifically *because* of a broken exit criterion would come back from
+// rewind with the identical broken criterion — the only way out was a manual
+// DB patch. Verifies the merged post-rewind spec has the pattern escaped.
+func TestRewindBead_SelfHealsInheritedBrokenExitCriteria(t *testing.T) {
+	d := openTestDB(t)
+	folder := t.TempDir()
+	seedRewindProject(t, d, 1, folder)
+	ctx := context.Background()
+
+	res, err := d.ExecContext(ctx,
+		`INSERT INTO beads (project_id, status) VALUES (1, 'pending')`)
+	if err != nil {
+		t.Fatalf("seed bead: %v", err)
+	}
+	beadID, _ := res.LastInsertId()
+
+	rev1 := verbs.ParsedBead{
+		Title: "game-flips", FullText: "implement FindFlips", ExecutionBudget: 300,
+		MonitorOverride: "honor", OutputFiles: []string{"game.go", "game_test.go"},
+		ExitCriteria: []string{"go build ./..."},
+	}
+	if _, err := d.ExecContext(ctx, `
+		INSERT INTO bead_revisions
+		  (project_id, bead_id, revision_number, full_text, execution_budget,
+		   monitor_override, created_by_verb, created_at)
+		VALUES (1, ?, 1, ?, 300, 'honor', 'DECOMPOSE_SPEC', '2026-01-01T00:00:00Z')`,
+		beadID, mustMarshal(t, rev1)); err != nil {
+		t.Fatalf("seed revision 1: %v", err)
+	}
+
+	// The current (escalated) revision carries the unescaped-asterisk bug —
+	// this criterion can never pass regardless of what the agent writes.
+	rev2 := rev1
+	rev2.ExitCriteria = []string{"grep -q 'func (g *Game) FindFlips' game.go && go test -run TestFindFlips ."}
+	res2, err := d.ExecContext(ctx, `
+		INSERT INTO bead_revisions
+		  (project_id, bead_id, revision_number, full_text, execution_budget,
+		   monitor_override, created_by_verb, created_at)
+		VALUES (1, ?, 2, ?, 300, 'honor', 'DECOMPOSE_SPEC', '2026-01-01T01:00:00Z')`,
+		beadID, mustMarshal(t, rev2))
+	if err != nil {
+		t.Fatalf("seed revision 2: %v", err)
+	}
+	rev2ID, _ := res2.LastInsertId()
+
+	if _, err := d.ExecContext(ctx,
+		`UPDATE beads SET current_revision_id = ? WHERE id = ?`, rev2ID, beadID,
+	); err != nil {
+		t.Fatalf("point bead at revision 2: %v", err)
+	}
+
+	if _, err := rewindBead(ctx, d, beadID); err != nil {
+		t.Fatalf("rewindBead: %v", err)
+	}
+
+	var newFullText string
+	if err := d.QueryRowContext(ctx, `
+		SELECT br.full_text FROM beads b
+		JOIN bead_revisions br ON br.id = b.current_revision_id
+		WHERE b.id = ?`, beadID,
+	).Scan(&newFullText); err != nil {
+		t.Fatalf("query post-rewind revision: %v", err)
+	}
+	var merged verbs.ParsedBead
+	if err := json.Unmarshal([]byte(newFullText), &merged); err != nil {
+		t.Fatalf("parse merged spec: %v", err)
+	}
+	want := "grep -q 'func (g \\*Game) FindFlips' game.go && go test -run TestFindFlips ."
+	if len(merged.ExitCriteria) != 1 || merged.ExitCriteria[0] != want {
+		t.Errorf("exit_criteria = %v, want [%q] (asterisk escaped by the mechanical fix, not carried forward broken)",
+			merged.ExitCriteria, want)
+	}
+}
+
 // TestRewindBead_AlreadySucceededErrors verifies rewind refuses to touch a
 // bead that already succeeded.
 func TestRewindBead_AlreadySucceededErrors(t *testing.T) {

@@ -173,6 +173,15 @@ func applyMechanicalBeadFixes(lang string, bead *ParsedBead) bool {
 	return goFixBeadSpec(bead)
 }
 
+// ApplyMechanicalBeadFixes re-runs applyMechanicalBeadFixes for a caller
+// outside this package (rewind-bead) that needs to heal a bead spec's
+// exit_criteria inherited from a prior revision — including ones that predate
+// a fix landing here, like the checkers-try-1 bead-684 and othello-fixture
+// incidents — rather than carrying forward whatever was already stored.
+func ApplyMechanicalBeadFixes(folderPath string, bead *ParsedBead) bool {
+	return applyMechanicalBeadFixes(detectLang(folderPath, bead.OutputFiles), bead)
+}
+
 // goFixBeadSpec fixes Go-specific structural violations in-place:
 //
 //   - If a bead owns apiCheckTestFilename, strengthen any "go build ./..." exit
