@@ -244,7 +244,7 @@ func callMonitorModel(ctx context.Context, oc *ollama.Client, model, trace strin
 	raw, err := oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: monitorSystemPrompt},
 		{Role: "user", Content: "Current trace:\n\n" + trace},
-	}, nil)
+	}, &ollama.Options{NumCtx: ollama.MonitorNumCtx})
 	if err != nil {
 		return "", err
 	}

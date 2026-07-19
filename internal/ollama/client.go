@@ -14,12 +14,17 @@ import (
 const DefaultTemperature = 0.3
 
 // Context window sizes sent with every request via num_ctx. These cap the KV
-// cache allocation so multiple models can coexist in unified memory.
-// Chat() (single-turn handoff prompts) fits well under 16K.
-// ChatWithTools() accumulates tool-call history and needs more headroom.
+// cache allocation. defaultNumCtx covers every verb by default (both Chat()
+// handoff prompts and ChatWithTools() tool-call accumulation) — headroom
+// checked against this deployment's actual unified-memory budget, not a
+// generic guess (see internal/ollama's git history for the sizing rationale).
+// MonitorNumCtx is the one deliberate exception: MONITOR_EXECUTION runs a
+// tight, frequent polling loop (a short trace snippet in, a FIRE/NO_FIRE
+// decision out) and never touches a design doc or bead history, so it never
+// needs — and shouldn't pay the KV-cache cost of — the full default.
 const (
-	chatNumCtx     = 16384
-	executeNumCtx  = 32768
+	defaultNumCtx = 32768
+	MonitorNumCtx = 16384
 )
 
 type Client struct {
@@ -85,6 +90,9 @@ type ToolCallFunction struct {
 
 type Options struct {
 	Temperature float64
+	// NumCtx overrides the default context window size (see defaultNumCtx)
+	// when positive. Zero means "use the default."
+	NumCtx int
 }
 
 type chatRequest struct {
@@ -110,7 +118,7 @@ func (c *Client) Warmup(ctx context.Context, model string) error {
 		Model:    model,
 		Messages: []Message{{Role: "user", Content: "hello"}},
 		Stream:   false,
-		Options:  map[string]any{"temperature": 0.0, "num_ctx": chatNumCtx},
+		Options:  map[string]any{"temperature": 0.0, "num_ctx": defaultNumCtx},
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -140,15 +148,21 @@ func (c *Client) Warmup(ctx context.Context, model string) error {
 // structured outputs stored in handoff_attempts, not from a token stream.
 func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *Options) (string, error) {
 	temp := DefaultTemperature
-	if opts != nil && opts.Temperature > 0 {
-		temp = opts.Temperature
+	numCtx := defaultNumCtx
+	if opts != nil {
+		if opts.Temperature > 0 {
+			temp = opts.Temperature
+		}
+		if opts.NumCtx > 0 {
+			numCtx = opts.NumCtx
+		}
 	}
 
 	req := chatRequest{
 		Model:    model,
 		Messages: msgs,
 		Stream:   false,
-		Options:  map[string]any{"temperature": temp, "num_ctx": chatNumCtx},
+		Options:  map[string]any{"temperature": temp, "num_ctx": numCtx},
 	}
 
 	body, err := json.Marshal(req)
@@ -195,8 +209,14 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 // results back as tool messages.
 func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message, tools []Tool, opts *Options, tokenWriter io.Writer) (Message, error) {
 	temp := DefaultTemperature
-	if opts != nil && opts.Temperature > 0 {
-		temp = opts.Temperature
+	numCtx := defaultNumCtx
+	if opts != nil {
+		if opts.Temperature > 0 {
+			temp = opts.Temperature
+		}
+		if opts.NumCtx > 0 {
+			numCtx = opts.NumCtx
+		}
 	}
 
 	req := struct {
@@ -210,7 +230,7 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		Messages: msgs,
 		Tools:    tools,
 		Stream:   true,
-		Options:  map[string]any{"temperature": temp, "num_ctx": executeNumCtx, "think": false},
+		Options:  map[string]any{"temperature": temp, "num_ctx": numCtx, "think": false},
 	}
 
 	body, err := json.Marshal(req)
