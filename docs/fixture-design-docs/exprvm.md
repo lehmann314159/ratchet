@@ -252,7 +252,16 @@ the first matching rule):
    `TokenEOF` (with no error) — `Next()` never panics or errors at end of
    input.
 8. Any character not matched by rules 1-7 is a lexer error: return a non-nil
-   error and the zero-value `Token`.
+   error and the zero-value `Token`. This error path does NOT advance `pos`
+   past the offending character — `pos` must remain exactly where it was
+   when the error was detected. Consequently, calling `Next()` again on the
+   same `*Lexer` after it has returned an error (with `source` unchanged)
+   encounters the same character at the same position and returns the same
+   error again — it must NOT silently skip past the bad character and
+   return a token computed from further along the string. Worked example:
+   for source `"@"`, two consecutive `Next()` calls each return the same
+   error (e.g. `unexpected character '@' at position 0`); the second call
+   never returns `TokenEOF` or any other token.
 
 **`NewParser(source string) *Parser`** — constructs a parser that creates and
 owns its own `*Lexer` internally, via `NewLexer(source)`. Callers of
@@ -521,6 +530,17 @@ has to re-derive it.
     `Program` containing an `AssignStmt{Name:"x", Value:NumberExpr{Value:0}}`
     (the zero-value `Token`/`Type` trap described in the Behavioral
     Specification's lexer-error-propagation rule).
+15. **`(*Lexer).Next()` does not advance past an unrecognized character**:
+    for a `*Lexer` constructed directly (not through `ParseProgram`) with
+    source `"abc @ def"`, calling `Next()` three times (consuming `"abc"`,
+    then the whitespace-skip-and-`'@'` call, then a third call) — the second
+    call must return a non-nil error and NOT advance `pos` past `'@'`. The
+    third call must repeat the same error (still at `'@'`), NOT return
+    `TokenIdent{Text:"def"}`. (This is the exact case where an
+    unconditional `pos++` before checking which rule matched — rather than
+    only on a matched case — causes an error call to silently consume the
+    bad character, so a later call resumes past it instead of repeating the
+    same error.)
 
 ## Cross-Bead Contracts
 
