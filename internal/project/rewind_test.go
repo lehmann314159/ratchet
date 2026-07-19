@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"ratchet/internal/db"
@@ -402,6 +403,113 @@ func TestRewindBead_SelfHealsInheritedBrokenExitCriteria(t *testing.T) {
 	if len(merged.ExitCriteria) != 1 || merged.ExitCriteria[0] != want {
 		t.Errorf("exit_criteria = %v, want [%q] (asterisk escaped by the mechanical fix, not carried forward broken)",
 			merged.ExitCriteria, want)
+	}
+}
+
+// TestRewindBead_PreservesRevisePendingProseButNotAdjudicatePatches verifies
+// the fix made after the checkers bead-2 "BlockedPieces" incident: rewind
+// used to always revert full_text to revision 1's prose unconditionally,
+// which — since REVISE_PENDING's revisions are legitimate cross-bead learning
+// applied once while a bead is still pending, not the kind of reactive
+// drift rewind is meant to undo — would have silently discarded a genuinely
+// useful REVISE_PENDING addition right alongside any later
+// ADJUDICATE_NEXT_EXECUTION patches. Sets up DECOMPOSE_SPEC (rev1) ->
+// REVISE_PENDING (rev2, different prose) -> ADJUDICATE_NEXT_EXECUTION (rev3,
+// yet more different prose) and verifies the merged post-rewind spec carries
+// rev2's prose, not rev1's, and definitely not rev3's.
+func TestRewindBead_PreservesRevisePendingProseButNotAdjudicatePatches(t *testing.T) {
+	d := openTestDB(t)
+	folder := t.TempDir()
+	seedRewindProject(t, d, 1, folder)
+	ctx := context.Background()
+
+	res, err := d.ExecContext(ctx,
+		`INSERT INTO beads (project_id, status) VALUES (1, 'pending')`)
+	if err != nil {
+		t.Fatalf("seed bead: %v", err)
+	}
+	beadID, _ := res.LastInsertId()
+
+	rev1 := verbs.ParsedBead{
+		Title: "move-generation", FullText: "implement ValidMoves and AllValidMoves",
+		ExecutionBudget: 300, MonitorOverride: "honor",
+		OutputFiles:  []string{"game.go", "game_test.go"},
+		ExitCriteria: []string{"go test -run TestValidMoves ."},
+	}
+	if _, err := d.ExecContext(ctx, `
+		INSERT INTO bead_revisions
+		  (project_id, bead_id, revision_number, full_text, execution_budget,
+		   monitor_override, created_by_verb, created_at)
+		VALUES (1, ?, 1, ?, 300, 'honor', 'DECOMPOSE_SPEC', '2026-01-01T00:00:00Z')`,
+		beadID, mustMarshal(t, rev1)); err != nil {
+		t.Fatalf("seed revision 1: %v", err)
+	}
+
+	// REVISE_PENDING adds a genuinely useful cross-bead note learned from a
+	// sibling bead's success — this is exactly the kind of content that must
+	// survive rewind.
+	rev2 := rev1
+	rev2.FullText = rev1.FullText + " Note: game-state's ApplyMove expects Square{Row,Col} in that field order — match it here."
+	res2, err := d.ExecContext(ctx, `
+		INSERT INTO bead_revisions
+		  (project_id, bead_id, revision_number, full_text, execution_budget,
+		   monitor_override, created_by_verb, created_at)
+		VALUES (1, ?, 2, ?, 300, 'honor', 'REVISE_PENDING', '2026-01-01T00:30:00Z')`,
+		beadID, mustMarshal(t, rev2))
+	if err != nil {
+		t.Fatalf("seed revision 2: %v", err)
+	}
+	rev2ID, _ := res2.LastInsertId()
+	if _, err := d.ExecContext(ctx,
+		`UPDATE beads SET current_revision_id = ? WHERE id = ?`, rev2ID, beadID,
+	); err != nil {
+		t.Fatalf("point bead at revision 2: %v", err)
+	}
+
+	// ADJUDICATE_NEXT_EXECUTION then reacts to a failed execution attempt
+	// with a verbatim patch — this is the content rewind must discard.
+	rev3 := rev2
+	rev3.FullText = rev2.FullText + " RECURRING FAILURE FIX: you MUST implement the occupancy check verbatim as follows: ..."
+	res3, err := d.ExecContext(ctx, `
+		INSERT INTO bead_revisions
+		  (project_id, bead_id, revision_number, full_text, execution_budget,
+		   monitor_override, created_by_verb, created_at)
+		VALUES (1, ?, 3, ?, 300, 'honor', 'ADJUDICATE_NEXT_EXECUTION', '2026-01-01T02:00:00Z')`,
+		beadID, mustMarshal(t, rev3))
+	if err != nil {
+		t.Fatalf("seed revision 3: %v", err)
+	}
+	rev3ID, _ := res3.LastInsertId()
+	if _, err := d.ExecContext(ctx,
+		`UPDATE beads SET current_revision_id = ? WHERE id = ?`, rev3ID, beadID,
+	); err != nil {
+		t.Fatalf("point bead at revision 3: %v", err)
+	}
+
+	if _, err := rewindBead(ctx, d, beadID); err != nil {
+		t.Fatalf("rewindBead: %v", err)
+	}
+
+	var newFullText string
+	if err := d.QueryRowContext(ctx, `
+		SELECT br.full_text FROM beads b
+		JOIN bead_revisions br ON br.id = b.current_revision_id
+		WHERE b.id = ?`, beadID,
+	).Scan(&newFullText); err != nil {
+		t.Fatalf("query post-rewind revision: %v", err)
+	}
+	var merged verbs.ParsedBead
+	if err := json.Unmarshal([]byte(newFullText), &merged); err != nil {
+		t.Fatalf("parse merged spec: %v", err)
+	}
+	if merged.FullText != rev2.FullText {
+		t.Errorf("full_text = %q, want revision 2's (REVISE_PENDING's) prose %q", merged.FullText, rev2.FullText)
+	}
+	if merged.FullText == rev1.FullText {
+		t.Error("full_text reverted all the way to revision 1, discarding REVISE_PENDING's legitimate addition")
+	}
+	if strings.Contains(merged.FullText, "RECURRING FAILURE FIX") {
+		t.Error("full_text still contains ADJUDICATE_NEXT_EXECUTION's patch — it should have been discarded")
 	}
 }
 

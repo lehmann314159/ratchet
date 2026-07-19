@@ -19,11 +19,16 @@ import (
 // RunRewindBeadMain is the entry point for `ratchet rewind-bead`.
 //
 // It resets an escalated (or stuck) bead to a clean state:
-//   - prose (full_text) rolled back to revision 1; everything else (title,
+//   - prose (full_text) rolled back to the most recent revision NOT created
+//     by ADJUDICATE_NEXT_EXECUTION — preserving DECOMPOSE_SPEC/
+//     RECONCILE_DECOMPOSITION/REVISE_PENDING content, discarding only the
+//     reactive patches ADJUDICATE_NEXT_EXECUTION accumulated in response to
+//     this bead's own repeated failures; everything else (title,
 //     output_files, exit_criteria, execution_budget, monitor_override) kept
 //     from the current revision, since those can carry permanent corrections
 //     (a RECONCILE-added missing test file, an ADJUDICATE stray-file cleanup
-//     target, a budget doubled after a timeout) that revision 1 never had
+//     target, a budget doubled after a timeout) that an earlier revision
+//     never had
 //   - execution attempt budget extended by max_execution_attempts
 //   - test files deleted and test_refinements cleared
 //   - impl files replaced with scaffold stubs (always compilable baseline)
@@ -60,7 +65,7 @@ func RunRewindBeadMain(args []string) {
 	fmt.Printf("bead rewound\n")
 	fmt.Printf("  bead-id:        %d\n", *beadID)
 	fmt.Printf("  project-id:     %d\n", result.ProjectID)
-	fmt.Printf("  spec reset to:  revision 1 prose, current revision for everything else\n")
+	fmt.Printf("  spec reset to:  last pre-ADJUDICATE_NEXT_EXECUTION prose, current revision for everything else\n")
 	fmt.Printf("  attempt budget: %d → %d\n", result.BudgetFrom, result.BudgetTo)
 	fmt.Printf("  next verb:      REFINE_TESTS_WRITE\n")
 	if len(result.DeletedTests) > 0 {
@@ -121,15 +126,35 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64) (*rewindResult, err
 		return nil, fmt.Errorf("query project: %w", err)
 	}
 
-	// Find the first (original DECOMPOSE) revision's prose — full_text is the
-	// one field rewind actually needs to restore, since that's what
-	// execute_revised's verbatim patches corrupt over repeated attempts.
-	var firstRevisionFullText string
+	// Find the most recent revision NOT created by ADJUDICATE_NEXT_EXECUTION —
+	// full_text is the one field rewind actually needs to restore, since
+	// that's what execute_revised's verbatim patches corrupt over repeated
+	// attempts. ADJUDICATE_NEXT_EXECUTION is specifically the reactive,
+	// compounding mechanism this is undoing: each of its revisions reacts to
+	// its own prior revision's execution failure, which is how a spec
+	// accumulates increasingly desperate patches (or, as with checkers bead 2,
+	// a misdiagnosed requirement baked in permanently). DECOMPOSE_SPEC,
+	// RECONCILE_DECOMPOSITION, and REVISE_PENDING revisions are not that kind
+	// of thing — REVISE_PENDING in particular only ever revises a bead once,
+	// informationally, while it is still pending, based on a sibling bead's
+	// success, never in reaction to this bead's own failure. Rolling all the
+	// way back to revision 1 unconditionally would discard that legitimate
+	// cross-bead learning right alongside the corrupted content — confirmed
+	// against real history before this change: every bead across the archived
+	// project set that ever accumulated an ADJUDICATE_NEXT_EXECUTION revision
+	// had all of its REVISE_PENDING/RECONCILE_DECOMPOSITION revisions strictly
+	// before that point, never interleaved after (REVISE_PENDING cannot touch
+	// a bead once it leaves 'pending', which happens no later than its first
+	// execution attempt — the earliest an ADJUDICATE_NEXT_EXECUTION revision
+	// could exist).
+	var restoreFullText string
 	if err := d.QueryRowContext(ctx,
-		`SELECT full_text FROM bead_revisions WHERE bead_id = ? ORDER BY revision_number ASC LIMIT 1`,
+		`SELECT full_text FROM bead_revisions
+		 WHERE bead_id = ? AND created_by_verb != 'ADJUDICATE_NEXT_EXECUTION'
+		 ORDER BY revision_number DESC LIMIT 1`,
 		beadID,
-	).Scan(&firstRevisionFullText); err != nil {
-		return nil, fmt.Errorf("find first revision: %w", err)
+	).Scan(&restoreFullText); err != nil {
+		return nil, fmt.Errorf("find last pre-adjudication revision: %w", err)
 	}
 
 	// Load the current (pre-rewind) revision's full_text plus its real
@@ -162,8 +187,8 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64) (*rewindResult, err
 		return nil, fmt.Errorf("load current revision: %w", err)
 	}
 
-	var firstSpec, currentSpec verbs.ParsedBead
-	if err := json.Unmarshal([]byte(firstRevisionFullText), &firstSpec); err != nil {
+	var restoreSpec, currentSpec verbs.ParsedBead
+	if err := json.Unmarshal([]byte(restoreFullText), &restoreSpec); err != nil {
 		return nil, fmt.Errorf("parse first revision: %w", err)
 	}
 	if err := json.Unmarshal([]byte(currentRevisionFullText), &currentSpec); err != nil {
@@ -171,12 +196,13 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64) (*rewindResult, err
 	}
 
 	// Merge: default to the current revision for every field, then revert
-	// only full_text (prose) to revision 1. Keep the JSON blob's own
+	// only full_text (prose) to the last pre-ADJUDICATE_NEXT_EXECUTION
+	// revision found above. Keep the JSON blob's own
 	// execution_budget/monitor_override fields in sync with the real DB
 	// columns written below, so the stored spec text never disagrees with
 	// the actual effective values.
 	mergedSpec := currentSpec
-	mergedSpec.FullText = firstSpec.FullText
+	mergedSpec.FullText = restoreSpec.FullText
 	mergedSpec.ExecutionBudget = currentExecutionBudget
 	mergedSpec.MonitorOverride = currentMonitorOverride
 
