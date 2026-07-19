@@ -2,21 +2,34 @@
 
 ## Overview
 
-A single-page web REPL for the same small integer expression language exprvm
-compiles (arithmetic + variables + `print`, no control flow), served over
-HTTP instead of a CLI. A visitor types one line into a text box, submits it,
-and sees it added to a running transcript showing every line typed so far and
-its result. Variables persist across submissions within the same server run —
-assigning `x` on one submission and reading it on a later one works, exactly
-like a real REPL/shell history.
+A web REPL for the same small integer expression language exprvm compiles
+(arithmetic + variables + `print`, no control flow), served over HTTP instead
+of a CLI. There is exactly one route a visitor ever loads (`GET /`) and one
+form they submit to (`POST /eval`). Submissions are handled via HTMX
+fragment updates, not a full page reload and not a hand-written custom
+JavaScript layer: the form posts via `hx-post`, and the response — a
+re-rendered fragment containing the updated transcript and a fresh, empty
+input — is swapped into the page in place (see Behavioral Specification's
+Templates section for the exact swap wiring). The only JavaScript anywhere
+in this project is the single inline call HTMX itself generates from an
+`hx-on` attribute, used to scroll the newest transcript entry into view; see
+Templates below for its exact form. A visitor types one line into the text
+box, submits it, and — without the page navigating away — sees it added to a
+running transcript showing every line typed so far and its result. Variables
+persist across submissions within the same server run — assigning `x` on one
+submission and reading it on a later one works, exactly like a real
+REPL/shell history.
 
 This is a from-scratch reimplementation of exprvm's language, not a code
 import of the exprvm project — every type and function below is fully
 specified in this document; nothing is assumed carried over from exprvm.md.
-Out of scope: floating-point numbers, control flow (no `if`, no loops, no
-functions/procedures), comments in source, string or boolean types, a
-disassembler, per-browser/per-user sessions (see Domain Parameters), state
-that survives a server restart (in-memory only), and submitting more than one
+Each transcript entry also shows the disassembled bytecode `Compile`
+produced for that submission, alongside its `Output`/`Err` — see Behavioral
+Specification's `Disassemble` and the Templates section for the exact
+format. Out of scope: floating-point numbers, control flow (no `if`, no
+loops, no functions/procedures), comments in source, string or boolean
+types, per-browser/per-user sessions (see Domain Parameters), state that
+survives a server restart (in-memory only), and submitting more than one
 statement in a single text-box submission (see Domain Parameters).
 
 **Domain parameters:**
@@ -83,7 +96,7 @@ exprvm-web/
 ├── env.go        — Environment, NewEnvironment
 ├── vm.go         — VM, NewVM, (*VM).Run
 ├── handlers.go   — HistoryEntry, PageData, HandleIndex, HandleEval
-├── templates.go  — InitTemplates, RenderIndex
+├── templates.go  — InitTemplates, RenderIndex, RenderRepl
 └── *_test.go     — one test file per source file above, plus integration_test.go
 ```
 
@@ -103,16 +116,16 @@ All `.go` files use `package main` at the project root — no subdirectories.
   `VM` references, and performs NO variable-definedness checking (that check
   moved to `compiler.go` — see Behavioral Specification for why).
 - `compiler.go` contains: `OpCode` and its constants, `Instruction`,
-  `CompiledProgram`, `Compile`. Does NOT reference `Token`, `TokenType`, or
-  `*Lexer`.
+  `CompiledProgram`, `Compile`, `Disassemble`. Does NOT reference `Token`,
+  `TokenType`, or `*Lexer`.
 - `env.go` contains: `Environment`, `NewEnvironment`. No compiling or
   executing logic — purely the persistent-state type.
 - `vm.go` contains: `VM`, `NewVM`, `(*VM).Run`. Does NOT reference any AST
   type — operates purely on `[]Instruction` plus `*Environment`.
 - `handlers.go` contains: `HistoryEntry`, `PageData`, `HandleIndex`,
   `HandleEval`. No template-parsing logic.
-- `templates.go` contains: `InitTemplates`, `RenderIndex`. No handler
-  functions, no type declarations.
+- `templates.go` contains: `InitTemplates`, `RenderIndex`, `RenderRepl`. No
+  handler functions, no type declarations.
 - Do NOT put `HandleIndex` or `HandleEval` in `templates.go`.
 - Do NOT put `HistoryEntry` or `PageData` in `templates.go` — they belong in
   `handlers.go`.
@@ -239,6 +252,12 @@ type CompiledProgram struct {
 // Compile mutates env: it may register a new slot for an AssignStmt's Name.
 func Compile(stmt Stmt, env *Environment) (*CompiledProgram, error)
 
+// Disassemble returns one formatted mnemonic string per instruction in cp,
+// in order — see Behavioral Specification for the exact per-opcode format.
+// env is used only to reverse-look-up a slot index's variable name for
+// OpLoad/OpStore; it is never mutated.
+func Disassemble(cp *CompiledProgram, env *Environment) []string
+
 // ---- env.go ----
 
 // Environment is the persistent, cross-submission variable state. It is
@@ -267,10 +286,12 @@ func (vm *VM) Run(cp *CompiledProgram, env *Environment, out io.Writer) error
 
 // HistoryEntry is one past submission and its result, for transcript display.
 type HistoryEntry struct {
-    Input  string // the raw text the user submitted
-    Output string // the printed value, if any; "" if the statement produced
-                   // no output (a successful assignment) or if Err is non-empty
-    Err    string // "" on success; the error message on failure
+    Input    string // the raw text the user submitted
+    Output   string // the printed value, if any; "" if the statement produced
+                     // no output (a successful assignment) or if Err is non-empty
+    Err      string // "" on success; the error message on failure
+    Bytecode string // Disassemble's output lines joined with "\n"; "" if
+                     // Compile never ran or never succeeded for this submission
 }
 
 // PageData is passed to the "index" template.
@@ -285,6 +306,10 @@ func HandleEval(w http.ResponseWriter, r *http.Request)
 
 func InitTemplates() *template.Template
 func RenderIndex(w http.ResponseWriter, data PageData)
+
+// RenderRepl executes the "repl" fragment template only (not the full
+// "index" page) — this is what HandleEval writes as its response body.
+func RenderRepl(w http.ResponseWriter, data PageData)
 
 // ---- main.go ----
 
@@ -302,6 +327,7 @@ var _ func(*Lexer) (Token, error) = (*Lexer).Next
 var _ func(string) *Parser = NewParser
 var _ func(*Parser) (*Program, error) = (*Parser).ParseProgram
 var _ func(Stmt, *Environment) (*CompiledProgram, error) = Compile
+var _ func(*CompiledProgram, *Environment) []string = Disassemble
 var _ func() *Environment = NewEnvironment
 var _ func() *VM = NewVM
 var _ func(*VM, *CompiledProgram, *Environment, io.Writer) error = (*VM).Run
@@ -309,6 +335,7 @@ var _ func(http.ResponseWriter, *http.Request) = HandleIndex
 var _ func(http.ResponseWriter, *http.Request) = HandleEval
 var _ func() *template.Template = InitTemplates
 var _ func(http.ResponseWriter, PageData) = RenderIndex
+var _ func(http.ResponseWriter, PageData) = RenderRepl
 ```
 
 ## Behavioral Specification
@@ -342,7 +369,16 @@ the first matching rule):
    again after `TokenEOF` has already been returned also returns `TokenEOF`
    (no error).
 8. Any character not matched by rules 1-7 is a lexer error: return a non-nil
-   error and the zero-value `Token`.
+   error and the zero-value `Token`. This error path does NOT advance `pos`
+   past the offending character — `pos` must remain exactly where it was
+   when the error was detected. Consequently, calling `Next()` again on the
+   same `*Lexer` after it has returned an error (with `source` unchanged)
+   encounters the same character at the same position and returns the same
+   error again — it must NOT silently skip past the bad character and
+   return a token computed from further along the string. Worked example:
+   for source `"@"`, two consecutive `Next()` calls each return the same
+   error (e.g. `unexpected character '@' at position 0`); the second call
+   never returns `TokenEOF` or any other token.
 
 **`NewParser(source string) *Parser`** — constructs a parser that creates and
 owns its own `*Lexer` internally, via `NewLexer(source)`.
@@ -517,6 +553,43 @@ defensible design and must not be left for an implementer to guess.
   separate opcode or VM behavior for a bare expression; the distinction
   exists only in the parser's AST, not in the bytecode or the VM.
 
+**`Disassemble(cp *CompiledProgram, env *Environment) []string`** — returns
+one formatted string per instruction in `cp.Instructions`, in the same order,
+using **exactly** these mnemonics (a fixed lookup from `OpCode` to name — not
+illustrative, these exact strings are asserted on by the Required Test
+Scenario below): `OpPushConst`→`"PUSH_CONST"`, `OpLoad`→`"LOAD"`,
+`OpStore`→`"STORE"`, `OpAdd`→`"ADD"`, `OpSub`→`"SUB"`, `OpMul`→`"MUL"`,
+`OpDiv`→`"DIV"`, `OpNeg`→`"NEG"`, `OpPrint`→`"PRINT"`. Per-instruction
+format:
+- `OpPushConst`: mnemonic, one space, the decimal `Operand` value — e.g.
+  `"PUSH_CONST 10"`.
+- `OpLoad`/`OpStore`: mnemonic, one space, the **variable name**, not the
+  raw slot index — reverse-look-up `Operand` against `env.Slots` (the map is
+  name→index; scan it for the entry whose value equals `Operand`) and use
+  that name — e.g. `"LOAD x"`, never `"LOAD 0"`. This reverse lookup is
+  always well-defined: `Compile` only ever emits an `OpLoad`/`OpStore` whose
+  `Operand` came from an existing `env.Slots` entry (per the variable
+  resolution algorithm), so every slot index `Disassemble` encounters has
+  exactly one matching name. `env` may be in any state at least as new as it
+  was immediately after the `Compile` call that produced `cp` — slot-to-name
+  mappings are permanent once registered and never reassigned, so calling
+  `Disassemble` before or after `Run`, or after later submissions have
+  registered further unrelated slots, makes no difference to this lookup.
+- All other opcodes (`OpAdd`, `OpSub`, `OpMul`, `OpDiv`, `OpNeg`, `OpPrint`):
+  the mnemonic alone, with **no trailing operand text at all** — e.g.
+  `"ADD"`, never `"ADD 0"`. These opcodes' `Operand` field is unused (always
+  the zero value); printing it would misleadingly look like a meaningful
+  operand.
+
+Worked example: for source `"x=10"` (compiled against an `env` where `x` is
+a new slot, index 0), `Compile` produces instructions
+`[OpPushConst(10), OpStore(0)]`, and `Disassemble` returns
+`["PUSH_CONST 10", "STORE x"]`. For `"print(x+1)"` in the same `env` (`x`
+already registered at slot 0), `Compile` produces
+`[OpLoad(0), OpPushConst(1), OpAdd, OpPrint]`, and `Disassemble` returns
+`["LOAD x", "PUSH_CONST 1", "ADD", "PRINT"]` — note `"ADD"` has no trailing
+`0`.
+
 **`NewEnvironment() *Environment`** — returns
 `&Environment{Slots: map[string]int{}, Values: []int64{}}` (empty map, empty
 slice — not nil for either field).
@@ -564,61 +637,120 @@ Acquires `mu`, reads `history` into a local copy, releases `mu`, then calls
 `RenderIndex(w, PageData{History: <the copy>})`.
 
 **`HandleEval(w http.ResponseWriter, r *http.Request)`** — serves `POST
-/eval`. Reads form field `input` (`r.FormValue("input")`). If it is the empty
-string after no trimming is applied (exactly `""`), do not call `NewParser`
-at all — acquire `mu`, append `HistoryEntry{Input: "", Err: "input was
-empty"}` to `history`, release `mu`, then redirect (see below). This is the
-one input-validation branch the web layer handles itself, before the
-compiler pipeline, matching `ParseProgram`'s own "empty submission is a
-parse error" rule but avoiding constructing a `*Lexer`/`*Parser` for a case
-already known to fail. Otherwise, acquire `mu` for the remainder of this
-handler (covering every read and write of `env` and `history` below, so no
-other request can interleave), and run the fixed pipeline:
-1. Call `NewParser(input).ParseProgram()`. On a non-nil error, append
-   `HistoryEntry{Input: input, Err: <the error's message>}` to `history`
-   (Output stays `""`), release `mu`, redirect.
-2. Otherwise call `Compile(prog.Statements[0], env)`. On a non-nil error,
-   append `HistoryEntry{Input: input, Err: <the error's message>}`, release
-   `mu`, redirect. (Per the variable resolution algorithm, `env` may still be
-   unchanged or may have been mutated up through the point of failure —
-   `Compile`'s own rules above define exactly which mutations, if any,
-   persist.)
-3. Otherwise construct a `strings.Builder` as `out`, call
-   `NewVM().Run(cp, env, &out)`. On a non-nil error, append
-   `HistoryEntry{Input: input, Err: <the error's message>}` (Output stays
-   `""` — per the "zero bytes written before a runtime error" rule above,
-   `out`'s builder is guaranteed empty in this branch). On a nil error,
-   append `HistoryEntry{Input: input, Output: <out.String(), with its
-   trailing '\n' trimmed>, Err: ""}`.
-4. Release `mu`. Redirect the client to `GET /` with
-   `http.Redirect(w, r, "/", http.StatusSeeOther)` (a 303, not a 302 — so the
-   browser re-requests with GET regardless of how it got here, avoiding a
-   double-submit on refresh).
+/eval`, the endpoint HTMX's `hx-post` targets. Reads form field `input`
+(`r.FormValue("input")`). Acquires `mu` for the remainder of this handler
+(covering every read and write of `env` and `history`, through building the
+local `history` snapshot below — not just around `Run` — so no other
+request can interleave). Runs the fixed pipeline below, appending **exactly
+one** `HistoryEntry` to `history` regardless of which branch is taken:
+- If `input` is the empty string (exactly `""`, no trimming applied), append
+  `HistoryEntry{Input: "", Err: "input was empty"}` — do not call
+  `NewParser` at all. This is the one input-validation branch the web layer
+  handles itself, matching `ParseProgram`'s own "empty submission is a parse
+  error" rule but avoiding constructing a `*Lexer`/`*Parser` for a case
+  already known to fail.
+- Otherwise call `NewParser(input).ParseProgram()`. On a non-nil error,
+  append `HistoryEntry{Input: input, Err: <the error's message>}` (Output
+  stays `""`).
+- Otherwise call `Compile(prog.Statements[0], env)`. On a non-nil error,
+  append `HistoryEntry{Input: input, Err: <the error's message>}` (`Bytecode`
+  stays `""` — nothing was compiled). (Per the variable resolution
+  algorithm, `env` may still be unchanged or may have been mutated up
+  through the point of failure — `Compile`'s own rules above define exactly
+  which mutations, if any, persist.)
+- Otherwise call `Disassemble(cp, env)` and join its lines with `"\n"` —
+  call this `bytecodeText`. This happens regardless of what `Run` does next;
+  a `CompiledProgram` that later fails at runtime is still disassembled and
+  shown (see Domain Parameters — showing the bytecode is not conditioned on
+  successful execution). Then construct a `strings.Builder` as `out`, call
+  `NewVM().Run(cp, env, &out)`. On a non-nil error, append
+  `HistoryEntry{Input: input, Err: <the error's message>, Bytecode:
+  bytecodeText}` (`Output` stays `""` — per the "zero bytes written before a
+  runtime error" rule above, `out`'s builder is guaranteed empty in this
+  branch). On a nil error, append `HistoryEntry{Input: input, Output:
+  <out.String(), with its trailing '\n' trimmed>, Err: "", Bytecode:
+  bytecodeText}`.
 
-**`InitTemplates() *template.Template`** — parses an inline Go string literal
-(no external `.html` files) defining one named template, `"index"`. Must
-panic on a parse failure (mirrors every other fixture's `InitTemplates`
-convention).
+After exactly one `HistoryEntry` has been appended, copy `history` into a
+local slice, release `mu`, then call
+`RenderRepl(w, PageData{History: <the local copy>})` — this writes the
+`"repl"` fragment (HTTP 200) as the entire response body. There is no
+redirect anywhere in this handler; this response body **is** the AJAX
+response HTMX swaps into `#repl-container` (see Templates below). This
+holds for every branch above, success or error alike — the fragment always
+reflects the just-updated `history`, including the newest entry's `Err` if
+it failed.
+
+**`InitTemplates() *template.Template`** — parses inline Go string literals
+(no external `.html` files) defining exactly two named templates, `"repl"`
+and `"index"`. Must panic on a parse failure (mirrors every other fixture's
+`InitTemplates` convention).
 
 **`RenderIndex(w http.ResponseWriter, data PageData)`** — executes the
-`"index"` template with `data`, writing to `w`.
+`"index"` template with `data`, writing to `w`. Called only by `HandleIndex`.
 
-**Templates** — the `"index"` template renders: an `<h1>` title, a `<form
-method="POST" action="/eval">` containing one `<input type="text"
-name="input">` and a submit button, and below it the transcript: iterate
-`.History` in order (oldest first — the order they were appended, so newest
-is last/at the bottom, like a terminal scrollback), rendering each entry as
-one block showing the entry's `Input`, then either its `Output` (if `Err` is
-empty) or, if `Err` is non-empty, `Err` rendered inside an element with
-**exactly** `class="error"` (e.g. `<div class="error">{{.Err}}</div>`) — this
-exact class name is required, not illustrative; it is asserted on literally
-by the integration bead below. This is
-a full-page server-rendered response on every load — no HTMX, no JavaScript,
-no partial-page fragment updates; `POST /eval` always redirects to a full
-`GET /` reload. (This is a deliberate simplicity choice: it removes an entire
-class of fragment-swap-scope risk that HTMX-based fixture projects have
-had to account for, at the cost of a full page reload per submission — an
-acceptable tradeoff for a single-operator demo.)
+**`RenderRepl(w http.ResponseWriter, data PageData)`** — executes the
+`"repl"` template with `data`, writing to `w`. Called only by `HandleEval`.
+
+**Templates** — two named templates:
+
+- **`"repl"`** is the entire piece of dynamic content, wrapped in one
+  `<div id="repl-container">`. This is the only template `HandleEval` ever
+  renders, and it is also embedded once inside `"index"` for the initial
+  page load — the same template produces both the first paint and every
+  subsequent update, so there is exactly one place that defines what the
+  dynamic UI looks like. Inside `#repl-container`:
+  - The input form:
+    `<form hx-post="/eval" hx-target="#repl-container" hx-swap="outerHTML" hx-on::htmx:after-swap="document.getElementById('latest-entry').scrollIntoView()">`
+    containing one `<input type="text" name="input" autofocus>` and one
+    `<button type="submit">Run</button>`. The button must be a real
+    `type="submit"` element (never `type="button"` with a click handler) —
+    this is what makes pressing Enter in the input submit the form via
+    ordinary HTML semantics, with no JavaScript involved in that part at
+    all.
+  - Below the form, the transcript: iterate `.History` in order (oldest
+    first — the order they were appended, so newest is last/at the bottom,
+    like a terminal scrollback), rendering each entry as one block showing,
+    in this order: the entry's `Input`; then, if `.Bytecode` is non-empty, the
+    bytecode listing inside a `<pre>` element (e.g. `<pre>{{.Bytecode}}</pre>`
+    — `<pre>` is required, not stylistic, since `Bytecode` is `"\n"`-joined
+    and its line breaks must render as line breaks, not collapse into one
+    line the way ordinary HTML whitespace handling would); then either its
+    `Output` (if `Err` is empty) or, if `Err` is non-empty, `Err` rendered
+    inside an element with **exactly** `class="error"` (e.g.
+    `<div class="error">{{.Err}}</div>`) — this exact class name is
+    required, not illustrative; it is asserted on literally by the
+    integration bead below. If `.Bytecode` is empty (the submission never
+    reached a successful `Compile`), the `<pre>` element is omitted entirely
+    for that entry, not rendered empty.
+  - Immediately after the **last** rendered entry (i.e. after the whole
+    `{{range .History}}` loop, not after each individual entry), one empty
+    marker element: `<div id="latest-entry"></div>`. This is the
+    `scrollIntoView()` target named in the form's `hx-on` attribute above —
+    placing it after the loop, not inside it, means it always sits right
+    after whichever entry is newest, regardless of how many entries exist.
+- **`"index"`** is the full HTML page: a `<head>` containing
+  `<script src="https://unpkg.com/htmx.org@1.9.12"></script>`, and a
+  `<body>` containing an `<h1>` title followed by `{{template "repl" .}}`.
+
+**Swap mechanics, stated precisely**: every `POST /eval` response is a
+complete re-render of `#repl-container` — form and transcript together —
+swapped in via `hx-swap="outerHTML"`. Because the form itself is part of
+the swapped content, and the template always renders the input with an
+empty value (there is no "value so far" field anywhere in `PageData`), the
+input box is cleared on every submission for free — no JavaScript is needed
+for that part. The **only** JavaScript in this entire project is the single
+inline `scrollIntoView()` call generated from the `hx-on::htmx:after-swap`
+attribute above; there is no separate `<script>` block containing
+hand-written logic, and no client-side code beyond what HTMX itself
+generates from that one attribute. HTMX automatically re-wires `hx-*`
+attributes on newly swapped-in content, so the freshly rendered form (which
+re-declares the same `hx-post`/`hx-target`/`hx-swap`/`hx-on` attributes) is
+fully live again immediately after each swap — this is the same
+self-perpetuating pattern chess.md's `#board-container` already uses in
+this project, not a novel mechanism. **All of this project's dynamic state
+(the form and the transcript) lives inside `#repl-container` — nothing
+dynamic renders outside it.**
 
 **`main()`** — initializes `env = NewEnvironment()`, `history =
 []HistoryEntry{}`, `templates = InitTemplates()`, registers `GET /` →
@@ -683,11 +815,39 @@ acceptable tradeoff for a single-operator demo.)
     reached.
 16. **Two submissions in sequence via real HTTP requests** (integration-level,
     not just library-level): `POST /eval` with `input=x=5`, then `POST
-    /eval` with `input=print(x*2)` — assert the second response, after
-    following the redirect to `GET /`, renders `"10"` somewhere in the
-    transcript. This is the end-to-end confirmation that persistence works
-    through the real handler chain, not just through directly-called Go
-    functions in a unit test.
+    /eval` with `input=print(x*2)` — assert the **second response body
+    itself** (there is no redirect to follow — `HandleEval` always returns
+    the rendered `"repl"` fragment directly, HTTP 200) contains `"10"`
+    somewhere in the transcript. This is the end-to-end confirmation that
+    persistence works through the real handler chain, not just through
+    directly-called Go functions in a unit test.
+17. **Every `POST /eval` response contains a fresh, empty input regardless of
+    outcome**: submitting `"x=5"` (success) and, separately, submitting
+    `"z=z+1"` (a `Compile` error, per scenario 10) — both response bodies
+    must render `<input type="text" name="input"` with no `value` attribute
+    set to the submitted text (i.e. the rendered input is always empty,
+    success or failure alike, since `PageData` never threads the submitted
+    string back into the form).
+18. **`(*Lexer).Next()` does not advance past an unrecognized character**:
+    for a `*Lexer` constructed directly (not through `ParseProgram`) with
+    source `"abc @ def"`, calling `Next()` three times — the second call
+    (after consuming `"abc"` and skipping the following space) must return
+    a non-nil error for `'@'` and NOT advance `pos` past it. The third call
+    must repeat the same error, NOT return `TokenIdent{Text:"def"}`. (This
+    is the exact case where an unconditional `pos++` before checking which
+    rule matched — rather than only on a matched case — causes an error
+    call to silently consume the bad character, so a later call resumes
+    past it instead of repeating the same error.)
+19. **Disassembly mnemonics and operand formatting, exact strings**: for
+    source `"x=10"` compiled against a fresh `Environment` (so `x` is a new
+    slot, index 0), `Disassemble` must return exactly
+    `["PUSH_CONST 10", "STORE x"]` — NOT `["PUSH_CONST 10", "STORE 0"]`
+    (raw slot index instead of variable name). For source `"print(x+1)"` in
+    the same (now-populated) `Environment`, `Disassemble` must return
+    exactly `["LOAD x", "PUSH_CONST 1", "ADD", "PRINT"]` — the no-operand
+    opcodes (`ADD`, `PRINT`) must have no trailing number; `"ADD 0"` is
+    wrong, since `Instruction.Operand` is unused and zero-valued for these
+    opcodes, not a real operand.
 
 ## Cross-Bead Contracts
 
@@ -743,16 +903,23 @@ acceptable tradeoff for a single-operator demo.)
 - **interface**: `NewParser(source string) *Parser`,
   `(*Parser).ParseProgram() (*Program, error)`,
   `Compile(stmt Stmt, env *Environment) (*CompiledProgram, error)`,
+  `Disassemble(cp *CompiledProgram, env *Environment) []string`,
   `NewVM() *VM`,
   `(*VM).Run(cp *CompiledProgram, env *Environment, out io.Writer) error`
 - **notes**: `HandleEval` must call these in the fixed order `ParseProgram`
-  → `Compile` → `Run`, stopping at the first non-nil error, and must acquire
-  `mu` for the entire duration from reading `env`/`history` through writing
-  the new `HistoryEntry` — not just around the `Run` call — so that two
-  concurrent requests can never interleave their reads/writes of `env`.
-  `Compile` is always called with the package-level `env`, never a
+  → `Compile` → `Disassemble` → `Run`, stopping at the first non-nil error
+  from `ParseProgram`/`Compile` (both `Disassemble` and `Run` are only
+  reached once `Compile` has already succeeded, and `Disassemble` runs
+  regardless of what `Run` later does), and must acquire `mu` for the
+  entire duration from reading `env`/`history` through appending the new
+  `HistoryEntry` **and through copying `history` into the local snapshot
+  passed to `RenderRepl`** — not just around the `Run` call, and not
+  released right after the append — so that two concurrent requests can
+  never interleave their reads/writes of `env`. `Compile` and
+  `Disassemble` are always called with the package-level `env`, never a
   locally-constructed `*Environment` (that would defeat cross-submission
-  persistence entirely).
+  persistence entirely, and would make `Disassemble`'s name lookups
+  incomplete or wrong).
 
 ### handlers → templates (data-shape)
 
@@ -761,12 +928,24 @@ acceptable tradeoff for a single-operator demo.)
 - **consumer**: templates (templates.go)
 - **interface**: `PageData{History []HistoryEntry}`,
   `HistoryEntry{Input, Output, Err string}`
-- **notes**: the `"index"` template iterates `.History` in slice order
+- **notes**: both `"repl"` and `"index"` iterate `.History` in slice order
   (oldest first). Each entry with a non-empty `Err` must render inside an
   element with exactly `class="error"` — this exact literal class name is
   required (not illustrative), since the integration bead below asserts on
-  it directly. There is no HTMX fragment target — the whole page re-renders
-  on every `GET /`, so there is no partial-update scope to specify.
+  it directly. **HTMX fragment-swap scope**: `HandleEval`'s `hx-target` is
+  `#repl-container`, `hx-swap` is `outerHTML` — every piece of UI state that
+  changes after a submission (the transcript **and** the input form itself)
+  must render inside `#repl-container`; nothing dynamic may live outside it.
+  This is the same swap-scope discipline chess.md's `#board-container`
+  contract already required in this project — the failure mode if violated
+  is silent: content outside the swap target simply stops updating after
+  the first submission, with no build or runtime error. The `"repl"`
+  template *definition* is executed both directly by the `RenderRepl` Go
+  function (`HandleEval`'s AJAX response) and, indirectly, when `"index"`
+  itself executes `{{template "repl" .}}` during `RenderIndex`'s initial
+  page load — `RenderIndex` never calls the Go function `RenderRepl`; the
+  template engine invokes the shared `"repl"` definition internally either
+  way. Both paths pass the same `PageData` shape into the `"repl"` template.
 
 ## Decomposition Notes
 
@@ -780,9 +959,18 @@ acceptable tradeoff for a single-operator demo.)
    in Behavioral Specification's "Statement dispatch."
 3. **env**: `Environment`, `NewEnvironment`. No dependencies on any other
    bead — pure data type.
-4. **compiler**: `OpCode`, `Instruction`, `CompiledProgram`, `Compile`. Takes
-   a `Stmt` (bead 2's output type) and a `*Environment` (bead 3's type) as
-   input. Does not call anything from lexer or vm.
+4. **compiler**: `OpCode`, `Instruction`, `CompiledProgram`, `Compile`,
+   `Disassemble`. Takes a `Stmt` (bead 2's output type) and a `*Environment`
+   (bead 3's type) as input. Does not call anything from lexer or vm.
+   **This bead's test file must include explicit cases for the exact
+   disassembly strings, not just the general mnemonic-naming rule**: for
+   `"x=10"`, `Disassemble` must return exactly
+   `["PUSH_CONST 10", "STORE x"]`; for `"print(x+1)"` (same env, `x` already
+   registered), exactly `["LOAD x", "PUSH_CONST 1", "ADD", "PRINT"]` — note
+   `"ADD"` and `"PRINT"` carry no trailing operand. These exact strings must
+   appear in this bead's spec verbatim — do not rely on the general
+   opcode-to-mnemonic table alone and leave REFINE_TESTS_WRITE to re-derive
+   the operand-omission-on-no-operand-opcodes rule itself.
 5. **vm**: `VM`, `NewVM`, `(*VM).Run`. Takes a `*CompiledProgram` (bead 4's
    output type) and a `*Environment` (bead 3's type) as input. Does not
    reference any type from parser or lexer. **This bead's test file must
@@ -801,15 +989,16 @@ acceptable tradeoff for a single-operator demo.)
    after bead 6, since it references `HandleIndex`/`HandleEval`.
 
 **Integration bead scenarios** (bounded — one fixed scenario each):
-- Using `httptest.NewServer`, `POST /eval` with `input=x=5`, follow the
-  redirect, then `POST /eval` with `input=print(x*2)`, follow the redirect,
-  and assert the final `GET /` response body contains `"10"` — confirming
+- Using `httptest.NewServer`, `POST /eval` with `input=x=5` (assert HTTP 200,
+  no redirect), then `POST /eval` with `input=print(x*2)`, and assert the
+  **second response body directly** contains `"10"` — confirming
   cross-request variable persistence through the real handler chain, not
   just directly-called Go functions.
 - A second, separate integration bead for the error path: `POST /eval` with
-  `input=print(1/0)`, follow the redirect, and assert the response body
-  contains an element with exactly `class="error"` whose text includes
-  `"division by zero"`.
+  `input=print(1/0)`, and assert the response body (HTTP 200, not a redirect
+  or a 4xx/5xx — a compile/runtime error in the *evaluated expression* is
+  not an HTTP-level error) contains an element with exactly `class="error"`
+  whose text includes `"division by zero"`.
 
 **Must not bind to a fixed port in tests** — use `httptest.NewServer`
 throughout, never `http.ListenAndServe` directly in a test.
@@ -820,9 +1009,11 @@ exactly `cp.Instructions`' slice order. Do not add a program-counter field or
 jump opcodes.
 
 **`sync.Mutex` scope**: `mu` must be held for the entire body of `HandleEval`
-from the point `env`/`history` are first touched to the point the new
-`HistoryEntry` is appended — not narrowly scoped around just the `Run` call —
-and for the read of `history` in `HandleIndex`. A narrower lock scope in
+from the point `env`/`history` are first touched through appending the new
+`HistoryEntry` **and through copying `history` into the local snapshot
+passed to `RenderRepl`** — not narrowly scoped around just the `Run` call,
+and not released immediately after the append — and for the read of
+`history` in `HandleIndex`. A narrower lock scope in
 `HandleEval` (e.g. only around `vm.Run`) would still allow two concurrent
 requests to interleave their `Compile` calls against the same `env`, corrupting
 slot registration.
