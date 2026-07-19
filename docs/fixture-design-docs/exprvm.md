@@ -614,6 +614,13 @@ has to re-derive it.
    lexer or vm.
 4. **vm**: `VM`, `NewVM`, `(*VM).Run`. Takes a `*CompiledProgram` (bead 3's
    output type) as input. Does not reference any type from parser or lexer.
+   **This bead's test file must include explicit cases for all four
+   division sign combinations, not just the positive case**: `7/2`=3,
+   `-7/2`=-3 (NOT -4), `7/-2`=-3 (NOT -4), `-7/-2`=3. Division-truncation
+   direction is easy to get backwards, and the specific values must appear
+   in this bead's spec verbatim — do not rely on the general "truncating
+   toward zero" rule alone and leave REFINE_TESTS_WRITE to re-derive the
+   negative-operand cases itself.
 5. **cli** (main.go): wires beads 1-4 together in `main()`. Must be
    decomposed last, since its exit-code/error-prefix behavior depends on the
    final signatures of `ParseProgram`, `Compile`, and `Run`.
