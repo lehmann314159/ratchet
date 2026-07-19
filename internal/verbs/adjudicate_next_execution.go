@@ -421,6 +421,29 @@ func missingPathNote(ctx context.Context, d *db.DB, beadID int64) string {
 // which includes the "/" for subtests (e.g. "TestPlaceStone/KoCreation").
 var reFailedTestName = regexp.MustCompile(`(?m)^\s*--- FAIL: (\S+)`)
 
+// Go-specific: parses `go test -v` output text directly (the "=== RUN"/
+// "--- FAIL:" convention below). When ratchet supports additional languages,
+// this and recurringTestFailureNote's regex-based parsing will need a
+// per-language equivalent (pytest, cargo test, jest, ... each have their own
+// failure-output format) — revisit consolidating this into a generic
+// mechanical-checks section at that point rather than duplicating per language.
+
+// extractTestOutput returns the free-text output (t.Errorf/t.Log lines) a
+// specific named (sub)test printed between its "=== RUN   <name>" line and
+// the next test boundary in `go test -v` output. Empty if not found.
+func extractTestOutput(findings, testName string) string {
+	pattern := `(?s)=== RUN\s+` + regexp.QuoteMeta(testName) + `\s*\n(.*?)(?:\n=== RUN|\n--- (?:FAIL|PASS):|\nPASS\n|\nFAIL\n|\z)`
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return ""
+	}
+	m := re.FindStringSubmatch(findings)
+	if len(m) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(m[1])
+}
+
 // recurringTestFailureNote detects the pattern behind the [REFINE_TESTS bead]
 // guidance below: the same named subtest failing identically across the last
 // two attempts that actually revised the implementation. That guidance was
@@ -433,6 +456,16 @@ var reFailedTestName = regexp.MustCompile(`(?m)^\s*--- FAIL: (\S+)`)
 // (excludes orientation-only or compile-failure attempts, which produce no
 // meaningful --- FAIL lines or share stub-vs-stub failures that aren't
 // evidence the test itself is broken).
+//
+// A shared failing name alone is ambiguous — it's equally consistent with
+// "the implementation keeps making the same mistake" and "the test can't be
+// satisfied." When the two attempts' captured failure *text* is also
+// byte-identical despite genuinely different implementation code, that's much
+// stronger: two independently regenerated implementations converging on the
+// exact same output is far more likely to mean the code is correct and the
+// test's expectation is wrong, than that both attempts made the identical
+// mistake. That case gets its own, more assertive note instead of leaving the
+// distinction to the model's judgment.
 func recurringTestFailureNote(ctx context.Context, d *db.DB, beadID int64) string {
 	rows, err := d.QueryContext(ctx, `
 		SELECT e.trace_path, a.mechanical_findings
@@ -446,6 +479,7 @@ func recurringTestFailureNote(ctx context.Context, d *db.DB, beadID int64) strin
 	defer rows.Close()
 
 	var failNames []map[string]bool
+	var findingsByAttempt []string
 	for rows.Next() && len(failNames) < 2 {
 		var tracePath, findings string
 		if err := rows.Scan(&tracePath, &findings); err != nil {
@@ -471,6 +505,7 @@ func recurringTestFailureNote(ctx context.Context, d *db.DB, beadID int64) strin
 			names[m[1]] = true
 		}
 		failNames = append(failNames, names)
+		findingsByAttempt = append(findingsByAttempt, findings)
 	}
 	if err := rows.Err(); err != nil || len(failNames) < 2 {
 		return ""
@@ -487,19 +522,58 @@ func recurringTestFailureNote(ctx context.Context, d *db.DB, beadID int64) strin
 	}
 	sort.Strings(shared)
 
-	return "[Recurring test failure] The following subtest(s) failed identically across the " +
-		"last two attempts that revised the implementation: " + strings.Join(shared, ", ") +
-		". Revising the bead spec's implementation prose alone has not resolved this so far — " +
-		"treat that as a strong signal, not proof the test itself is at fault.\n\n" +
-		"Before choosing a decision: check whether the failure looks like an implementation " +
-		"defect (a crash, a runtime/template error, a wrong computed value traceable to a " +
-		"specific, nameable logic bug) rather than a genuinely unsatisfiable assertion — a " +
-		"recurring failure can mean \"the implementation keeps making the same mistake\" just " +
-		"as easily as \"the test is wrong.\" Only use decision=re_refine if you can state, for " +
-		"each listed subtest, why its assertion cannot be satisfied by any correct " +
-		"implementation given how the test sets up its inputs — then explain that in " +
-		"re_refine_guidance. If instead you can name a specific, untried implementation change " +
-		"that would satisfy the assertion, use execute_revised and describe that change."
+	// Split shared failures by whether the captured failure text is
+	// byte-identical across both attempts (strong signal) or merely the same
+	// subtest name with different content (weaker — still worth a note, but
+	// less conclusive).
+	var identical, differing []string
+	identicalText := map[string]string{}
+	for _, name := range shared {
+		latest := extractTestOutput(findingsByAttempt[0], name)
+		prior := extractTestOutput(findingsByAttempt[1], name)
+		if latest != "" && latest == prior {
+			identical = append(identical, name)
+			identicalText[name] = latest
+		} else {
+			differing = append(differing, name)
+		}
+	}
+
+	var b strings.Builder
+	if len(identical) > 0 {
+		b.WriteString("[Recurring test failure — identical output] The following subtest(s) " +
+			"produced byte-identical failure output across the last two attempts that each " +
+			"genuinely rewrote the implementation:\n\n")
+		for _, name := range identical {
+			fmt.Fprintf(&b, "  %s:\n    %s\n\n", name, identicalText[name])
+		}
+		b.WriteString("Two independently regenerated implementations converging on the exact " +
+			"same output is strong mechanical evidence the code is correct and the test's own " +
+			"expected value is wrong — not that the model keeps repeating the same mistake. " +
+			"Re-derive by hand, from the test's own setup, what a correct implementation must " +
+			"return; if it matches the actual output shown above, the test's assertion is the " +
+			"defect. Default to decision=re_refine for these subtests unless you can point to a " +
+			"specific implementation change that would produce a *different* result — not just " +
+			"restate the existing spec language, since that has already been tried and produced " +
+			"this exact output twice.\n\n")
+	}
+	if len(differing) > 0 {
+		b.WriteString("[Recurring test failure] The following subtest(s) failed across the last " +
+			"two attempts that revised the implementation, though with different failure output " +
+			"each time: " + strings.Join(differing, ", ") + ". Revising the bead spec's " +
+			"implementation prose alone has not resolved this so far — treat that as a strong " +
+			"signal, not proof the test itself is at fault.\n\n" +
+			"Before choosing a decision: check whether the failure looks like an implementation " +
+			"defect (a crash, a runtime/template error, a wrong computed value traceable to a " +
+			"specific, nameable logic bug) rather than a genuinely unsatisfiable assertion — a " +
+			"recurring failure can mean \"the implementation keeps making the same mistake\" just " +
+			"as easily as \"the test is wrong.\" Only use decision=re_refine if you can state, for " +
+			"each listed subtest, why its assertion cannot be satisfied by any correct " +
+			"implementation given how the test sets up its inputs — then explain that in " +
+			"re_refine_guidance. If instead you can name a specific, untried implementation change " +
+			"that would satisfy the assertion, use execute_revised and describe that change.")
+	}
+	return strings.TrimSpace(b.String())
 }
 
 type AdjudicateNextExecution struct {

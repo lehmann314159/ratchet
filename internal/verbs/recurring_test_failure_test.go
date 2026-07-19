@@ -18,6 +18,17 @@ import (
 // order (and thus id, which the query sorts DESC on) across calls.
 func seedRecurringFailureExecution(t *testing.T, d *db.DB, dir string, beadID, revID int64, order int, failNames ...string) {
 	t.Helper()
+	seedRecurringFailureExecutionWithOutput(t, d, dir, beadID, revID, order, nil, failNames...)
+}
+
+// seedRecurringFailureExecutionWithOutput is seedRecurringFailureExecution
+// plus an optional map of subtest name -> the "=== RUN"-block output text
+// go test -v would have printed for that subtest, so tests can exercise
+// extractTestOutput's byte-identical-content comparison. A name with no
+// entry in outputByName gets no "=== RUN" block at all (matching the
+// no-output-captured shape the original tests seed).
+func seedRecurringFailureExecutionWithOutput(t *testing.T, d *db.DB, dir string, beadID, revID int64, order int, outputByName map[string]string, failNames ...string) {
+	t.Helper()
 	ctx := context.Background()
 
 	tracePath := filepath.Join(dir, fmt.Sprintf("trace-%d.log", order))
@@ -30,6 +41,11 @@ func seedRecurringFailureExecution(t *testing.T, d *db.DB, dir string, beadID, r
 	}
 
 	var findings strings.Builder
+	for _, name := range failNames {
+		if out, ok := outputByName[name]; ok {
+			findings.WriteString("=== RUN   " + name + "\n" + out + "\n")
+		}
+	}
 	for _, name := range failNames {
 		findings.WriteString("--- FAIL: " + name + "\n")
 	}
@@ -94,6 +110,52 @@ func TestRecurringTestFailureNote(t *testing.T) {
 		note := recurringTestFailureNote(context.Background(), d, beadID)
 		if note != "" {
 			t.Errorf("note = %q, want empty — the two attempts share no failing subtest", note)
+		}
+	})
+
+	t.Run("byte-identical failure output across two attempts gets the stronger note", func(t *testing.T) {
+		d := openTestDB(t)
+		seedProject(t, d, -1, "recurring-failure-fixture-3")
+		beadID, revID := seedBead(t, d, -1, "B01")
+		dir := t.TempDir()
+
+		sameOutput := map[string]string{
+			"TestAllValidMoves/BlockedPieces": "    game_test.go:194: expected no moves for blocked piece, got [{{4 1} {3 0} []}]",
+		}
+		seedRecurringFailureExecutionWithOutput(t, d, dir, beadID, revID, 1, sameOutput, "TestAllValidMoves/BlockedPieces")
+		seedRecurringFailureExecutionWithOutput(t, d, dir, beadID, revID, 2, sameOutput, "TestAllValidMoves/BlockedPieces")
+
+		note := recurringTestFailureNote(context.Background(), d, beadID)
+		if !strings.Contains(note, "identical output") {
+			t.Errorf("note = %q, want the stronger [Recurring test failure — identical output] variant", note)
+		}
+		if !strings.Contains(note, "TestAllValidMoves/BlockedPieces") {
+			t.Errorf("note = %q, want it to name the recurring subtest", note)
+		}
+		if !strings.Contains(note, "expected no moves for blocked piece") {
+			t.Errorf("note = %q, want it to quote the actual repeated failure text", note)
+		}
+	})
+
+	t.Run("same subtest name but different failure output gets the weaker advisory note", func(t *testing.T) {
+		d := openTestDB(t)
+		seedProject(t, d, -1, "recurring-failure-fixture-4")
+		beadID, revID := seedBead(t, d, -1, "B01")
+		dir := t.TempDir()
+
+		seedRecurringFailureExecutionWithOutput(t, d, dir, beadID, revID, 1,
+			map[string]string{"TestFoo/Bar": "    game_test.go:10: got 1, want 2"},
+			"TestFoo/Bar")
+		seedRecurringFailureExecutionWithOutput(t, d, dir, beadID, revID, 2,
+			map[string]string{"TestFoo/Bar": "    game_test.go:10: got 3, want 2"},
+			"TestFoo/Bar")
+
+		note := recurringTestFailureNote(context.Background(), d, beadID)
+		if strings.Contains(note, "identical output") {
+			t.Errorf("note = %q, want the weaker variant since the failure text differs between attempts", note)
+		}
+		if !strings.Contains(note, "TestFoo/Bar") {
+			t.Errorf("note = %q, want it to name the recurring subtest", note)
 		}
 	})
 }
