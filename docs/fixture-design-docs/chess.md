@@ -76,6 +76,14 @@ type Game struct {
     //    EnPassantSq *Square, HalfMoveClock int, FullMoveNumber int
 }
 
+// CastlingRights fields, by exact name — no other names are valid:
+type CastlingRights struct {
+    WhiteKingSide  bool
+    WhiteQueenSide bool
+    BlackKingSide  bool
+    BlackQueenSide bool
+}
+
 // EnPassantSq is a pointer: nil means no en passant available.
 // When set, it is the square the capturing pawn moves TO (the pass-through square),
 // NOT the captured pawn's location. Example: White e2→e4 → EnPassantSq = e3.
@@ -102,7 +110,7 @@ type Move struct {
 type GameView struct {
     Board  [8][8]*Piece
     Turn   Color
-    Status string // e.g. "White to move", "Check!", "Checkmate — Black wins", "Stalemate"
+    Status string // exact required strings — see Behavioral Specification / Cross-Bead Contracts
 }
 
 // Package-level singletons initialized by main() before serving.
@@ -118,26 +126,92 @@ number 1.
 
 **`ApplyMove(g *Game, m Move) *Game`** — returns a new Game with the move applied;
 does not modify g. Does not validate legality. Handles all special cases:
-- Castling: moves both king and rook to their destination squares.
+- Castling: moves both king and rook to their destination squares — the literal
+  squares are: White kingside, King e1→g1, Rook h1→f1; White queenside, King
+  e1→c1, Rook a1→d1; Black kingside, King e8→g8, Rook h8→f8; Black queenside,
+  King e8→c8, Rook a8→d8. These are the only four castling moves that exist;
+  no other king-and-rook pair ever moves together.
 - En passant: removes the captured pawn from the board (it is one rank behind m.To,
   not on m.To itself).
 - Promotion: when m.Promotion != Pawn, replaces the pawn on m.To with that piece type.
 - En passant target: sets EnPassantSq to the pass-through square (NOT the landing
   square) when a pawn advances two squares; clears it on all other moves.
   Example: White e2→e4 → EnPassantSq = e3 (captured pawn is on e4, never stored here).
-- Castling rights: clears the relevant right when a king or rook moves, or when a
-  capture lands on a rook's starting square. Use the destination square to determine
-  which right to clear, not the type of the captured piece — if anything is captured
-  at (rank=7,file=0), (rank=7,file=7), (rank=0,file=0), or (rank=0,file=7), clear the
-  corresponding right unconditionally. (In a legal game the rook would have already
-  moved, making this a no-op; the destination check handles edge cases correctly.)
+- Castling rights: clears rights in three cases:
+  1. **A king moves** (from e1 for White, e8 for Black, any destination): clears
+     BOTH of that color's rights at once — e.g. White King moving clears
+     WhiteKingSide AND WhiteQueenSide, even though the move is only ever toward
+     one side of the board. Never clears only one right for a king move.
+  2. **A rook moves from its own starting square** (a1/h1 for White, a8/h8 for
+     Black): clears only that single corresponding right — e.g. a rook leaving
+     h1 clears WhiteKingSide only, not WhiteQueenSide.
+  3. **A capture lands on a rook's starting square**, regardless of what piece
+     is captured there — use the destination square, not the type of the
+     captured piece: if anything is captured at (rank=7,file=0), (rank=7,file=7),
+     (rank=0,file=0), or (rank=0,file=7), clear the corresponding single right
+     unconditionally. (In a legal game the rook would have already moved, making
+     this a no-op; the destination check handles edge cases correctly.)
+- Turn: sets the returned Game's Turn to the opposite color of g.Turn (White↔Black)
+  on every call, including non-special moves. This is not optional or inferable from
+  context — every downstream consumer (PseudoLegalMoves, LegalMoves, BestMove's
+  negamax alternation) depends on Turn flipping on each ApplyMove call.
 
 **`PseudoLegalMoves(g *Game) []Move`** — returns all moves for g.Turn without
-checking whether they leave g.Turn's king in check. Includes:
-- Pawn: single push, double push from starting rank, diagonal captures, en passant
-  captures (when g.EnPassantSq is non-nil and a pawn can reach it), promotions
-  (four Move objects per promoting pawn: Knight, Bishop, Rook, Queen).
-- Knight, Bishop, Rook, Queen, King: standard movement rules.
+checking whether they leave g.Turn's king in check. Every piece type's movement is
+defined below purely by (Δrank, Δfile) — no rule depends on any name or convention
+not stated in this document. Includes:
+- Pawn: moves in exactly one Δrank direction determined by color — White pawns
+  move with dir=+1 (toward rank index 7), Black pawns move with dir=−1 (toward
+  rank index 0). "Forward" always means this direction; it is never the other one,
+  and it is never the pawn's own color's back-rank direction.
+  - Single push: (Δrank, Δfile) = (dir, 0), only if that square is empty.
+  - Double push: only from the pawn's own starting rank (rank index 1 for White,
+    rank index 6 for Black), to (Δrank, Δfile) = (2·dir, 0), only if both the
+    intermediate square (dir, 0) and the destination square (2·dir, 0) are empty.
+  - Diagonal capture: (Δrank, Δfile) = (dir, +1) or (dir, −1), only if that exact
+    square is occupied by a piece of the opposite color. A pawn can never capture
+    a piece directly ahead of it (Δfile=0) even if one is there — that square is
+    simply impassable, not capturable.
+  - En passant capture: (Δrank, Δfile) = (dir, +1) or (dir, −1) landing exactly on
+    g.EnPassantSq, only if g.EnPassantSq is non-nil. Removes the pawn sitting at
+    (EnPassantSq.Rank − dir, EnPassantSq.File) — i.e., one rank *behind* EnPassantSq
+    relative to the capturing pawn's own direction, not a fixed offset independent
+    of color. Worked examples for both colors: after Black plays e7→e5,
+    EnPassantSq=e6 (rank index 5); White (dir=+1) capturing there removes the pawn
+    at rank 5−1=4, i.e. e5. After White plays e2→e4, EnPassantSq=e3 (rank index 2);
+    Black (dir=−1) capturing there removes the pawn at rank 2−(−1)=3, i.e. e4.
+  - Promotion: when the destination is the far rank from the pawn's own starting
+    side (rank index 7 for a White pawn, rank index 0 for a Black pawn), for
+    either a single-push or a diagonal-capture destination, generate four Move
+    objects (Promotion = Knight, Bishop, Rook, Queen) instead of one.
+- Knight: moves to a destination square if and only if it is one of these 8
+  (Δrank, Δfile) pairs from the knight's current square: (1,2), (1,−2), (−1,2),
+  (−1,−2), (2,1), (2,−1), (−2,1), (−2,−1). No other (Δrank, Δfile) pair is a
+  knight move. What occupies any square other than the destination is irrelevant
+  — a knight's move is never blocked by an intervening piece, because none of
+  these 8 pairs has an intervening square on a straight line between the two
+  squares. The destination itself must be empty or hold a piece of the opposite
+  color (capture); a same-color piece there makes that destination illegal.
+- Bishop: moves along exactly these 4 directions: (Δrank, Δfile) ∈ {(1,1), (1,−1),
+  (−1,1), (−1,−1)} (both rank and file change by the same amount each step, with
+  independent signs) — any distance from 1 to 7 squares along one such direction,
+  never mixing two directions in one move. Scanning outward from the bishop along
+  one direction, one square at a time: each empty square reached is a legal
+  (non-capturing) destination; scanning along that direction stops at the first
+  occupied square, which is itself a legal (capturing) destination only if it
+  holds a piece of the opposite color — if it holds a piece of the bishop's own
+  color, that square and every square further along that direction are illegal.
+- Rook: the same scanning rule as Bishop, but along these 4 directions instead:
+  (Δrank, Δfile) ∈ {(1,0), (−1,0), (0,1), (0,−1)} (exactly one of rank or file
+  changes per step, the other stays fixed).
+- Queen: the same scanning rule, along all 8 directions that are the union of the
+  Bishop's 4 diagonal directions and the Rook's 4 orthogonal directions.
+- King: moves to a destination square if and only if it is one of the same 8
+  (Δrank, Δfile) directions as Queen, but at distance exactly 1 step (never
+  further): (1,0), (−1,0), (0,1), (0,−1), (1,1), (1,−1), (−1,1), (−1,−1). The
+  destination must be empty or hold a piece of the opposite color. (Whether this
+  move would leave the king's own side in check is not checked here — see
+  LegalMoves; PseudoLegalMoves generates this move regardless.)
 - Castling: generated when (a) the relevant CastlingRights flag is true, (b) no
   pieces stand between king and rook, and (c) the king is not currently in check.
   Condition (c) is checked in PseudoLegalMoves by examining whether any opponent
@@ -149,8 +223,9 @@ checking whether they leave g.Turn's king in check. Includes:
 
 **`IsInCheck(g *Game, color Color) bool`** — returns true if color's king is
 attacked by any opponent pseudo-legal move. Implementation: generate pseudo-legal
-moves for the opponent on position g (with Turn temporarily set to the opponent),
-then check whether any move's To square matches color's king square.
+moves for the opponent on an independent copy of g (not a mutation of the
+caller's g) with the copy's Turn set to the opponent, then check whether any
+move's To square matches color's king square.
 
 **`LegalMoves(g *Game) []Move`** — filters PseudoLegalMoves: applies each move via
 ApplyMove, then calls IsInCheck on the resulting position for g.Turn. Keeps only
@@ -184,11 +259,17 @@ failure.
 executes the "board" named template; returned by HandleMove and HandleReset.
 
 **`HandleMove`** — serves `POST /move`. Reads form fields `from` and `to`
-(algebraic squares, e.g. "e2" / "e4") and optional `promotion` (default "q").
+(algebraic squares, e.g. "e2" / "e4") and optional `promotion`
+(`"q"`→Queen, `"n"`→Knight, `"b"`→Bishop, `"r"`→Rook; absent or any other value
+defaults to Queen).
 Returns HTTP 400 if the squares are unparseable or the move is not in LegalMoves.
-After applying the human move, checks IsCheckmate/IsStalemate before calling
-BestMove. If the game is not over, applies the AI's move. Calls RenderBoard with
-the final state.
+After applying the human move via `ApplyMove`, sets the package-level `game` to
+the resulting position, then checks IsCheckmate/IsStalemate before calling
+BestMove. If the game is not over, applies the AI's move via `ApplyMove` and sets
+`game` to that resulting position too. Calls RenderBoard with the final state of
+`game`. (Both reassignments are required — `ApplyMove` does not mutate `g`, so
+without them the server's persisted game state never advances past the first
+move.)
 
 **`HandleReset`** — serves `POST /reset`. Sets `game = NewGame()` and calls
 RenderBoard.
@@ -228,7 +309,12 @@ geometry — e.g. "knight on c2 to a1: Δfile=−2, Δrank=−1, valid knight ju
 comment next to the assertion.
 
 **Required test scenarios for legal-moves** — use these exact positions; each
-includes the geometric verification comment that confirms validity:
+includes the geometric verification comment that confirms validity. Unless a
+scenario says otherwise, build every position below (scenarios 1-6) from an empty
+board containing only the pieces explicitly listed — NOT from `NewGame()`'s
+standard starting position. This matters concretely: scenario 1's claim that the
+rook "attacks the king along rank 0" and scenario 3/4's castling path checks are
+only true if b1/c1/d1/f1/g1 are empty, which they are not in the standard setup.
 
 1. **Pinned piece cannot move**: White King on e1, Black Rook on a1, White Knight on
    d1 (all three on rank 0). The rook attacks the king along rank 0 with the knight
@@ -255,7 +341,8 @@ includes the geometric verification comment that confirms validity:
    LegalMoves.
 
 **Required test scenarios for IsCheckmate and IsStalemate** — use these exact
-positions:
+positions, built from an empty board containing only the pieces listed (same
+"board cleared" rule as scenarios 1-4 above):
 
 5. **Detect checkmate**: White King on a1, Black Rook on a2, Black Rook on b2. King
    is in check from the a2 rook (same file: a1 and a2 are both file a). Escape
@@ -298,11 +385,13 @@ includes the geometric verification comment:
 **Required test scenario for game-state**: `TestApplyMove` must include a sub-test
 verifying that when any non-rook piece captures on a rook's starting square, the
 corresponding castling right is cleared. Example: place a black knight on b3
-(Rank 2, File 1) and a white piece on a1 (Rank 0, File 0); apply the knight's capture
-move to a1; assert `g.Castling.WhiteQueenSide` is false afterwards. This tests the
-"destination square, not piece type" rule — the most common implementation error is
-checking whether the captured piece was a rook instead of checking the destination
-square unconditionally.
+(Rank 2, File 1) and a White Pawn — deliberately not a rook — on a1 (Rank 0, File 0);
+apply the knight's capture move to a1; assert `g.Castling.WhiteQueenSide` is false
+afterwards. Using a pawn (not a rook) at a1 is required for the test to mean
+anything: this tests the "destination square, not piece type" rule, and the most
+common implementation error is checking whether the captured piece was a rook
+instead of checking the destination square unconditionally — a rook actually
+sitting at a1 would pass under either the correct or the buggy implementation.
 
 ## Cross-Bead Contracts
 
@@ -314,8 +403,10 @@ square unconditionally.
 - **interface**: the full `Game` struct (especially `Board [8][8]*Piece`, `EnPassantSq *Square`,
   `Castling CastlingRights`), `Square`, `Piece`, `Move`, `Color`, `PieceType` constants,
   `ApplyMove(g *Game, m Move) *Game`
-- **notes**: PseudoLegalMoves reads Board cells as `*Piece` (nil = empty). It uses
-  ApplyMove only for the castling pre-check (condition c). It does NOT call IsInCheck.
+- **notes**: PseudoLegalMoves reads Board cells as `*Piece` (nil = empty). It does
+  NOT call ApplyMove anywhere, including for the castling pre-check (condition c) —
+  that check directly inspects opponent pseudo-legal move destinations against the
+  king's current square, with no move applied. It does NOT call IsInCheck.
 
 ### pseudo-moves → is-in-check (protocol)
 
@@ -366,9 +457,15 @@ square unconditionally.
 - **interface**: `GameView{Board [8][8]*Piece, Turn Color, Status string}`
 - **notes**: The "board" template iterates `Board[rank][file]` with rank 7 at the
   top. Each cell is `<td class="square {{pieceClass .}}">` where `pieceClass` returns
-  `"empty"` for nil or `"white pawn"` / `"black king"` etc. for pieces. Status
-  encodes all terminal states verbatim. All changing state must be inside
-  `#board-container`.
+  `"empty"` for nil or `"white pawn"` / `"black king"` etc. for pieces. Status must
+  use exactly these literal strings, chosen by HandleMove/HandleIndex after applying
+  the current position's IsCheckmate/IsStalemate/IsInCheck results:
+  - Checkmate, White delivered it (Black to move, Black has no legal moves): `"Checkmate — White wins"`
+  - Checkmate, Black delivered it (White to move, White has no legal moves): `"Checkmate — Black wins"`
+  - Stalemate (either side): `"Stalemate"`
+  - Side to move is in check but not checkmate: `"Check!"`
+  - Otherwise: `"White to move"` or `"Black to move"` depending on g.Turn
+  All changing state must be inside `#board-container`.
 
 ## Decomposition Notes
 
