@@ -33,7 +33,7 @@ Fixtures available to clone from (`docs/fixtures.md` §2-3):
 - [ ] checkers-try-1 — project 100, cloned from `-1` 2026-07-16, bead 684 in progress
 - [ ] checkers-try-2
 - [ ] checkers-try-3
-- [ ] chess-try-1
+- [ ] chess-try-1 — project 106, cloned from `-2` 2026-07-18, queued behind project 105
 - [ ] chess-try-2
 - [ ] chess-try-3
 - [ ] goban-try-1
