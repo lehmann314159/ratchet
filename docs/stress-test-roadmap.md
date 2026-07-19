@@ -15,6 +15,25 @@ same way as any other project: rewind the bead, root-cause, fix the framework, d
 patch the DB or the test files directly ([[feedback_no_db_patches]],
 [[feedback_no_manual_test_fixes]], [[feedback_rewind_vs_manual_patch]]).
 
+**Status update (2026-07-19): games (Phases A-C below) deprioritized to a distant
+goal — see Phase D.** Ran a targeted experiment on chess.md (the most-reviewed
+fixture doc, 16 accumulated ambiguity-checklist classes) testing whether writing
+piece-movement rules for zero assumed chess fluency would close the class-1/11
+domain-implicit gap. It worked for the section rewritten, but a fresh review pass
+immediately surfaced 4 more real gaps in the untouched castling section, and the
+review process itself was empirically confirmed blind to this failure shape in
+both directions (an independent reviewer never flagged "standard movement rules" —
+zero content — as ambiguous, before or after). See
+`docs/design_doc_ambiguity_checklist.md` class 17 and commit `bfcc502`. Conclusion:
+games have an unbounded, whack-a-mole tail of implicit-domain-knowledge gaps that
+neither the checklist nor independent judgment review converges on reliably, versus
+fractal/kafka-sim which each converged in essentially one pass. Phases A-C are
+paused, not deleted — resume them if/when there's a systematic (not just
+incremental) answer to the implicit-domain-knowledge problem. In the meantime,
+**Phase B's need for 3 comparable HTTP-handler data points to scope `ratchet-http`
+does not require games** — tasklist-shaped (CRUD, low-implicit-knowledge) HTTP
+projects could serve the same purpose whenever Phase B is revisited.
+
 ---
 
 ## Phase A — repeated stress runs via clone-project
@@ -104,6 +123,43 @@ scaffolding) applying.
       design doc (image pieces + click-to-move), run it through the new path.
 
 ---
+
+---
+
+## Phase D — non-game complexity axes (avoiding implicit domain knowledge)
+
+**Started 2026-07-19**, replacing games as the near-term source of stress-test
+projects. The selection principle: ramp problem complexity along an axis orthogonal
+to "requires shared cultural/domain fluency to specify correctly" — pick axes like
+concurrency, parsing depth, protocol/persistence, and business-rule density instead,
+where full axiomatization in the design doc is cheap (the rules are invented or
+formula-derived, not assumed-known) and doesn't have games' unbounded implicit-gap
+tail. Already-validated low-implicit-knowledge controls to keep in rotation: fractal
+(recursion/library-shape, converged clean first try), kafka-sim (light concurrency,
+converged clean after one design-doc rewrite), tasklist (CRUD baseline, COMPLETE,
+0 post-pipeline fixes).
+
+Candidates, in priority order agreed 2026-07-19:
+
+- [ ] **Expression-language interpreter** (NEXT). Tokenizer → recursive-descent
+      parser → evaluator for a small, fully-specified arithmetic/boolean expression
+      language with variables. Tests recursion and algorithmic depth the way fractal
+      did, but adds a new risk shape worth watching for: even something as
+      "obvious" as operator precedence ("* binds tighter than +") is a mild
+      implicit-knowledge trap analogous to chess's geometry — the design doc must
+      state the full precedence table and associativity explicitly, worked-example
+      style, not assume it.
+- [ ] **Worker-pool job scheduler** (concurrency axis). Priority queue, cancellation,
+      backpressure, real goroutines/mutexes with actual race conditions to get
+      wrong — ramps past kafka-sim's lighter touch on synchronization.
+- [ ] **Mini key-value store over a custom TCP protocol** (protocol + persistence +
+      concurrency combined, highest complexity of this set). Invented wire format
+      (not assumed-Redis/RESP), multiple concurrent client connections, disk
+      persistence.
+- [ ] **Tiered billing/invoice calculator** (business-rule density, no algorithmic
+      novelty). Stress-tests checklist classes 2 (spec-derived arithmetic) and 11
+      (exhaustive-case omission) specifically — every tax/discount/rounding rule
+      must be a stated formula, "everyone knows how tax brackets work" not allowed.
 
 **How to apply**: when resuming this thread, update the checkboxes above rather than
 re-deriving phase scope from scratch. `[[project_roadmap]]` memory should carry only a
