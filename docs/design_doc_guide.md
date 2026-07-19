@@ -324,6 +324,22 @@ primary input. A required-scenarios block written here will reach the test-writi
 directly. The pipeline cannot compensate for scenarios left out; it can only follow
 scenarios provided.
 
+**DECOMPOSE can drop a scenario's specific values even when the design doc has them.**
+A scenario placed only in this section (or only in prose elsewhere in the Behavioral
+Specification) is DECOMPOSE's to condense when writing each bead's spec — and DECOMPOSE
+may keep the governing rule ("division truncates toward zero") while dropping the
+specific worked values that prove it ("-7/2 = -3, not -4"), since the rule reads as a
+complete restatement on its own. This is not a design-doc ambiguity (the doc said the
+right thing, unambiguously) — it's a lossy compression step downstream of the doc, and
+nothing else in the pipeline reviews DECOMPOSE's bead-spec text against the original
+scenarios to catch the drop. The fix: for any scenario whose specific literal values
+matter (not just its governing rule), also add a Decomposition Notes line naming the
+exact bead and the exact values required in its test file — the same mechanism already
+used for bounded integration-bead scenarios (see Decomposition Notes below), not held
+back for those alone. A Decomposition Notes line is reliably carried into the named
+bead's spec near-verbatim; prose in Behavioral Specification or Domain-Specific Test
+Scenarios is not.
+
 **Coordinate system mapping.** If the domain uses 0-indexed coordinates that differ from
 the conventional human notation (rank 0 = rank 1 in chess, row 0 = top in image
 processing), include an explicit mapping table in this section or in the Overview. Do not
@@ -566,3 +582,4 @@ displayed in a specific way, write the exact format in the protocol contract.
 | Step ordering dependency unstated | Model implements steps in listed order but checks suicide before captures, incorrectly rejecting legal capture moves | When a step's correctness depends on a prior step's side effects, add: "must occur after step N — [reason]" |
 | "Find all regions" described as a single flood fill | Model calls flood-fill once from one starting point; only one region found; rest of board misclassified | Write the outer loop explicitly: "iterate every cell; for each unvisited empty cell, start a new flood fill" |
 | Loop-scoped scratch copy declared before the loop | Model reuses a modified scratch copy across trials; later trials see side effects of earlier ones | Name the required scope: "declare `scratch := *g` inside the loop body, not before it" |
+| Worked-example literal values stated only in prose (Behavioral Spec / Domain-Specific Test Scenarios), not pinned to a bead | DECOMPOSE keeps the governing rule but drops the specific values when writing the bead spec; REFINE_TESTS_WRITE re-derives them itself and may get a sign/direction case wrong (e.g. division truncation on negative operands) | Add a Decomposition Notes line naming the exact bead and the exact required values — the same mechanism as bounded integration-bead scenarios, not held back for those alone |
