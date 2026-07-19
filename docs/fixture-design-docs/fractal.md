@@ -119,13 +119,22 @@ file creation or encoding.
   color that was set in the source image at that pixel.
 - **notes**: PNG encoding is lossless for `*image.RGBA` source images, so
   `decode(encode(img))` must match `img` exactly at every tested pixel — no
-  approximate/tolerance-based comparison is needed or expected.
+  approximate/tolerance-based comparison is needed or expected. Compare by calling
+  `.RGBA()` on both `color.Color` values and checking all four returned channels
+  are equal — do not compare `color.Color` values with `==`, since
+  `image/png.Decode` may return a different concrete pixel type
+  (`*image.NRGBA`, `*image.Paletted`, etc.) than the source `*image.RGBA` even
+  when the channel values match exactly.
 
 ## Decomposition Notes
 
-**Integration bead scope:** Generate a small (e.g. 21×21) Mandelbrot image
-with `centerReal=-0.5, centerImag=0, scale=0.1, maxIterations=50`; save it to
-a temp PNG file; decode it back; verify the pixel at the exact image center
-(`px=10, py=10`, corresponding to complex point `(-0.5, 0)`, which is deep
-inside the Mandelbrot set and never escapes) decodes to black
-`RGBA{0,0,0,255}`.
+**Integration bead scope:** Generate a 20×20 Mandelbrot image (dimension must be
+even — see below) with `centerReal=-0.5, centerImag=0, scale=0.1,
+maxIterations=50`; save it to a temp PNG file; decode it back; verify the pixel at
+`px=10, py=10` decodes to black `RGBA{0,0,0,255}`. This pixel maps to complex point
+`(-0.5, 0)` **exactly** by `GenerateMandelbrot`'s formula only because 20 is even:
+`float64(20)/2 = 10.0`, so `(10.0 - 10.0) * 0.1 = 0` and `cReal = -0.5 + 0 = -0.5`.
+For an odd dimension (e.g. 21), `float64(21)/2 = 10.5`, and no single pixel maps
+exactly to the stated center — do not substitute an odd dimension here without
+recomputing which pixel actually corresponds to `(-0.5, 0)`. `(-0.5, 0)` is deep
+inside the Mandelbrot set and never escapes within 50 iterations.

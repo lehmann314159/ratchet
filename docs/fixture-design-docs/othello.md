@@ -47,7 +47,9 @@ All `.go` files use `package main` at the project root — no subdirectories.
 - `ai.go` contains: `RandomAIMove` only.
 - `handlers.go` contains: the `GameView` type, a `toView` helper that builds a
   `GameView` from `*Game`, and all three HTTP handlers (`HandleIndex`, `HandlePlace`,
-  `HandlePass`).
+  `HandlePass`). `toView`'s `LastMove` field is copied by value into a freshly
+  allocated `*Point` (`if g.LastMove != nil { p := *g.LastMove; view.LastMove = &p }`)
+  — it does not alias `g.LastMove`.
 - `templates.go` contains: `Templates`, `InitTemplates`, `RenderIndex`, `RenderBoard`.
   No handler functions. No type declarations.
 - Do NOT put `HandleIndex`, `HandlePlace`, or `HandlePass` in `templates.go`.
@@ -138,7 +140,10 @@ sets `LastMove = &p`, resets `ConsecutivePasses = 0`, switches `Turn`.
 **`Pass()`** — increments `ConsecutivePasses` by 1, switches `Turn`.
 
 **`CheckWinner() Color`** — returns `Empty` while `ConsecutivePasses < 2`. Once the game
-ends, returns the `Color` with more stones on the board, or `Empty` on a tie.
+ends, returns the `Color` with more stones on the board, or `Empty` on a tie. `Empty` is
+therefore returned both while the game is ongoing AND when the game has ended in a tie —
+`CheckWinner() == Empty` must NEVER be used as an "is the game over" check (see the AI
+response protocol below for the correct check: `g.ConsecutivePasses < 2`).
 
 **`RandomAIMove(g *Game) (Point, bool, error)`** — selects a random element from
 `g.ValidMoves()`. Returns `(point, false, nil)` on success. Returns `(zero, true, nil)` if
@@ -164,9 +169,14 @@ The `index` template is a full HTML page. It must:
 - Each valid-move cell must carry `hx-post="/place?row={{$r}}&col={{$c}}" hx-target="#board-container" hx-swap="outerHTML"` so clicking a cell POSTs the move without a full page reload
 - Include a Pass button: `hx-post="/pass" hx-target="#board-container" hx-swap="outerHTML"`
 
-The `board` template renders only the `#board-container` div (the HTMX swap fragment) and is returned by `/place` and `/pass`.
+The `board` template renders only the `#board-container` div (the HTMX swap fragment) and is returned by `/place` and `/pass`. Each occupied cell renders `<div class="cell black">` or `<div class="cell white">` based on `Board[r][c]`; empty cells render `<div class="cell empty">`. This is the literal, required markup contract — the integration bead's assertions reference these exact class names.
 
-`HandleIndex` must call `NewGame()`, build a `GameView`, and execute the `index` template with that view — not `nil` — so the board is immediately visible.
+`HandleIndex` must lazily initialize the package-level `game` variable — call
+`NewGame()` only if `game == nil`; on all subsequent `GET /` requests, reuse the
+existing `game` and must NOT reset it (a page reload or navigating back to `/`
+mid-game must not wipe progress — see "One game is held in server memory" in the
+Overview). Build a `GameView` from the current `game` and execute the `index`
+template with that view — not `nil` — so the board is immediately visible.
 
 **`main()`** — calls `InitTemplates()`, registers `HandleIndex` on `GET /`, `HandlePlace` on `POST /place`, and `HandlePass` on `POST /pass`, then starts the server with `http.ListenAndServe(":8080", nil)`. Implemented in `main.go`.
 
@@ -187,7 +197,12 @@ Point{Row: 7, Col: 7} = bottom-right cell
 `(Δrow, Δcol)` direction vectors are:
 `{-1,-1}, {-1,0}, {-1,1}, {0,-1}, {0,1}, {1,-1}, {1,0}, {1,1}`.
 
-**The scan rule for a single direction:** starting one step from `p` in direction
+**Before scanning any direction, `FindFlips` must first confirm
+`Board[p.Row][p.Col] == Empty`; if the target cell is already occupied, return an
+empty slice regardless of what lies beyond it in any direction.** This is a
+precondition on the whole function, checked once, not per-direction.
+
+**The scan rule for a single direction (given `Board[p.Row][p.Col] == Empty`):** starting one step from `p` in direction
 `(Δrow, Δcol)`, walk cell by cell. If the current cell is off the board, or empty,
 the scan for that direction ends with **zero flips** — an empty cell or the edge
 never validates a flip, even if a same-color stone exists further along the same
@@ -213,10 +228,13 @@ and must flip the White stone directly below it.
   candidates `{3,3}`,`{3,4}` flip.
 - Direction `{1,0}` (down): `{4,2}`=White, `{5,2}`=Black (own color) → candidate
   `{4,2}` flips.
-`FindFlips({3,2})` must return all three points: `{3,3}`, `{3,4}`, `{4,2}`.
-Do NOT return only the first direction's flips — a function that checks one
-direction, finds a valid flip, and returns immediately will miss `{4,2}`. All eight
-directions must be checked and their results combined into one slice.
+`FindFlips({3,2})` must return all three points: `{3,3}`, `{3,4}`, `{4,2}`
+(order-independent — like `ValidMoves`, below, `FindFlips`'s returned slice has no
+ordering contract; test assertions must compare it as a set, not via an exact-order
+`reflect.DeepEqual`). Do NOT return only the first direction's flips — a function
+that checks one direction, finds a valid flip, and returns immediately will miss
+`{4,2}`. All eight directions must be checked and their results combined into one
+slice.
 
 **TestFindFlips/GapBreaksTheLine:** Board cleared except White at `{3,4}` and Black
 at `{5,4}`, with `{4,4}` empty. Black plays `{2,4}`. Direction `{1,0}` (down) from
@@ -273,11 +291,16 @@ exactly these four points (order-independent).
 - **consumer**: http-handlers
 - **interface**: `RandomAIMove(g *Game) (Point, bool, error)`
 - **notes**: Both the place handler and the pass handler must call `RandomAIMove` after
-  the human move, provided the game is not already over (`CheckWinner() == Empty`).
+  the human move, provided the game is not already over (`g.ConsecutivePasses < 2` — do
+  NOT use `CheckWinner() == Empty` as this check, since `Empty` is also returned for an
+  ongoing game).
   - `passed=false` → call `PlaceStone` to place the AI stone
   - `passed=true` → call `Pass()` to advance `ConsecutivePasses`; omitting this leaves
     the game unable to end
   - non-nil error → return HTTP 500
+  - If the human's own `PlaceStone` call (in the place handler) returns a non-nil error
+    (illegal move), do not invoke this AI-response protocol at all: call `toView(g, "<error
+    message>")` and `RenderBoard` with HTTP 200, leaving `g` unchanged.
 
 ---
 
@@ -301,7 +324,8 @@ build ./...` alone is explicitly insufficient, since it cannot catch a missing
 
 **Integration bead scope** (bounded): from the starting position, POST `/place` with
 `row=2&col=3` (the `SingleDirection` scenario above), assert the response contains
-`id="board-container"`, assert the response reflects the flip at `{3,3}` (e.g. a
-White-class cell became Black-class), and assert the AI has responded (turn indicator
-reads "Black to move" again, or the AI's own move produced a further board change).
+`id="board-container"`, assert the response reflects the flip at `{3,3}` (the cell at
+`{3,3}` now renders `class="cell black"` instead of `class="cell white"`), and assert
+the AI has responded (turn indicator reads "Black to move" again, or the AI's own move
+produced a further board change).
 Do not attempt to play a full game to completion in the integration bead.

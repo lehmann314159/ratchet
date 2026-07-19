@@ -117,15 +117,21 @@ task list and nextID set to 1.
 ID and Done=false, appends it to the internal slice, increments nextID, and returns
 the new Task. Thread-safe (acquires the mutex).
 
-**`(*TaskStore).All() []*Task`** — returns a copy of the internal slice. Callers
-may read the returned Tasks but must not modify them. Thread-safe.
+**`(*TaskStore).All() []*Task`** — returns a shallow copy of the internal slice: a
+new slice header holding the same `*Task` pointers stored internally, in insertion
+order. The `Task` structs themselves are NOT copied — mutating any field of a
+returned `Task` mutates the store's own data. Callers must treat returned Tasks as
+read-only for this reason, not merely by convention.
 
 **`(*TaskStore).Toggle(id int) bool`** — finds the Task with the given ID and flips
 its Done field. Returns true if found, false if no Task with that ID exists.
 Thread-safe.
 
-**`(*TaskStore).Delete(id int) bool`** — removes the Task with the given ID from the
-slice. Returns true if found and removed, false if not found. Thread-safe.
+**`(*TaskStore).Delete(id int) bool`** — removes the Task with the given ID,
+preserving the relative order of the remaining tasks (e.g. via
+`append(tasks[:i], tasks[i+1:]...)`, not a swap-with-last removal — the latter
+would silently reorder subsequent `All()` results). Returns true if found and
+removed, false if not found. Thread-safe.
 
 **`InitTemplates() *template.Template`** — parses the inline template strings and
 returns the resulting `*template.Template`. Panics if the template source fails to
@@ -165,7 +171,10 @@ registers routes on an `http.ServeMux`, and calls `http.ListenAndServe(":8080", 
 **Templates** — two named templates: `"index"` (full HTML page) and `"task-list"`
 (the fragment). Templates are inline Go strings in templates.go — no external `.html`
 files. The "index" template embeds a call to the "task-list" template via
-`{{template "task-list" .}}` so both share a single TaskView render path.
+`{{template "task-list" .}}` so both share a single TaskView render path. Each
+task's row element carries `class="done"` when `.Done` is true, and no `done` class
+otherwise — this is the literal, required marker (not one of several illustrative
+options), since the integration bead asserts on this exact string.
 
 **HTMX wiring** — the "index" template includes the HTMX CDN script in `<head>`:
 `<script src="https://unpkg.com/htmx.org@1.9.12"></script>`. The add-task form uses
@@ -242,6 +251,8 @@ and `main.go`. `main()` is the only wiring point for `store`, `templates`, and t
 
 **Integration bead scenario** (bounded): start an `httptest.NewServer`, POST
 `/tasks` with title "Buy milk", assert the response contains "Buy milk", POST
-`/tasks/1/toggle`, assert the response contains a done indicator (e.g. class `done`
-or a checked symbol), POST `/tasks/1/delete`, assert "Buy milk" no longer appears.
-The test must not bind to any fixed port.
+`/tasks/1/toggle`, assert the response contains the substring `class="done"` (the
+task-list template renders `class="done"` on a completed task's row element and
+omits it otherwise — this is the literal, required marker, not one of several
+options), POST `/tasks/1/delete`, assert "Buy milk" no longer appears. The test must
+not bind to any fixed port.

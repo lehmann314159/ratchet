@@ -23,7 +23,7 @@ duration of the process.
   is promoted to King immediately upon landing there — including as the final square of
   a multi-jump.
 - Mandatory capture and mandatory multi-jump continuation (see Checkers Rules below).
-- Server listens on the default `net/http` port via `http.ListenAndServe`.
+- `main()` calls `http.ListenAndServe(":8080", nil)`.
 
 Out of scope: draws, move undo, difficulty levels for the AI, persistence across
 restarts.
@@ -105,7 +105,10 @@ type Square struct {
 // Move represents a complete move, including all squares jumped in a multi-jump.
 // From is the starting square; To is the final landing square after all jumps.
 // Captures lists each captured piece's square in jump order. A non-capturing
-// move has an empty Captures slice.
+// move has Captures == nil (the zero value; do not initialize it to
+// []Square{}). Test comparisons must not rely on reflect.DeepEqual of full
+// Move structs for this reason — compare len(m.Captures) and, if non-zero,
+// its elements.
 type Move struct {
     From     Square
     To       Square
@@ -170,9 +173,14 @@ pieces on the dark squares of rows 0–2, sets `Turn = Human`, `Selected = nil`,
 **`ValidMoves`** is a pure read — it does not modify `g`. It returns every
 geometrically legal move for the piece at `from` (regular diagonal steps for
 non-kings, all four diagonal directions for kings, plus any jumps available to that
-specific piece) without applying the mandatory-capture filter. `AllValidMoves` calls
-`ValidMoves` for every piece of `color`, then applies mandatory capture: if the
-combined result contains any jump, only jumps are kept.
+specific piece) without applying the mandatory-capture filter. **A candidate
+destination square is only included if it is empty** — occupied by neither the
+moving piece's own color nor the opponent's. This applies to every move type: a
+regular diagonal step onto an occupied square is not returned, and a jump's landing
+square (the square immediately beyond the jumped piece) must also be empty, not just
+the jumped-over square. `AllValidMoves` calls `ValidMoves` for every piece of
+`color`, then applies mandatory capture: if the combined result contains any jump,
+only jumps are kept.
 
 **`ApplyMove`** composes the result of move generation: it does not re-derive
 legality from scratch, it validates `m` against `AllValidMoves(g.Turn)` first. On a
@@ -231,6 +239,23 @@ Do NOT land at `{4,4}` (Δrow=−1,Δcol=+2 — magnitudes unequal, not a diagon
 compute the captured square as `{3,3}` (Δrow=−2,Δcol=0 from the start — not the
 midpoint of a `{5,2}`→`{3,4}` jump, which is `{4,3}`).
 
+**Occupancy applies independently to every move type.** A regular diagonal step is
+excluded if its destination is occupied — by either color. A jump is excluded if its
+landing square is occupied, regardless of whether the jumped-over square holds an
+opponent piece; an occupied-by-opponent square does not automatically make that
+direction illegal, since it may still be a legal jump if the square beyond it is
+empty. Do not assume "occupied" collapses to one rule for both move types.
+
+**Any test asserting zero legal moves for a side must verify every piece of that
+color individually, not just the one the test is nominally about.** A test that
+places several same-color pieces on the board and blocks only one of them does not
+demonstrate "no legal moves" — it demonstrates "no legal moves for that one piece,"
+and `AllValidMoves` evaluates every piece of the color, not the one the test author
+had in mind. If a no-legal-moves scenario needs more than one piece on the board (to
+also test something else at the same time), every one of those pieces must
+independently have zero legal moves, or the assertion is false regardless of what the
+implementation does.
+
 ### Required test scenarios — move-execution bead
 
 **TestApplyMove/MultiJumpChain:** Red piece at `{5,2}`; Black pieces at `{4,3}` and
@@ -268,7 +293,7 @@ capture applies across the whole side's move set, not just to the jumping piece.
   type GameView struct {
       Board      [8][8]*Piece
       Selected   *Square
-      ValidDests map[[2]int]bool // destination squares for the selected piece
+      ValidDests map[[2]int]bool // key is [Row, Col], same order as Board[Row][Col]
       Message    string          // e.g. "Your turn", "AI wins!", "You win!"
       GameOver   bool
   }
@@ -308,11 +333,14 @@ capture applies across the whole side's move set, not just to the jumping piece.
   | POST   | /select   | game-area fragment  | Selects or deselects a piece; highlights moves  |
   | POST   | /move     | game-area fragment  | Executes human move + AI response               |
 
-- **notes**: `/select` takes query parameters `row` and `col`. `/move` takes
-  `from_row`, `from_col`, `to_row`, `to_col`. All POST endpoints return one HTML
-  fragment that HTMX swaps in its entirety with `hx-target="#game-area"` and
-  `hx-swap="outerHTML"` — this keeps the full-page shell (`<html>`, `<head>`,
-  `<body>`, `<h1>`) untouched across swaps.
+- **notes**: `/select` takes query parameters `row` and `col`. Clicking a square
+  containing one of the human player's own pieces while a different piece is
+  already selected replaces the selection with the newly clicked piece — it does
+  not require deselecting first. Clicking the currently-selected piece again
+  deselects it. `/move` takes `from_row`, `from_col`, `to_row`, `to_col`. All POST
+  endpoints return one HTML fragment that HTMX swaps in its entirety with
+  `hx-target="#game-area"` and `hx-swap="outerHTML"` — this keeps the full-page
+  shell (`<html>`, `<head>`, `<body>`, `<h1>`) untouched across swaps.
 
 ### Worked example — HTMX wiring
 

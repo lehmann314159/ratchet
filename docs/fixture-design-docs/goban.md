@@ -32,7 +32,7 @@ goban/
 ├── main.go          — var game *Game; func main() only
 ├── game.go          — Color, Point, Game, GameView types; NewGame, Group, Liberties, PlaceStone, Pass
 ├── scoring.go       — Territory, Score, CheckWinner
-├── ai.go            — ValidMoves, RandomAIMove
+├── ai.go            — RandomAIMove
 ├── handlers.go      — toView, HandleIndex, HandlePlace, HandlePass, HandleReset
 ├── templates.go     — InitTemplates, RenderIndex, RenderBoard (inline string templates only)
 ├── game_test.go     — tests for game.go
@@ -226,7 +226,7 @@ too large.
 
 **PlaceStone** composes the following steps in order:
 1. Validate bounds and occupancy.
-2. Reject if p == *g.KoPoint.
+2. Reject if g.KoPoint != nil and p == *g.KoPoint.
 3. Save g.Board as `saved`.
 4. Place stone at p.
 5. Remove all adjacent opponent groups with 0 liberties (captures).
@@ -516,7 +516,10 @@ winner := CheckWinner(g)
 - **producer:** ai (RandomAIMove)
 - **consumer:** http-handlers (HandlePlace, HandlePass)
 - **interface:** `func RandomAIMove(g *Game) (Point, bool, error)`
-- **notes:** After a successful human PlaceStone or Pass:
+- **notes:** If the human's `PlaceStone` call in `HandlePlace` returns a non-nil error
+  (illegal move), do not invoke this AI-response protocol at all: render current state
+  (unchanged `g`) with `RenderBoard` and an error `Message`, HTTP 200.
+  After a successful human PlaceStone or Pass:
   1. Call `CheckWinner(g)` — if non-Empty, render final state immediately (skip AI).
   2. Call `RandomAIMove(g)`. If `isPass==true`, call `Pass(g)`. Otherwise call
      `PlaceStone(g, aiMove)` (this should always succeed; log if it errors).
@@ -551,8 +554,11 @@ The game functions form a clear dependency chain:
 
 **Integration bead scope:** Start a game, place four Black stones to surround the single
 White stone at `{1,1}` (place Black at `{0,1}`,`{1,0}`,`{1,2}`,`{2,1}` using alternating
-moves), verify `{1,1}` is empty after the final capture. Do not test scoring or ko in
-the integration bead — those have their own unit tests.
+moves), verify `{1,1}` is empty after the final capture. Call `PlaceStone(g, ...)`
+directly for both Black and White moves — do NOT go through `HandlePlace`/
+`RandomAIMove` for this scenario, since AI moves are random and would make the
+scripted board position non-deterministic. Do not test scoring or ko in the
+integration bead — those have their own unit tests.
 
 **templates bead must come before http-handlers bead.** Handler tests use httptest and
 require `InitTemplates()` to parse real templates. If templates bead runs after
@@ -561,12 +567,16 @@ http-handlers, handler tests will get stub output.
 **Exit criterion for templates bead:** Must be a render test, not just a parse test.
 Render the "board" template with a synthetic GameView (empty board, Black to move,
 nil LastMove, GameOver=false) and verify the output contains exactly 81 occurrences of
-`class="intersection"`. `go build ./...` alone is not sufficient.
+the substring `class="intersection ` (note the trailing space — every rendered cell is
+`class="intersection empty"`, `class="intersection black"`, or `class="intersection
+white"`, never the bare closed literal `class="intersection"` with no trailing content).
+`go build ./...` alone is not sufficient.
 
 **Exit criterion for http-handlers bead:** Must use `net/http/httptest`. The smoke test
 must call `InitTemplates()`, then `HandleIndex`, and verify the response contains
-`id="board-container"` and at least one `class="intersection"`. `go build ./...` alone
-is not sufficient.
+`id="board-container"` and at least one occurrence of the substring `class="intersection `
+(same trailing-space note as above — never the bare closed literal). `go build ./...`
+alone is not sufficient.
 
 **The integration bead must write a new test file** (`integration_test.go`), not append
 to `game_test.go` or `handlers_test.go`.

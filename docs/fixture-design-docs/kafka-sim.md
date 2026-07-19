@@ -145,6 +145,12 @@ would let two goroutines both read the same "next offset" before either appends)
 FNV-1a 32-bit hash of `msg.Key` mod `len(t.Partitions)`, then delegates the actual
 append (and offset assignment) to that partition. It does not implement its own
 offset counter — the returned `offset` is exactly what `Partition.Append` returned.
+`err` is always `nil` for any `Topic` obtained via `Broker.CreateTopic` — since
+`CreateTopic` guarantees `numPartitions > 0` and partitions are never removed, there
+is no reachable failure state for `Produce` given the inputs this spec's test
+scenarios use. Do not add speculative validation (e.g. rejecting an empty
+`msg.Key`) that would make `err` non-nil in a case the rest of this spec treats as
+impossible.
 
 **`Broker.CreateTopic`/`Broker.Topic`** are pure registry operations over a
 name-keyed map; safe for concurrent use. `CreateTopic` with a name that already
@@ -157,7 +163,12 @@ partition's current log length once at the start of the call, then delivers exac
 the slice `[committedOffset, snapshotLength)` per partition, in offset order. It
 does not implicitly commit — `CommitOffset` is a separate, caller-driven step. If
 `handler.Handle` errors, delivery stops for that partition only; other partitions in
-the same `Subscribe` call still proceed.
+the same `Subscribe` call still proceed. Partitions are processed **sequentially**,
+in ascending partition-index order — `Subscribe` never invokes `handler.Handle`
+concurrently with itself, and `MessageHandler` implementations do not need to be
+safe for concurrent invocation. (The package's goroutines/channels/mutexes, per the
+Overview, protect `Partition.Append`'s concurrent producers — they are not a
+statement that `Subscribe` itself fans out across partitions.)
 
 **Function dependency chain**: `Partition.Append` is foundational; `Topic.Produce`
 builds on it; `Broker` is an independent registry layer; `ConsumerGroup` depends on
@@ -184,16 +195,20 @@ with `Key: "order-1"` routes to **partition 1**: FNV-1a 32-bit hash of `"order-1
 `729795949 mod 4 = 1`. Do NOT assert partition 0, 2, or 3 for this key — those are
 plausible-looking guesses, not the computed result.
 
-**TestProduce/DifferentKeyDifferentPartition:** The same topic (4 partitions).
-Producing a message with `Key: "order-2"` routes to **partition 0**: FNV-1a 32-bit
-hash of `"order-2"` is `679463092`, and `679463092 mod 4 = 0` — a different partition
-than `"order-1"` above, demonstrating the routing is key-dependent, not constant.
+**TestProduce/DifferentKeyDifferentPartition:** A fresh 4-partition topic (its own
+`CreateTopic` call — do not carry over partition state from `DeterministicRouting`
+above). Producing a message with `Key: "order-2"` routes to **partition 0**: FNV-1a
+32-bit hash of `"order-2"` is `679463092`, and `679463092 mod 4 = 0` — a different
+partition than `"order-1"` above, demonstrating the routing is key-dependent, not
+constant.
 
-**TestProduce/SameKeySamePartition:** Producing three messages with `Key: "order-1"`
-to the same 4-partition topic all route to **partition 1** (per
-`DeterministicRouting` above, since the hash depends only on the key), landing at
-offsets 0, 1, and 2 respectively — offsets increase per-message within that one
-partition regardless of how many other partitions exist.
+**TestProduce/SameKeySamePartition:** Another fresh 4-partition topic (its own
+`CreateTopic` call). Producing three messages with `Key: "order-1"` to it all route
+to **partition 1** (per `DeterministicRouting` above, since the hash depends only on
+the key), landing at offsets 0, 1, and 2 respectively — offsets increase per-message
+within that one partition. These offsets are only 0, 1, 2 because the topic is
+fresh; do not run this sub-test against a topic that has already received other
+`"order-1"` messages in an earlier sub-test.
 
 Do NOT compute a different hash algorithm (e.g. a simple sum of byte values, or
 Go's built-in `map` iteration/hash) — the spec requires `hash/fnv`'s FNV-1a 32-bit
