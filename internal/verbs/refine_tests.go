@@ -159,6 +159,61 @@ func runCompile(ctx context.Context, folderPath string) (ok bool, output string)
 	return err == nil, strings.TrimSpace(string(out))
 }
 
+// maxSnippetRuntime bounds a single run_go_snippet execution so a runaway or
+// looping snippet can't stall REFINE_TESTS_CRITIQUE. A var, not a const, so
+// tests can shrink it rather than waiting out the real timeout.
+var maxSnippetRuntime = 10 * time.Second
+
+// runGoSnippet compiles and runs a single self-contained Go source file
+// (package main, stdlib imports only) in an isolated temp directory,
+// returning its combined stdout+stderr (compile errors, panics, and normal
+// output are all returned this way — they're the useful signal, not an
+// exec-level failure). err is reserved for infrastructure problems (temp
+// dir creation, writing the file) that have nothing to do with the
+// snippet's own correctness.
+//
+// This exists so REFINE_TESTS_CRITIQUE can verify a specific claim about
+// Go/stdlib runtime behavior by actually executing it, instead of only
+// reasoning about it in text — see refineTestsCritiqueSystemPrompt. Root
+// cause of the 2026-07-20 exprvm-web-v1 incident this closes: across two
+// separate real beads, a CRITIQUE call reasoned in prose about (a) whether
+// html/template escapes '+' in rendered output, and (b) whether two
+// fmt.Errorf-produced errors compare equal with ==, and was confidently
+// wrong both times — an LLM predicting the shape of an answer is not the
+// same as Go actually computing it.
+func runGoSnippet(ctx context.Context, src string) (output string, err error) {
+	dir, mkErr := os.MkdirTemp("", "ratchet-snippet-*")
+	if mkErr != nil {
+		return "", fmt.Errorf("create snippet dir: %w", mkErr)
+	}
+	defer os.RemoveAll(dir)
+
+	// A minimal go.mod is required for `go run` to work at all outside an
+	// existing module tree (the temp dir isn't nested under one) — stdlib-only
+	// snippets need no dependencies, so this never touches the network.
+	if werr := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module snippet\n\ngo 1.21\n"), 0o644); werr != nil {
+		return "", fmt.Errorf("write snippet go.mod: %w", werr)
+	}
+	if werr := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o644); werr != nil {
+		return "", fmt.Errorf("write snippet main.go: %w", werr)
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, maxSnippetRuntime)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, "go", "run", "main.go")
+	cmd.Dir = dir
+	out, runErr := cmd.CombinedOutput()
+	if runCtx.Err() == context.DeadlineExceeded {
+		return "", fmt.Errorf("snippet exceeded %s timeout", maxSnippetRuntime)
+	}
+	result := strings.TrimSpace(string(out))
+	if runErr != nil && result == "" {
+		result = runErr.Error()
+	}
+	return result, nil
+}
+
 
 func cycleID(job *db.HandoffJob) int64 {
 	if job.RefinementCycleID.Valid {
@@ -548,6 +603,39 @@ func (h *RefineTestsWrite) Commit(ctx context.Context, tx *sql.Tx, job *db.Hando
 
 // --- REFINE_TESTS_CRITIQUE ---
 
+// runGoSnippetTool is available to REFINE_TESTS_CRITIQUE so it can verify a
+// specific, narrow claim about Go/stdlib runtime behavior by actually
+// executing it (via runGoSnippet) instead of only reasoning about it in
+// text. Not a general sandbox — the model doesn't need project files or
+// state to check "does html/template escape '+'" or "does comparing these
+// two errors with == succeed"; it only needs a stdlib-only, self-contained
+// program.
+var runGoSnippetTool = ollama.Tool{
+	Type: "function",
+	Function: ollama.ToolFunction{
+		Name: "run_go_snippet",
+		Description: "Compile and run a small, self-contained Go program to verify a specific factual claim " +
+			"about Go or standard-library runtime behavior (e.g. does a given string survive a particular " +
+			"escaping/formatting function unchanged, does a comparison evaluate as expected). Use this before " +
+			"citing any such claim in a finding — do not guess or rely on general impressions of how Go " +
+			"behaves. The program must be complete (package main, func main, stdlib imports only) and print " +
+			"whatever result answers your question.",
+		Parameters: ollama.ToolParameters{
+			Type: "object",
+			Properties: map[string]ollama.ToolProperty{
+				"source": {Type: "string", Description: "Complete Go source: 'package main' through the final '}', stdlib imports only."},
+			},
+			Required: []string{"source"},
+		},
+	},
+}
+
+// critiqueSnippetTurns bounds how many run_go_snippet round-trips a single
+// REFINE_TESTS_CRITIQUE call may use before it must give its final verdict —
+// enough for a handful of independent verifications without letting the
+// call run indefinitely.
+const critiqueSnippetTurns = 6
+
 type RefineTestsCritique struct{}
 
 func (h *RefineTestsCritique) Verb() string { return db.VerbRefineTestsCritique }
@@ -570,10 +658,49 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 	}
 	userMsg += "\n\n## Current Test File\n\n" + strings.TrimSpace(currentTestContent)
 
-	return oc.Chat(ctx, model, []ollama.Message{
+	messages := []ollama.Message{
 		{Role: "system", Content: refineTestsCritiqueSystemPrompt},
 		{Role: "user", Content: userMsg},
-	}, nil)
+	}
+
+	// Tool loop: the model may call run_go_snippet to verify a runtime-
+	// behavior claim before giving its final JSON verdict. Mirrors
+	// RefineTestsWrite's turn loop below. A turn that calls no tools ends
+	// the loop — its Content is the final verdict.
+	var lastContent string
+	for turn := 1; turn <= critiqueSnippetTurns; turn++ {
+		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetTool}, nil, nil)
+		if toolErr != nil {
+			return "", toolErr
+		}
+		if strings.TrimSpace(msg.Content) != "" {
+			lastContent = msg.Content
+		}
+		if len(msg.ToolCalls) == 0 {
+			return msg.Content, nil
+		}
+
+		messages = append(messages, msg)
+		for _, tc := range msg.ToolCalls {
+			var result string
+			if tc.Function.Name != "run_go_snippet" {
+				result = fmt.Sprintf("error: unknown tool %q — only run_go_snippet is available", tc.Function.Name)
+			} else if src, _ := tc.Function.Arguments["source"].(string); strings.TrimSpace(src) == "" {
+				result = "error: source is empty"
+			} else if out, rerr := runGoSnippet(ctx, src); rerr != nil {
+				result = fmt.Sprintf("error: %v", rerr)
+			} else if out == "" {
+				result = "(snippet ran with no output — add a print statement to see a result)"
+			} else {
+				result = out
+			}
+			messages = append(messages, ollama.Message{Role: "tool", Content: result})
+		}
+	}
+	// Turn cap reached without a final non-tool response — return whatever
+	// content the model last produced (Validate will reject it as malformed
+	// if it isn't valid JSON, triggering the normal retry path).
+	return lastContent, nil
 }
 
 func (h *RefineTestsCritique) Validate(rawOutput string) (string, any) {
