@@ -1,6 +1,9 @@
 package verbs
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Each table-driven test covers: one valid case, each required-field
 // constraint, and verb-specific logic (causal phrases, consistency check).
@@ -384,6 +387,83 @@ func TestAdjudicateNextExecutionValidate(t *testing.T) {
 		{"not JSON", `not json`, false},
 	}
 	runValidate(t, h.Validate, tests)
+}
+
+// TestAdjudicateNextExecutionForcedReRefine covers the 2026-07-20
+// exprvm-web-v1 bead 33 incident: ADJUDICATE saw byte-identical test failure
+// output across attempts with genuinely different generated implementations
+// and, instead of recognizing the test's assertion as unsatisfiable, invented
+// an ungrounded code-level defect and re-asserted it with growing confidence
+// across rounds — never choosing re_refine despite the prompt-level guidance
+// already telling it to default there. Validate now enforces this
+// mechanically when forcedReRefineNames is populated (by Run, from
+// recurringTestFailureNote's identical tier gated on a verified
+// implementation diff — see adjudicate_next_execution.go).
+func TestAdjudicateNextExecutionForcedReRefine(t *testing.T) {
+	modelChoseExecuteRevised := `{"trend":"same","bead_spec_fit":"execution_capability_problem",` +
+		`"reasoning":"the model keeps writing a malformed closing tag","decision":"execute_revised",` +
+		`"revised_bead":{"title":"B01","full_text":"x","execution_budget":300,"monitor_override":"honor",` +
+		`"output_files":["b01.go"],"exit_criteria":["go build ./..."]}}`
+
+	t.Run("model's non-re_refine decision is overridden when forced names are set", func(t *testing.T) {
+		h := &AdjudicateNextExecution{
+			forcedReRefineNames: []string{"TestFoo/Bar"},
+			forcedReRefineText:  map[string]string{"TestFoo/Bar": "expected \"1 + 1\" in output"},
+		}
+		result, parsed := h.Validate(modelChoseExecuteRevised)
+		if result != "valid" {
+			t.Fatalf("Validate() = %q, want \"valid\"", result)
+		}
+		out, ok := parsed.(AdjudicateNextExecutionOutput)
+		if !ok {
+			t.Fatalf("parsed is %T, want AdjudicateNextExecutionOutput", parsed)
+		}
+		if out.Decision != "re_refine" {
+			t.Errorf("Decision = %q, want forced \"re_refine\"", out.Decision)
+		}
+		if strings.TrimSpace(out.ReRefineGuidance) == "" {
+			t.Error("re_refine_guidance is empty after forcing — Commit requires it non-empty")
+		}
+		if !strings.Contains(out.ReRefineGuidance, "TestFoo/Bar") {
+			t.Errorf("re_refine_guidance = %q, want it to name the forced subtest", out.ReRefineGuidance)
+		}
+		if !strings.Contains(out.ReRefineGuidance, "malformed closing tag") {
+			t.Error("re_refine_guidance should preserve the model's own original reasoning for context")
+		}
+		if out.RevisedBead != nil {
+			t.Error("RevisedBead should be cleared once the decision is overridden away from execute_revised")
+		}
+	})
+
+	t.Run("model already choosing re_refine is left alone", func(t *testing.T) {
+		h := &AdjudicateNextExecution{
+			forcedReRefineNames: []string{"TestFoo/Bar"},
+			forcedReRefineText:  map[string]string{"TestFoo/Bar": "expected \"1 + 1\" in output"},
+		}
+		input := `{"trend":"not_applicable","bead_spec_fit":"not_applicable",` +
+			`"reasoning":"the assertion cannot be satisfied","decision":"re_refine",` +
+			`"re_refine_guidance":"rewrite the test to expect the escaped form"}`
+		result, parsed := h.Validate(input)
+		if result != "valid" {
+			t.Fatalf("Validate() = %q, want \"valid\"", result)
+		}
+		out := parsed.(AdjudicateNextExecutionOutput)
+		if out.ReRefineGuidance != "rewrite the test to expect the escaped form" {
+			t.Errorf("re_refine_guidance = %q, want the model's own unmodified guidance preserved", out.ReRefineGuidance)
+		}
+	})
+
+	t.Run("no forced names leaves the model's decision untouched", func(t *testing.T) {
+		h := &AdjudicateNextExecution{}
+		result, parsed := h.Validate(modelChoseExecuteRevised)
+		if result != "valid" {
+			t.Fatalf("Validate() = %q, want \"valid\"", result)
+		}
+		out := parsed.(AdjudicateNextExecutionOutput)
+		if out.Decision != "execute_revised" {
+			t.Errorf("Decision = %q, want untouched \"execute_revised\" when no forced names are set", out.Decision)
+		}
+	})
 }
 
 // runValidate is a shared table-driven driver for Validate tests.

@@ -466,7 +466,12 @@ func extractTestOutput(findings, testName string) string {
 // test's expectation is wrong, than that both attempts made the identical
 // mistake. That case gets its own, more assertive note instead of leaving the
 // distinction to the model's judgment.
-func recurringTestFailureNote(ctx context.Context, d *db.DB, beadID int64) string {
+// recurringTestFailureNote's return also surfaces the "identical" tier by
+// name/text so the caller can enforce it mechanically (see the
+// forcedReRefine* fields on AdjudicateNextExecution and its use in
+// Validate) instead of leaving it as prose the model can talk itself out of
+// — see the 2026-07-20 exprvm-web-v1 bead 33 incident referenced below.
+func recurringTestFailureNote(ctx context.Context, d *db.DB, beadID int64) (note string, identicalNames []string, identicalText map[string]string) {
 	rows, err := d.QueryContext(ctx, `
 		SELECT e.trace_path, a.mechanical_findings
 		FROM executions e
@@ -474,7 +479,7 @@ func recurringTestFailureNote(ctx context.Context, d *db.DB, beadID int64) strin
 		WHERE e.bead_id = ? AND e.infra_failure = 0 AND e.test_first_attempt = 0
 		ORDER BY e.id DESC LIMIT 5`, beadID)
 	if err != nil {
-		return ""
+		return "", nil, nil
 	}
 	defer rows.Close()
 
@@ -483,7 +488,7 @@ func recurringTestFailureNote(ctx context.Context, d *db.DB, beadID int64) strin
 	for rows.Next() && len(failNames) < 2 {
 		var tracePath, findings string
 		if err := rows.Scan(&tracePath, &findings); err != nil {
-			return ""
+			return "", nil, nil
 		}
 		data, err := os.ReadFile(tracePath)
 		if err != nil {
@@ -508,7 +513,7 @@ func recurringTestFailureNote(ctx context.Context, d *db.DB, beadID int64) strin
 		findingsByAttempt = append(findingsByAttempt, findings)
 	}
 	if err := rows.Err(); err != nil || len(failNames) < 2 {
-		return ""
+		return "", nil, nil
 	}
 
 	var shared []string
@@ -518,7 +523,7 @@ func recurringTestFailureNote(ctx context.Context, d *db.DB, beadID int64) strin
 		}
 	}
 	if len(shared) == 0 {
-		return ""
+		return "", nil, nil
 	}
 	sort.Strings(shared)
 
@@ -527,7 +532,7 @@ func recurringTestFailureNote(ctx context.Context, d *db.DB, beadID int64) strin
 	// subtest name with different content (weaker — still worth a note, but
 	// less conclusive).
 	var identical, differing []string
-	identicalText := map[string]string{}
+	identicalText = map[string]string{}
 	for _, name := range shared {
 		latest := extractTestOutput(findingsByAttempt[0], name)
 		prior := extractTestOutput(findingsByAttempt[1], name)
@@ -573,12 +578,91 @@ func recurringTestFailureNote(ctx context.Context, d *db.DB, beadID int64) strin
 			"re_refine_guidance. If instead you can name a specific, untried implementation change " +
 			"that would satisfy the assertion, use execute_revised and describe that change.")
 	}
-	return strings.TrimSpace(b.String())
+
+	// Only the identical tier is eligible for mechanical enforcement (see
+	// Validate), and only when the actual generated implementation differs
+	// between the two attempts. Byte-identical test failure text from
+	// byte-identical (or near-identical) implementation code is exactly the
+	// case a prior audit finding walked back an unconditional "issue
+	// decision=re_refine" command for — a real, unfixed implementation bug the
+	// model keeps regenerating unchanged looks identical to an unsatisfiable
+	// assertion at this signal alone. Requiring the code to have actually
+	// changed while the failure stayed identical is what makes it safe to
+	// enforce: two *different* implementations converging on the same result.
+	if len(identical) > 0 && implementationChangedBetweenAttempts(findingsByAttempt[0], findingsByAttempt[1]) {
+		return strings.TrimSpace(b.String()), identical, identicalText
+	}
+	return strings.TrimSpace(b.String()), nil, nil
+}
+
+// reOutputFileBlock matches one checkOutputFiles-produced entry: a relative
+// path, its "present (N bytes...)" status line, and the fenced code block
+// holding its full content. Only present when the file is under
+// maxInlineFileBytes — an omitted-content file yields no match here, which
+// implementationChangedBetweenAttempts treats as unverifiable (see its
+// doc comment).
+var reOutputFileBlock = regexp.MustCompile("(?ms)^(\\S+): present \\(\\d+ bytes(?:, \\d+ test function\\(s\\))?\\)\\n```\\n(.*?)\\n```$")
+
+// nonTestImplementationBlocks extracts path -> full file content for every
+// non-test output file checkOutputFiles inlined into an ANALYZE_EXECUTION
+// mechanical_findings blob.
+func nonTestImplementationBlocks(findings string) map[string]string {
+	blocks := map[string]string{}
+	for _, m := range reOutputFileBlock.FindAllStringSubmatch(findings, -1) {
+		if strings.HasSuffix(m[1], "_test.go") {
+			continue
+		}
+		blocks[m[1]] = m[2]
+	}
+	return blocks
+}
+
+// implementationChangedBetweenAttempts reports whether any non-test output
+// file's actual content differs between two attempts' mechanical findings.
+// Returns false — the safe default — when either side yields no extractable
+// implementation blocks at all (e.g. a file exceeded maxInlineFileBytes, or
+// output_files changed shape between attempts): an unverifiable comparison
+// must never be treated as "confirmed different," since that's the signal
+// that gates mechanical enforcement in recurringTestFailureNote.
+func implementationChangedBetweenAttempts(findingsA, findingsB string) bool {
+	blocksA := nonTestImplementationBlocks(findingsA)
+	blocksB := nonTestImplementationBlocks(findingsB)
+	if len(blocksA) == 0 || len(blocksB) == 0 {
+		return false
+	}
+	if len(blocksA) != len(blocksB) {
+		return true
+	}
+	for path, contentA := range blocksA {
+		if contentB, ok := blocksB[path]; !ok || contentA != contentB {
+			return true
+		}
+	}
+	return false
 }
 
 type AdjudicateNextExecution struct {
 	budgetDefault int    // cached from Run for use in Commit
 	folderPath    string // cached from Run for use in Commit
+
+	// forcedReRefineNames/Text cache recurringTestFailureNote's "identical" tier
+	// (byte-identical failure across the last 2 genuinely-rewritten attempts) so
+	// Validate can enforce decision=re_refine mechanically rather than merely
+	// suggesting it in the prompt. See the 2026-07-20 exprvm-web-v1 bead 33
+	// incident: ADJUDICATE saw this exact evidence across 3+ rounds and instead
+	// of recognizing the test's assertion was unsatisfiable (html/template
+	// correctly escaping '+' to '&#43;', which the test's literal substring
+	// check could never match), it invented and progressively re-asserted a
+	// fabricated code-level defect (claiming the model wrote "</div" instead of
+	// "</div>" — textually identical strings in its own reasoning) that wasn't
+	// grounded in the actual generated source at all. Once that false claim
+	// entered the bead's revision log via a prior execute_revised, it kept
+	// resurfacing and getting more confident each round, overriding the
+	// "default to re_refine" prompt guidance every time. Prompt wording alone
+	// is not a reliable enforcement mechanism here — prefer the mechanical
+	// check already computed above it.
+	forcedReRefineNames []string
+	forcedReRefineText  map[string]string
 }
 
 func (h *AdjudicateNextExecution) Verb() string { return db.VerbAdjudicateNextExecution }
@@ -674,8 +758,16 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 			"assertion to pass with a correct implementation? If not, use re_refine. " +
 			"re_refine_guidance should identify each broken assertion, why it cannot be " +
 			"satisfied by a correct implementation, and which function contains it."
-		if note := recurringTestFailureNote(ctx, d, beadID); note != "" {
+		if note, identicalNames, identicalText := recurringTestFailureNote(ctx, d, beadID); note != "" {
 			findings += "\n\n" + note
+			if len(identicalNames) > 0 {
+				findings += "\n\n[NOTE: the identical-output subtest(s) above will have " +
+					"decision mechanically forced to re_refine regardless of what you answer, " +
+					"per the note text — you may still explain your own reasoning, but set " +
+					"re_refine_guidance as if decision=re_refine either way.]"
+				h.forcedReRefineNames = identicalNames
+				h.forcedReRefineText = identicalText
+			}
 		}
 	}
 	userMsg := buildAdjudicateUserMsg(currentBead, revLog, findings, compressedHistory, diffSignal)
@@ -797,6 +889,37 @@ func (h *AdjudicateNextExecution) Validate(raw string) (string, any) {
 	validDecisions := map[string]bool{"execute_as_is": true, "execute_revised": true, "full_stop": true, "declare_success": true, "test_reject": true, "re_refine": true}
 	if !validDecisions[out.Decision] {
 		return fmt.Sprintf("malformed: decision must be \"execute_as_is\", \"execute_revised\", \"full_stop\", \"declare_success\", \"test_reject\", or \"re_refine\", got %q", out.Decision), nil
+	}
+
+	// Mechanical override: recurringTestFailureNote found byte-identical test
+	// failure output across the last 2 genuinely-rewritten implementation
+	// attempts (see forcedReRefineNames' doc comment for the incident this
+	// closes). That is strong enough evidence that a correct implementation
+	// cannot satisfy the assertion that the decision is forced to re_refine
+	// here rather than left to the model, which has been observed to instead
+	// invent an ungrounded code-level explanation and repeat it with growing
+	// confidence across rounds rather than reconsider. The model's own
+	// diagnosis (whatever it was) is preserved as context inside the forced
+	// re_refine_guidance below, not discarded.
+	if len(h.forcedReRefineNames) > 0 && out.Decision != "re_refine" {
+		slog.Warn("ADJUDICATE decision mechanically overridden to re_refine",
+			"model_decision", out.Decision, "forced_subtests", h.forcedReRefineNames)
+		var g strings.Builder
+		g.WriteString("[This decision was mechanically forced to re_refine by the orchestrator " +
+			"— the model originally chose decision=\"" + out.Decision + "\". The following " +
+			"subtest(s) produced byte-identical failure output across the last two attempts " +
+			"that each genuinely rewrote the implementation, which is conclusive evidence the " +
+			"test's assertion — not the implementation — is the defect:]\n\n")
+		for _, name := range h.forcedReRefineNames {
+			fmt.Fprintf(&g, "  %s:\n    %s\n\n", name, h.forcedReRefineText[name])
+		}
+		g.WriteString("Re-derive by hand, from the test's own setup, what a correct " +
+			"implementation must produce (including any output-encoding/escaping the spec " +
+			"requires); rewrite the assertion to match that. The model's own original " +
+			"reasoning, preserved for context, was:\n\n" + out.Reasoning)
+		out.Decision = "re_refine"
+		out.ReRefineGuidance = g.String()
+		out.RevisedBead = nil
 	}
 
 	if out.Decision == "execute_revised" {
