@@ -461,6 +461,38 @@ func extractTestOutput(findings, testName string) string {
 	return strings.TrimSpace(m[1])
 }
 
+// latestExecutionPassed reports whether the single most recent qualifying
+// execution (infra_failure=0, test_first_attempt=0) for beadID actually ran
+// its tests and passed: zero "--- FAIL:" lines AND at least one "--- PASS:"
+// line in its captured findings. Requiring an explicit PASS (not just the
+// absence of FAIL) avoids a false positive on an attempt that got killed
+// before it ever ran the test command at all — that has zero FAIL lines too,
+// but is "no data," not "passing." Returns false (safe default: proceed
+// with the recurrence check) if there is no qualifying execution yet, or
+// its data can't be read.
+func latestExecutionPassed(ctx context.Context, d *db.DB, beadID int64) bool {
+	var findings string
+	err := d.QueryRowContext(ctx, `
+		SELECT a.mechanical_findings
+		FROM executions e
+		JOIN analyses a ON a.execution_id = e.id
+		WHERE e.bead_id = ? AND e.infra_failure = 0 AND e.test_first_attempt = 0
+		ORDER BY e.id DESC LIMIT 1`, beadID,
+	).Scan(&findings)
+	if err != nil {
+		return false
+	}
+	if len(reFailedTestName.FindAllStringSubmatch(findings, -1)) > 0 {
+		return false
+	}
+	return rePassedTestName.MatchString(findings)
+}
+
+// rePassedTestName matches "--- PASS: <name>" lines, tolerating the same
+// leading whitespace reFailedTestName does (see extractTestOutput's doc
+// comment for why real captured findings text is indented).
+var rePassedTestName = regexp.MustCompile(`(?m)^\s*--- PASS:`)
+
 // recurringTestFailureNote detects the pattern behind the [REFINE_TESTS bead]
 // guidance below: the same named subtest failing identically across the last
 // two attempts that actually revised the implementation. That guidance was
@@ -488,7 +520,21 @@ func extractTestOutput(findings, testName string) string {
 // forcedReRefine* fields on AdjudicateNextExecution and its use in
 // Validate) instead of leaving it as prose the model can talk itself out of
 // — see the 2026-07-20 exprvm-web-v1 bead 33 incident referenced below.
+//
+// Guards on latestExecutionPassed first: a second, separate exprvm-web-v1
+// bead 33 incident (same day) showed this function's "last 2 attempts"
+// window walks backward through whichever executions qualify, with no check
+// on whether a *more recent* execution already passed. It paired two stale,
+// pre-fix failing attempts (from before REFINE_TESTS_WRITE's next cycle
+// rewrote the test correctly) and forced re_refine on that basis, even
+// though the actual latest execution — one the window's own age-based walk
+// had already stepped past — succeeded outright. A pass supersedes any
+// prior failure pattern; if the bead is currently passing there is no
+// "recurring failure" to explain, regardless of history.
 func recurringTestFailureNote(ctx context.Context, d *db.DB, beadID int64) (note string, identicalNames []string, identicalText map[string]string) {
+	if latestExecutionPassed(ctx, d, beadID) {
+		return "", nil, nil
+	}
 	rows, err := d.QueryContext(ctx, `
 		SELECT e.trace_path, a.mechanical_findings
 		FROM executions e

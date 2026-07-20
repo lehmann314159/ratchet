@@ -296,3 +296,111 @@ func TestExtractTestOutputRealIndentation(t *testing.T) {
 		t.Errorf("attempt 2 extracted = %q, want it to match attempt 1's %q despite differing trailing timing noise", got2, got)
 	}
 }
+
+// TestRecurringTestFailureNoteSkipsWhenLatestPassed covers the second
+// 2026-07-20 exprvm-web-v1 bead 33 incident, distinct from the first: the
+// "identical failure" override correctly detected two old, stale
+// pre-fix attempts sharing byte-identical "1 + 1" failure text and forced
+// re_refine — discarding a genuinely correct declare_success, because a
+// *third, more recent* execution had already passed and the window-walk
+// never checked for that. A pass must supersede any earlier failure
+// pattern, no matter how it compares.
+func TestRecurringTestFailureNoteSkipsWhenLatestPassed(t *testing.T) {
+	d := openTestDB(t)
+	seedProject(t, d, -1, "recurring-failure-fixture-7")
+	beadID, revID := seedBead(t, d, -1, "B01")
+	dir := t.TempDir()
+
+	sameOutput := map[string]string{
+		"TestTemplates/RenderRepl/Entry": "templates_test.go:75: expected output to contain \"1 + 1\"",
+	}
+	sameImpl1 := map[string]string{"templates.go": "package main\n\n// version A\n"}
+	sameImpl2 := map[string]string{"templates.go": "package main\n\n// version B\n"}
+
+	// order 1, 2: two stale attempts with genuinely different implementations,
+	// both failing identically — exactly what should normally force re_refine.
+	seedRecurringFailureExecutionWithOutputAndImpl(t, d, dir, beadID, revID, 1, sameOutput, sameImpl1, "TestTemplates/RenderRepl/Entry")
+	seedRecurringFailureExecutionWithOutputAndImpl(t, d, dir, beadID, revID, 2, sameOutput, sameImpl2, "TestTemplates/RenderRepl/Entry")
+
+	// order 3: a later, passing attempt — the fixed test.
+	seedPassingExecution(t, d, dir, beadID, revID, 3)
+
+	note, names, _ := recurringTestFailureNote(context.Background(), d, beadID)
+	if note != "" || len(names) != 0 {
+		t.Errorf("note=%q names=%v, want both empty — the latest execution passed, so no recurrence should be reported regardless of older failures", note, names)
+	}
+}
+
+func TestLatestExecutionPassed(t *testing.T) {
+	t.Run("true when the latest execution has a PASS line and no FAIL", func(t *testing.T) {
+		d := openTestDB(t)
+		seedProject(t, d, -1, "latest-passed-fixture-1")
+		beadID, revID := seedBead(t, d, -1, "B01")
+		dir := t.TempDir()
+		seedPassingExecution(t, d, dir, beadID, revID, 1)
+
+		if !latestExecutionPassed(context.Background(), d, beadID) {
+			t.Error("want true for an execution with a genuine PASS line")
+		}
+	})
+
+	t.Run("false when the latest execution has a FAIL line", func(t *testing.T) {
+		d := openTestDB(t)
+		seedProject(t, d, -1, "latest-passed-fixture-2")
+		beadID, revID := seedBead(t, d, -1, "B01")
+		dir := t.TempDir()
+		seedRecurringFailureExecution(t, d, dir, beadID, revID, 1, "TestFoo/Bar")
+
+		if latestExecutionPassed(context.Background(), d, beadID) {
+			t.Error("want false for an execution with a FAIL line")
+		}
+	})
+
+	t.Run("false when no data — no commands were run", func(t *testing.T) {
+		d := openTestDB(t)
+		seedProject(t, d, -1, "latest-passed-fixture-3")
+		beadID, revID := seedBead(t, d, -1, "B01")
+		dir := t.TempDir()
+		// No FAIL lines and no PASS lines — an attempt killed before it ever
+		// ran the test command. Must not be mistaken for a pass.
+		seedRecurringFailureExecution(t, d, dir, beadID, revID, 1)
+
+		if latestExecutionPassed(context.Background(), d, beadID) {
+			t.Error("want false — absence of FAIL is not evidence of PASS")
+		}
+	})
+}
+
+// seedPassingExecution inserts one execution + analyses row for beadID
+// shaped like a genuinely passing `go test -v` run (a real "--- PASS:"
+// line, no "--- FAIL:" anywhere), so tests can exercise latestExecutionPassed.
+func seedPassingExecution(t *testing.T, d *db.DB, dir string, beadID, revID int64, order int) {
+	t.Helper()
+	ctx := context.Background()
+
+	tracePath := filepath.Join(dir, fmt.Sprintf("trace-pass-%d.log", order))
+	trace := "[TURN 1]\n[tool: write_file map[content:package main] path:game.go]]\n[result]\nok: wrote game.go\n"
+	if err := os.WriteFile(tracePath, []byte(trace), 0o644); err != nil {
+		t.Fatalf("write trace: %v", err)
+	}
+
+	findings := "=== RUN   TestFoo\n--- PASS: TestFoo (0.00s)\nPASS\n"
+	startedAt := fmt.Sprintf("2026-02-%02dT00:00:00Z", order)
+	res, err := d.ExecContext(ctx, `
+		INSERT INTO executions
+		  (project_id, bead_id, bead_revision_id, trace_path, termination_cause,
+		   monitor_fired, monitor_honored, started_at, ended_at)
+		VALUES (-1, ?, ?, ?, 'success', 0, 1, ?, ?)`,
+		beadID, revID, tracePath, startedAt, startedAt)
+	if err != nil {
+		t.Fatalf("seed execution: %v", err)
+	}
+	execID, _ := res.LastInsertId()
+
+	if _, err := d.ExecContext(ctx, `
+		INSERT INTO analyses (project_id, execution_id, mechanical_findings, analyzer_interpretation, created_at)
+		VALUES (-1, ?, ?, '', ?)`,
+		execID, findings, startedAt); err != nil {
+		t.Fatalf("seed analysis: %v", err)
+	}
+}
