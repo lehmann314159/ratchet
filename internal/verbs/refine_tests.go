@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -609,7 +610,15 @@ func (h *RefineTestsCritique) Commit(ctx context.Context, tx *sql.Tx, job *db.Ha
 
 // --- REFINE_TESTS_JUDGE ---
 
-type RefineTestsJudge struct{}
+type RefineTestsJudge struct {
+	// fromAdjudicateReRefine/adjudicateGuidance/currentTestContent cache
+	// state from Run for Validate to enforce a mechanical override: see
+	// their use in Validate for why this exists (2026-07-20 exprvm-web-v1
+	// bead 33 incident).
+	fromAdjudicateReRefine bool
+	adjudicateGuidance     string
+	currentTestContent     string
+}
 
 func (h *RefineTestsJudge) Verb() string { return db.VerbRefineTestsJudge }
 
@@ -618,6 +627,7 @@ func (h *RefineTestsJudge) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	if err != nil {
 		return "", err
 	}
+	h.currentTestContent = currentTestContent
 
 	model, err := loadVerbModel(ctx, d, job.ProjectID, h.Verb())
 	if err != nil {
@@ -638,7 +648,20 @@ func (h *RefineTestsJudge) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	).Scan(&critiqueRaw)
 
 	if critiqueRaw == "" {
-		// Fallback: use the summary stored in test_refinements.
+		// Fallback: use the summary stored in test_refinements. Reaching this
+		// branch means no real REFINE_TESTS_CRITIQUE job ran this cycle — the
+		// only way that happens is ADJUDICATE_NEXT_EXECUTION's re_refine
+		// decision injecting its own diagnosis directly (see its Commit,
+		// "Inject ADJUDICATE's diagnosis as CRITIQUE findings"). That
+		// diagnosis is not shaped like a real CRITIQUE's structured
+		// findings/all_correct JSON — it's free-form, often hedged prose
+		// ("if this is failing consistently... the expected value ... is
+		// incorrect") — and JUDGE's prompt, written assuming CRITIQUE-shaped
+		// input, is not reliably recognizing it as "genuine correctness
+		// problems". Track this so Validate can enforce the already-made
+		// upstream decision rather than let JUDGE silently rubber-stamp a
+		// test ADJUDICATE has already diagnosed as broken.
+		h.fromAdjudicateReRefine = true
 		_ = d.QueryRowContext(ctx, `
 			SELECT summary FROM test_refinements
 			WHERE bead_id = ? AND verb = ? AND cycle_id = ?
@@ -646,6 +669,7 @@ func (h *RefineTestsJudge) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 			job.BeadID.Int64, db.VerbRefineTestsCritique, cid,
 		).Scan(&critiqueRaw)
 	}
+	h.adjudicateGuidance = critiqueRaw
 
 	userMsg := "## Test File\n\n" + strings.TrimSpace(currentTestContent)
 	userMsg += "\n\n## Critique Findings\n\n" + critiqueRaw
@@ -672,6 +696,42 @@ func (h *RefineTestsJudge) Validate(rawOutput string) (string, any) {
 	}
 	if out.Decision == "revise" && len(out.FunctionsToRewrite) == 0 {
 		return "malformed: decision is 'revise' but functions_to_rewrite is empty", nil
+	}
+
+	// Mechanical override: this cycle's "critique findings" came from
+	// ADJUDICATE_NEXT_EXECUTION's re_refine diagnosis, not a real
+	// REFINE_TESTS_CRITIQUE call — that decision has already been made
+	// upstream (ADJUDICATE only reaches re_refine on strong mechanical
+	// evidence: byte-identical failure across genuinely different
+	// implementations, or an explicit forced override — see
+	// adjudicate_next_execution.go). JUDGE re-approving here isn't a
+	// legitimate second opinion, it's silently discarding that diagnosis: the
+	// test stays unchanged, and the bead is guaranteed to fail EXECUTE_BEAD
+	// identically again. Force revise, targeting every top-level Test* func
+	// in the current file (a general fallback since the diagnosis names
+	// subtests, not top-level function names) with the diagnosis itself as
+	// instructions.
+	if h.fromAdjudicateReRefine && out.Decision == "approved" {
+		funcs, ferr := splice.FuncMap(h.currentTestContent)
+		var names []string
+		if ferr == nil {
+			for name := range funcs {
+				if strings.HasPrefix(name, "Test") {
+					names = append(names, name)
+				}
+			}
+			sort.Strings(names)
+		}
+		if len(names) > 0 && strings.TrimSpace(h.adjudicateGuidance) != "" {
+			slog.Warn("REFINE_TESTS_JUDGE decision mechanically overridden to revise",
+				"model_decision", out.Decision, "forced_functions", names)
+			out.Decision = "revise"
+			out.FunctionsToRewrite = names
+			out.Instructions = flexString("[Forced by the orchestrator — ADJUDICATE_NEXT_EXECUTION already " +
+				"diagnosed this test via re_refine; approving it here would silently discard that diagnosis " +
+				"and guarantee an identical failure on the next attempt.]\n\n" + h.adjudicateGuidance)
+			out.Summary = "forced revision — ADJUDICATE's re_refine diagnosis was not acted on"
+		}
 	}
 	return "valid", out
 }

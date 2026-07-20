@@ -466,6 +466,77 @@ func TestAdjudicateNextExecutionForcedReRefine(t *testing.T) {
 	})
 }
 
+// TestRefineTestsJudgeForcedRevise covers the other half of the 2026-07-20
+// exprvm-web-v1 bead 33 incident: after ADJUDICATE_NEXT_EXECUTION correctly
+// chose re_refine (recognizing the "1+1" assertion could never survive
+// html/template's escaping), REFINE_TESTS_JUDGE was handed that diagnosis via
+// the test_refinements fallback and responded "approved" with zero
+// rewrites — silently discarding the diagnosis and leaving the test
+// unchanged, guaranteeing an identical failure on the next EXECUTE_BEAD.
+// Validate now enforces the already-made upstream decision when this
+// fallback path was used (see fromAdjudicateReRefine's doc comment).
+func TestRefineTestsJudgeForcedRevise(t *testing.T) {
+	testFile := "package main\n\nimport \"testing\"\n\nfunc TestTemplates(t *testing.T) {}\n"
+	modelApproved := `{"decision":"approved","functions_to_rewrite":[],"instructions":"","summary":"approved"}`
+
+	t.Run("approved from an ADJUDICATE re_refine fallback is overridden to revise", func(t *testing.T) {
+		h := &RefineTestsJudge{
+			fromAdjudicateReRefine: true,
+			adjudicateGuidance:     "Assertion `expected body to contain \"1+1\"` cannot be satisfied — html/template escapes '+' to '&#43;'.",
+			currentTestContent:     testFile,
+		}
+		result, parsed := h.Validate(modelApproved)
+		if result != "valid" {
+			t.Fatalf("Validate() = %q, want \"valid\"", result)
+		}
+		out, ok := parsed.(RefineTestsJudgeOutput)
+		if !ok {
+			t.Fatalf("parsed is %T, want RefineTestsJudgeOutput", parsed)
+		}
+		if out.Decision != "revise" {
+			t.Errorf("Decision = %q, want forced \"revise\"", out.Decision)
+		}
+		if len(out.FunctionsToRewrite) != 1 || out.FunctionsToRewrite[0] != "TestTemplates" {
+			t.Errorf("FunctionsToRewrite = %v, want exactly [TestTemplates] derived from the current test file", out.FunctionsToRewrite)
+		}
+		if !strings.Contains(string(out.Instructions), "1+1") {
+			t.Errorf("Instructions = %q, want it to preserve ADJUDICATE's original diagnosis", out.Instructions)
+		}
+	})
+
+	t.Run("approved from a real REFINE_TESTS_CRITIQUE cycle is left alone", func(t *testing.T) {
+		h := &RefineTestsJudge{
+			fromAdjudicateReRefine: false,
+			currentTestContent:     testFile,
+		}
+		result, parsed := h.Validate(modelApproved)
+		if result != "valid" {
+			t.Fatalf("Validate() = %q, want \"valid\"", result)
+		}
+		out := parsed.(RefineTestsJudgeOutput)
+		if out.Decision != "approved" {
+			t.Errorf("Decision = %q, want untouched \"approved\" for a normal (non-fallback) cycle", out.Decision)
+		}
+	})
+
+	t.Run("revise from an ADJUDICATE re_refine fallback is left alone", func(t *testing.T) {
+		h := &RefineTestsJudge{
+			fromAdjudicateReRefine: true,
+			adjudicateGuidance:     "some diagnosis",
+			currentTestContent:     testFile,
+		}
+		input := `{"decision":"revise","functions_to_rewrite":["TestTemplates"],"instructions":"fix it","summary":"1 correction required"}`
+		result, parsed := h.Validate(input)
+		if result != "valid" {
+			t.Fatalf("Validate() = %q, want \"valid\"", result)
+		}
+		out := parsed.(RefineTestsJudgeOutput)
+		if out.Decision != "revise" || string(out.Instructions) != "fix it" {
+			t.Errorf("Decision/Instructions = %q/%q, want the model's own unmodified revise output preserved", out.Decision, out.Instructions)
+		}
+	})
+}
+
 // runValidate is a shared table-driven driver for Validate tests.
 func runValidate(t *testing.T, validate func(string) (string, any), tests []struct {
 	name  string
