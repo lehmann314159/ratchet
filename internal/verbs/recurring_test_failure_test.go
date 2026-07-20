@@ -252,3 +252,47 @@ func TestImplementationChangedBetweenAttempts(t *testing.T) {
 		t.Error("one side unextractable must default to unchanged (safe default), not changed")
 	}
 }
+
+// TestExtractTestOutputRealIndentation covers the 2026-07-20 exprvm-web-v1
+// bead 33 second-escalation incident: real `go test -v` output never indents
+// "=== RUN" lines (confirmed by running one locally), but the "stdout:"
+// block ANALYZE_EXECUTION captures gets a uniform 4-space indent applied to
+// every line when embedded under "Turn N: ... stdout:". extractTestOutput's
+// boundary regex previously required zero leading whitespace, so it never
+// matched these indented boundaries and silently over-ran into unrelated
+// trailing content (turn numbers, elapsed times, file dumps) — making two
+// attempts with a genuinely identical failure line compare as different and
+// never trigger recurringTestFailureNote's "identical" tier.
+func TestExtractTestOutputRealIndentation(t *testing.T) {
+	// Shaped exactly like real captured findings: every line uniformly
+	// indented 4 spaces, nested "--- FAIL/PASS:" lines indented 8 (their own
+	// natural go-test nesting plus the uniform wrapper indent).
+	findings := "" +
+		"    === RUN   TestTemplates\n" +
+		"    === RUN   TestTemplates/RenderReplEmpty\n" +
+		"    === RUN   TestTemplates/RenderReplHistory\n" +
+		"        templates_test.go:81: history entries not rendered in oldest-first order\n" +
+		"    === RUN   TestTemplates/RenderIndex\n" +
+		"    --- FAIL: TestTemplates (0.00s)\n" +
+		"        --- PASS: TestTemplates/RenderReplEmpty (0.00s)\n" +
+		"        --- FAIL: TestTemplates/RenderReplHistory (0.00s)\n" +
+		"        --- PASS: TestTemplates/RenderIndex (0.00s)\n" +
+		"    FAIL\n" +
+		"    FAIL\texprvm-web\t0.442s\n" +
+		"    FAIL\n"
+
+	got := extractTestOutput(findings, "TestTemplates/RenderReplHistory")
+	want := "templates_test.go:81: history entries not rendered in oldest-first order"
+	if got != want {
+		t.Errorf("extractTestOutput = %q, want %q (boundary regex must tolerate the indented \"=== RUN\"/\"--- FAIL:\" markers)", got, want)
+	}
+
+	// Two attempts differing only in noise the old (unfixed) boundary regex
+	// would have swept into the capture (turn number, elapsed time) must
+	// still compare byte-identical once the boundary is respected.
+	findingsAttempt2 := strings.Replace(findings, "0.442s", "0.464s", 1)
+	got2 := extractTestOutput(findingsAttempt2, "TestTemplates/RenderReplHistory")
+	if got2 != got {
+		t.Errorf("attempt 2 extracted = %q, want it to match attempt 1's %q despite differing trailing timing noise", got2, got)
+	}
+}

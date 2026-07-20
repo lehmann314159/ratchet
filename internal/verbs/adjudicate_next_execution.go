@@ -431,8 +431,25 @@ var reFailedTestName = regexp.MustCompile(`(?m)^\s*--- FAIL: (\S+)`)
 // extractTestOutput returns the free-text output (t.Errorf/t.Log lines) a
 // specific named (sub)test printed between its "=== RUN   <name>" line and
 // the next test boundary in `go test -v` output. Empty if not found.
+//
+// The boundary markers tolerate leading whitespace on their line (\n\s*
+// rather than a bare \n) because the "stdout:" block ANALYZE_EXECUTION
+// captures gets a uniform indent applied to every line when embedded under
+// "Turn N: ... stdout:" (confirmed against real captured findings — actual
+// `go test -v` output never indents "=== RUN", only nested "--- PASS/FAIL"
+// summary lines do). Without this, the boundary never matches, the capture
+// runs on past the intended stop point into unrelated trailing content
+// (turn numbers, elapsed times, full file dumps) that differs between
+// attempts by chance, and two attempts with an identical failure line never
+// compare byte-identical — silently defeating recurringTestFailureNote's
+// "identical" tier (and therefore the mechanical re_refine override that
+// depends on it) exactly the way the 2026-07-20 exprvm-web-v1 bead 33
+// incident's second escalation showed: the failure line was in fact
+// identical across two attempts, but this bug made the comparison see two
+// different strings. reFailedTestName already tolerates this correctly
+// (`^\s*--- FAIL:`); this brings extractTestOutput in line with it.
 func extractTestOutput(findings, testName string) string {
-	pattern := `(?s)=== RUN\s+` + regexp.QuoteMeta(testName) + `\s*\n(.*?)(?:\n=== RUN|\n--- (?:FAIL|PASS):|\nPASS\n|\nFAIL\n|\z)`
+	pattern := `(?s)=== RUN\s+` + regexp.QuoteMeta(testName) + `\s*\n(.*?)(?:\n\s*=== RUN|\n\s*--- (?:FAIL|PASS):|\n\s*PASS\n|\n\s*FAIL\n|\z)`
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return ""
