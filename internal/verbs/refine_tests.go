@@ -5,12 +5,16 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -330,19 +334,43 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	var funcOrder []string
 	var summary string
 
-	// usedSnippet tracks whether run_go_snippet has been called at least
-	// once. Required before either exit path below (no-tool-calls, or a
-	// clean compile) is allowed to finish — see its gate at each. This is
-	// the same enforcement REFINE_TESTS_CRITIQUE and ADJUDICATE_NEXT_EXECUTION
-	// use and for the same reason: a test-fixture choice that "feels obviously
-	// fine" is exactly as likely to be wrong as one the model would flag as
-	// uncertain (e.g. picking "1 + 1" as fixture text for an assertion
-	// against html/template-rendered output, not realizing '+' gets escaped)
-	// — catching that here, before the function is even submitted, is
-	// earlier and cheaper than catching it in CRITIQUE.
-	usedSnippet := false
-	for turn := 1; turn <= refinementWriteAttempts; turn++ {
-		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{writeFunctionTool, runGoSnippetTool}, nil, nil)
+	// requiredCases/coveredCases replace the old usedSnippet boolean: each
+	// accepted write_function call records the t.Run subtests (or, absent
+	// subtests, the bare function name) it needs verified; each tagged
+	// run_go_snippet call marks one covered. Neither exit path below is
+	// allowed to finish until every required case for every written function
+	// is covered.
+	//
+	// Why per-case rather than a flat "called at least once": the 2026-07-20
+	// exprvm-web-v1 bead 34 incident showed a one-call floor lets a single
+	// easy verification anywhere satisfy the gate no matter how many
+	// separate fixture claims a written function actually contains — e.g. a
+	// TestHandlers function with 8 subtests, 3 of which hand-built a raw '+'
+	// into an x-www-form-urlencoded request body (the stdlib decodes that as
+	// a space, not a literal '+'), certified after one unrelated check.
+	// Scaling the requirement to what's actually being written closes that
+	// generally, without encoding anything about URL decoding, HTML
+	// escaping, or any other specific bug — catching it here, before the
+	// function is even submitted, is earlier and cheaper than catching it in
+	// CRITIQUE.
+	requiredCases := make(map[string][]string)
+	coveredCases := map[string]bool{}
+	turn := 0
+	for {
+		turn++
+		totalReq := 0
+		for _, cases := range requiredCases {
+			totalReq += len(cases)
+		}
+		maxTurns := refinementWriteAttempts
+		if totalReq+2 > maxTurns {
+			maxTurns = totalReq + 2
+		}
+		if turn > maxTurns {
+			break
+		}
+
+		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{writeFunctionTool, runGoSnippetCaseTool}, nil, nil)
 		if toolErr != nil {
 			return "", toolErr
 		}
@@ -350,17 +378,18 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 			summary = strings.TrimSpace(msg.Content)
 		}
 		if len(msg.ToolCalls) == 0 {
-			if usedSnippet || turn == refinementWriteAttempts {
-				if !usedSnippet {
-					slog.Warn("REFINE_TESTS_WRITE finalized without ever calling run_go_snippet",
-						"bead_id", beadID, "turn", turn)
+			missing := missingWriteCases(requiredCases, coveredCases)
+			if len(missing) == 0 || turn == maxTurns {
+				if len(missing) > 0 {
+					slog.Warn("REFINE_TESTS_WRITE finalized with uncovered subtests",
+						"bead_id", beadID, "turn", turn, "missing", missing)
 				}
 				break
 			}
 			messages = append(messages, ollama.Message{Role: "user", Content: "Before finishing, call " +
-				"run_go_snippet at least once to verify a specific runtime-behavior assumption behind one " +
-				"of your assertions (e.g. how a rendering/formatting/escaping function actually treats a " +
-				"fixture value you used) — even if you feel confident. Then continue."})
+				"run_go_snippet — tagged with for_case — to verify a specific runtime-behavior assumption " +
+				"behind each of these still-unverified subtests: " + strings.Join(missing, ", ") +
+				" — even if you feel confident. Then continue."})
 			continue
 		}
 
@@ -371,14 +400,18 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 			case "run_go_snippet":
 				if src, _ := tc.Function.Arguments["source"].(string); strings.TrimSpace(src) == "" {
 					result = "error: source is empty"
+				} else if forCase, _ := tc.Function.Arguments["for_case"].(string); strings.TrimSpace(forCase) == "" {
+					result = "error: for_case is empty — name the t.Run subtest (or Test* function) this verifies"
 				} else if out, rerr := runGoSnippet(ctx, src); rerr != nil {
 					result = fmt.Sprintf("error: %v", rerr)
-				} else if out == "" {
-					result = "(snippet ran with no output — add a print statement to see a result)"
 				} else {
-					result = out
+					coveredCases[strings.TrimSpace(forCase)] = true
+					if out == "" {
+						result = "(snippet ran with no output — add a print statement to see a result)"
+					} else {
+						result = out
+					}
 				}
-				usedSnippet = true
 			case "write_function":
 				name, _ := tc.Function.Arguments["name"].(string)
 				body, _ := tc.Function.Arguments["body"].(string)
@@ -398,6 +431,11 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 						funcOrder = append(funcOrder, name)
 					}
 					writtenFuncs[name] = body
+					if parsed := extractSubtestCases("package p\n\n" + body); parsed != nil {
+						requiredCases[name] = parsed[name]
+					} else {
+						delete(requiredCases, name)
+					}
 					result = fmt.Sprintf("ok: accepted %s (%d bytes)", name, len(body))
 					slog.Info("REFINE_TESTS_WRITE: function accepted", "name", name, "bytes", len(body))
 				}
@@ -436,7 +474,7 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		ok, compileOut := runCompile(ctx, folderPath)
 		if ok {
 			// Completeness check: verify all required Test* functions are present.
-			if missing := missingRequiredFuncs(testPath, requiredFuncs); len(missing) > 0 && turn < refinementWriteAttempts {
+			if missing := missingRequiredFuncs(testPath, requiredFuncs); len(missing) > 0 && turn < maxTurns {
 				slog.Warn("REFINE_TESTS_WRITE: compile passed but required functions missing",
 					"bead_id", beadID, "turn", turn, "missing", missing)
 				messages = append(messages, ollama.Message{
@@ -451,21 +489,22 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 			if summary == "" {
 				summary = "Test functions written and compiling."
 			}
-			if usedSnippet || turn == refinementWriteAttempts {
-				if !usedSnippet {
-					slog.Warn("REFINE_TESTS_WRITE finalized without ever calling run_go_snippet",
-						"bead_id", beadID, "turn", turn)
+			missing := missingWriteCases(requiredCases, coveredCases)
+			if len(missing) == 0 || turn == maxTurns {
+				if len(missing) > 0 {
+					slog.Warn("REFINE_TESTS_WRITE finalized with uncovered subtests",
+						"bead_id", beadID, "turn", turn, "missing", missing)
 				}
 				break
 			}
 			messages = append(messages, ollama.Message{Role: "user", Content: "Before finishing, call " +
-				"run_go_snippet at least once to verify a specific runtime-behavior assumption behind one " +
-				"of your assertions (e.g. how a rendering/formatting/escaping function actually treats a " +
-				"fixture value you used) — even if you feel confident. Then continue."})
+				"run_go_snippet — tagged with for_case — to verify a specific runtime-behavior assumption " +
+				"behind each of these still-unverified subtests: " + strings.Join(missing, ", ") +
+				" — even if you feel confident. Then continue."})
 			continue
 		}
 		slog.Error("REFINE_TESTS_WRITE: compile failed", "bead_id", beadID, "turn", turn, "output", compileOut)
-		if turn < refinementWriteAttempts {
+		if turn < maxTurns {
 			messages = append(messages, ollama.Message{
 				Role:    "user",
 				Content: "Compile failed:\n```\n" + compileOut + "\n```\nFix the errors in the affected function(s). Call write_function again with the corrected body.",
@@ -678,6 +717,104 @@ var runGoSnippetTool = ollama.Tool{
 	},
 }
 
+// runGoSnippetCaseTool is runGoSnippetTool plus a required for_case tag, used
+// by REFINE_TESTS_CRITIQUE and REFINE_TESTS_WRITE so each call can be
+// attributed to the specific t.Run subtest (or bare Test* function, if it has
+// no subtests) it verifies a claim for. This closes a gap the flat "call it
+// at least once" mandate left open: the 2026-07-20/21 exprvm-web-v1 bead 34
+// incident showed REFINE_TESTS_CRITIQUE calling run_go_snippet exactly once,
+// on some easy claim, then approving all 8 subtests of a single TestHandlers
+// function as correct — including 3 that hand-built a raw '+' into an
+// x-www-form-urlencoded request body, which the stdlib decodes as a space.
+// One untargeted call anywhere satisfied the old boolean gate regardless of
+// how many claims were actually being certified. Tagging each call and
+// requiring coverage of every subtest belonging to a function before it can
+// be certified closes that gap without hardcoding anything about URL
+// encoding, escaping, or any other specific bug — it's a strengthening of the
+// existing mandatory-verification mechanism, not a new domain-specific rule.
+var runGoSnippetCaseTool = ollama.Tool{
+	Type: "function",
+	Function: ollama.ToolFunction{
+		Name: "run_go_snippet",
+		Description: "Compile and run a small, self-contained Go program to verify a specific factual claim " +
+			"about Go or standard-library runtime behavior (e.g. does a given string survive a particular " +
+			"escaping/formatting function unchanged, does a comparison evaluate as expected). Use this before " +
+			"citing any such claim in a finding — do not guess or rely on general impressions of how Go " +
+			"behaves. The program must be complete (package main, func main, stdlib imports only) and print " +
+			"whatever result answers your question.",
+		Parameters: ollama.ToolParameters{
+			Type: "object",
+			Properties: map[string]ollama.ToolProperty{
+				"source":   {Type: "string", Description: "Complete Go source: 'package main' through the final '}', stdlib imports only."},
+				"for_case": {Type: "string", Description: "The exact t.Run subtest name (e.g. HandleEval_Success) this check verifies a claim for — or the Test* function name itself, if it has no t.Run subtests."},
+			},
+			Required: []string{"source", "for_case"},
+		},
+	},
+}
+
+// extractSubtestCases parses src and returns, for each top-level Test*
+// function, the list of its t.Run subtest names (string-literal names only —
+// dynamic names aren't resolvable statically). A Test* function with no
+// t.Run calls maps to its own name as the sole case, so per-case coverage
+// degrades gracefully to per-function for simple tests. Returns nil if src
+// doesn't parse (caller falls back to the pre-existing at-least-one-call
+// floor in that case).
+func extractSubtestCases(src string) map[string][]string {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "", src, 0)
+	if err != nil {
+		return nil
+	}
+	result := make(map[string][]string)
+	for _, decl := range f.Decls {
+		fd, ok := decl.(*ast.FuncDecl)
+		if !ok || fd.Body == nil || !strings.HasPrefix(fd.Name.Name, "Test") {
+			continue
+		}
+		var cases []string
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Run" || len(call.Args) == 0 {
+				return true
+			}
+			lit, ok := call.Args[0].(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			if name, uerr := strconv.Unquote(lit.Value); uerr == nil {
+				cases = append(cases, name)
+			}
+			return true
+		})
+		if len(cases) == 0 {
+			cases = []string{fd.Name.Name}
+		}
+		result[fd.Name.Name] = cases
+	}
+	return result
+}
+
+// caseCovered reports whether required case name c was verified by any
+// tagged run_go_snippet call, tolerating models that tag with the fuller
+// "Test*/Subtest" form, or minor surrounding text, rather than the bare
+// subtest name.
+func caseCovered(covered map[string]bool, c string) bool {
+	if covered[c] {
+		return true
+	}
+	for tag := range covered {
+		if strings.Contains(tag, c) || strings.Contains(c, tag) {
+			return true
+		}
+	}
+	return false
+}
+
 // snippetVerificationTurns bounds how many run_go_snippet round-trips a
 // single REFINE_TESTS_CRITIQUE or ADJUDICATE_NEXT_EXECUTION call may use
 // before it must give its final verdict/decision — enough for a handful of
@@ -711,29 +848,45 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 		{Role: "user", Content: userMsg},
 	}
 
+	// allCases is an upper bound (every subtest in the whole file) used only
+	// to size the turn budget below; the actual gate per attempt is scoped to
+	// whichever functions the model is about to certify as verified.
+	allCases := extractSubtestCases(currentTestContent)
+	totalCases := 0
+	for _, cases := range allCases {
+		totalCases += len(cases)
+	}
+	maxTurns := snippetVerificationTurns
+	if totalCases+2 > maxTurns {
+		maxTurns = totalCases + 2
+	}
+
 	// Tool loop: the model may call run_go_snippet to verify a runtime-
 	// behavior claim before giving its final JSON verdict. Mirrors
 	// RefineTestsWrite's turn loop below, with one addition: a final
-	// (zero-tool-call) response is only accepted once at least one snippet
-	// has actually been run.
+	// (zero-tool-call) response is only accepted once every subtest belonging
+	// to a function it's about to list in verified_functions has been
+	// covered by a tagged run_go_snippet call.
 	//
 	// Why: "verify when you're not certain" (the original prompt wording)
 	// only helps when the model perceives itself as uncertain. The 2026-07-20
-	// exprvm-web-v1 bead 34 incident showed the opposite failure — CRITIQUE
-	// stated, as flat unhedged fact, that html/template does not escape '+'
-	// (reversing a correct fix ADJUDICATE had just made), with no sign the
-	// tool was ever invoked. A model that's confidently wrong never judges
-	// itself uncertain, so a conditional trigger never fires for exactly the
-	// failure mode this tool exists to catch. Removing the model's
-	// discretion over *whether* to verify — not just giving it the option —
-	// is the fix; every real review has at least one runtime-behavior
-	// assumption buried in it (satisfiability tracing per the system
-	// prompt's clause (b) requires this anyway), so this isn't asking for
-	// busywork on a genuinely tool-free review.
+	// exprvm-web-v1 bead 34 incident showed that failure — CRITIQUE stated,
+	// as flat unhedged fact, that html/template does not escape '+', with no
+	// sign the tool was ever invoked. Requiring at least one call, full stop,
+	// fixed that specific case but left a subtler gap: a single untargeted
+	// call anywhere satisfied the old boolean gate no matter how many
+	// separate claims were being certified. The very next cycle, CRITIQUE
+	// called run_go_snippet once and then approved all 8 subtests of a
+	// single TestHandlers function as correct — including 3 that hand-built
+	// a raw '+' into an x-www-form-urlencoded request body (the stdlib
+	// decodes that as a space, not a literal '+'). Requiring coverage scaled
+	// to what's actually being certified — one tagged call per subtest, not
+	// per file — closes that gap generally, without encoding anything about
+	// URL decoding, HTML escaping, or any other specific bug.
 	var lastContent string
-	usedTool := false
-	for turn := 1; turn <= snippetVerificationTurns; turn++ {
-		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetTool}, nil, nil)
+	coveredCases := map[string]bool{}
+	for turn := 1; turn <= maxTurns; turn++ {
+		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetCaseTool}, nil, nil)
 		if toolErr != nil {
 			return "", toolErr
 		}
@@ -741,22 +894,24 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 			lastContent = msg.Content
 		}
 		if len(msg.ToolCalls) == 0 {
-			if usedTool || turn == snippetVerificationTurns {
-				// Accept: either it verified something, or the turn budget is
-				// exhausted — fall back to whatever it gave rather than fail
-				// the job outright. Logged so an unverified verdict is
-				// visible, not silent.
-				if !usedTool {
-					slog.Warn("REFINE_TESTS_CRITIQUE finalized without ever calling run_go_snippet",
-						"bead_id", job.BeadID.Int64, "turn", turn)
+			missing := missingVerificationCases(msg.Content, allCases, coveredCases)
+			if len(missing) == 0 || turn == maxTurns {
+				// Accept: either every certified function's subtests were
+				// covered, or the turn budget is exhausted — fall back to
+				// whatever it gave rather than fail the job outright. Logged
+				// so an under-verified verdict is visible, not silent.
+				if len(missing) > 0 {
+					slog.Warn("REFINE_TESTS_CRITIQUE finalized with uncovered subtests",
+						"bead_id", job.BeadID.Int64, "turn", turn, "missing", missing)
 				}
 				return msg.Content, nil
 			}
 			messages = append(messages, msg)
 			messages = append(messages, ollama.Message{Role: "user", Content: "Before giving your final " +
-				"verdict, call run_go_snippet at least once to verify a specific claim from your review " +
-				"against actual Go behavior — even if you feel confident. Confidence is not evidence; that " +
-				"gap is exactly what this tool exists to close. Then give your final JSON verdict."})
+				"verdict, call run_go_snippet — tagged with for_case — to verify a specific claim behind each " +
+				"of these still-unverified subtests, since you're about to certify their enclosing function(s) " +
+				"as correct: " + strings.Join(missing, ", ") + ". Confidence is not evidence; that gap is " +
+				"exactly what this tool exists to close. Then give your final JSON verdict."})
 			continue
 		}
 
@@ -767,14 +922,18 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 				result = fmt.Sprintf("error: unknown tool %q — only run_go_snippet is available", tc.Function.Name)
 			} else if src, _ := tc.Function.Arguments["source"].(string); strings.TrimSpace(src) == "" {
 				result = "error: source is empty"
+			} else if forCase, _ := tc.Function.Arguments["for_case"].(string); strings.TrimSpace(forCase) == "" {
+				result = "error: for_case is empty — name the t.Run subtest (or Test* function) this verifies"
 			} else if out, rerr := runGoSnippet(ctx, src); rerr != nil {
 				result = fmt.Sprintf("error: %v", rerr)
-			} else if out == "" {
-				result = "(snippet ran with no output — add a print statement to see a result)"
 			} else {
-				result = out
+				coveredCases[strings.TrimSpace(forCase)] = true
+				if out == "" {
+					result = "(snippet ran with no output — add a print statement to see a result)"
+				} else {
+					result = out
+				}
 			}
-			usedTool = true
 			messages = append(messages, ollama.Message{Role: "tool", Content: result})
 		}
 	}
@@ -782,6 +941,49 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 	// content the model last produced (Validate will reject it as malformed
 	// if it isn't valid JSON, triggering the normal retry path).
 	return lastContent, nil
+}
+
+// missingVerificationCases parses content as a tentative RefineTestsCritiqueOutput
+// and returns, for every function it lists in verified_functions, the
+// subtest cases (from allCases) not yet present in covered. If content
+// doesn't parse as valid JSON yet (the model may still be mid-thought before
+// its real final answer), it falls back to requiring at least one covered
+// case, matching this verb's pre-existing floor. If allCases itself is nil
+// (the test file didn't parse), no per-case requirement can be computed and
+// the same one-call floor applies.
+func missingVerificationCases(content string, allCases map[string][]string, covered map[string]bool) []string {
+	var out RefineTestsCritiqueOutput
+	if err := json.Unmarshal([]byte(ollama.ExtractJSON(content)), &out); err != nil || allCases == nil {
+		if len(covered) == 0 {
+			return []string{"(at least one verified claim)"}
+		}
+		return nil
+	}
+	var missing []string
+	for _, fn := range out.VerifiedFunctions {
+		for _, c := range allCases[fn] {
+			if !caseCovered(covered, c) {
+				missing = append(missing, fn+"/"+c)
+			}
+		}
+	}
+	return missing
+}
+
+// missingWriteCases returns, for every function REFINE_TESTS_WRITE has
+// written or revised, the subtest cases not yet covered by a tagged
+// run_go_snippet call.
+func missingWriteCases(required map[string][]string, covered map[string]bool) []string {
+	var missing []string
+	for fn, cases := range required {
+		for _, c := range cases {
+			if !caseCovered(covered, c) {
+				missing = append(missing, fn+"/"+c)
+			}
+		}
+	}
+	sort.Strings(missing)
+	return missing
 }
 
 func (h *RefineTestsCritique) Validate(rawOutput string) (string, any) {

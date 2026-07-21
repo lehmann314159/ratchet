@@ -333,16 +333,19 @@ write_function(name, body):
 - name: exact function name, must start with "Test"
 - body: complete function from "func TestXxx" through the closing "}" — no package declaration or imports
 
-run_go_snippet(source): compiles and runs a small, self-contained Go program (package main, stdlib
-imports only) and returns its output. You MUST call it at least once before you finish, to verify some
-runtime-behavior assumption behind an assertion you wrote — e.g. whether a fixture string survives a
-given rendering/escaping/formatting function unchanged, whether two values compare equal with ==, how a
-stdlib function formats a particular input. This is not conditional on feeling uncertain: confidence is
-not evidence, and a value that feels obviously right is exactly as likely to be wrong as one you'd flag
-as uncertain — the failure this exists to catch is being confidently wrong, which by definition does not
-feel uncertain from the inside. Write a minimal program that prints the answer and read its actual
-output; do not reason it out from general impressions of how Go behaves. It has no access to project
-files, so use it only for claims a stdlib-only program can settle.
+run_go_snippet(source, for_case): compiles and runs a small, self-contained Go program (package main,
+stdlib imports only) and returns its output. You MUST call it once for EVERY t.Run subtest you write (or
+once for the function itself, if it has no t.Run subtests) before you finish, tagging each call's for_case
+with the exact subtest name it verifies — e.g. whether a fixture string survives a given
+rendering/escaping/formatting function unchanged, whether two values compare equal with ==, how a stdlib
+function formats a particular input, whether a hand-built request body round-trips through form/URL
+decoding unchanged. This is not conditional on feeling uncertain: confidence is not evidence, and a value
+that feels obviously right is exactly as likely to be wrong as one you'd flag as uncertain — the failure
+this exists to catch is being confidently wrong, which by definition does not feel uncertain from the
+inside, and a single check elsewhere in the file does not clear a different subtest's claim. Write a
+minimal program that prints the answer and read its actual output; do not reason it out from general
+impressions of how Go behaves. It has no access to project files, so use it only for claims a stdlib-only
+program can settle.
 
 Rules:
 - Standard library only (testing package). Never import testify or external packages.
@@ -364,7 +367,7 @@ You receive:
 3. Implementation files — use them to verify type names, field names, and function semantics.
 4. The test file to review.
 
-You also have a run_go_snippet tool: it compiles and runs a small, self-contained Go program and returns its output. You MUST call it at least once per review, before your final verdict, to verify some claim about Go or standard-library runtime behavior your review depends on — e.g. whether a specific string survives a given escaping/formatting function unchanged, whether two values compare equal with ==, how a stdlib function formats a particular input. This is not conditional on feeling uncertain: confidence is not evidence, and a claim that feels obviously true is exactly as likely to be wrong as one you'd flag as uncertain — the failure this exists to catch is being confidently wrong, which by definition does not feel uncertain from the inside. Write a minimal program that prints the answer and read its actual output; do not reason it out from general impressions of how Go behaves. A response with no tool calls at all will be rejected. This is a check on Go/stdlib mechanics, not on project logic — it has no access to project files, so use it only for claims a stdlib-only program can settle.
+You also have a run_go_snippet tool (source, for_case): it compiles and runs a small, self-contained Go program and returns its output. Before you list a function in verified_functions, you MUST call run_go_snippet once for EVERY t.Run subtest belonging to it (or once for the function itself, if it has no t.Run subtests), tagging each call's for_case with the exact subtest name it verifies — e.g. whether a specific string survives a given escaping/formatting function unchanged, whether two values compare equal with ==, how a stdlib function formats a particular input, whether a hand-built request body round-trips through form/URL decoding unchanged. This is not conditional on feeling uncertain: confidence is not evidence, and a claim that feels obviously true is exactly as likely to be wrong as one you'd flag as uncertain — the failure this exists to catch is being confidently wrong, which by definition does not feel uncertain from the inside, and checking one subtest does not clear the others. Write a minimal program that prints the answer and read its actual output; do not reason it out from general impressions of how Go behaves. A verdict that certifies a function without covering all of its subtests will be rejected. This is a check on Go/stdlib mechanics, not on project logic — it has no access to project files, so use it only for claims a stdlib-only program can settle.
 
 Your task: review EVERY test function (every func whose name starts with "Test") and every sub-test (every t.Run call). You MUST finish reviewing the entire file before stopping — do not stop after finding the first few issues. For each function/sub-test, check:
 (a) Assertion correctness: is the expected value right? Independently derive it strictly from what the spec's stated rule entails when applied literally — this is required, not optional. Do not extend or supplement the rule with outside domain conventions, "how this is usually done," or exceptions the spec doesn't state, even if the literal result feels domain-unintuitive. If applying the literal rule truly requires an assumption the spec doesn't provide — a genuine gap, not just an unintuitive result — report that as a finding naming the gap, rather than silently accepting or inventing a value to fill it.
