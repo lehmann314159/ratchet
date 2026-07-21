@@ -665,9 +665,25 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 
 	// Tool loop: the model may call run_go_snippet to verify a runtime-
 	// behavior claim before giving its final JSON verdict. Mirrors
-	// RefineTestsWrite's turn loop below. A turn that calls no tools ends
-	// the loop — its Content is the final verdict.
+	// RefineTestsWrite's turn loop below, with one addition: a final
+	// (zero-tool-call) response is only accepted once at least one snippet
+	// has actually been run.
+	//
+	// Why: "verify when you're not certain" (the original prompt wording)
+	// only helps when the model perceives itself as uncertain. The 2026-07-20
+	// exprvm-web-v1 bead 34 incident showed the opposite failure — CRITIQUE
+	// stated, as flat unhedged fact, that html/template does not escape '+'
+	// (reversing a correct fix ADJUDICATE had just made), with no sign the
+	// tool was ever invoked. A model that's confidently wrong never judges
+	// itself uncertain, so a conditional trigger never fires for exactly the
+	// failure mode this tool exists to catch. Removing the model's
+	// discretion over *whether* to verify — not just giving it the option —
+	// is the fix; every real review has at least one runtime-behavior
+	// assumption buried in it (satisfiability tracing per the system
+	// prompt's clause (b) requires this anyway), so this isn't asking for
+	// busywork on a genuinely tool-free review.
 	var lastContent string
+	usedTool := false
 	for turn := 1; turn <= critiqueSnippetTurns; turn++ {
 		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetTool}, nil, nil)
 		if toolErr != nil {
@@ -677,7 +693,23 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 			lastContent = msg.Content
 		}
 		if len(msg.ToolCalls) == 0 {
-			return msg.Content, nil
+			if usedTool || turn == critiqueSnippetTurns {
+				// Accept: either it verified something, or the turn budget is
+				// exhausted — fall back to whatever it gave rather than fail
+				// the job outright. Logged so an unverified verdict is
+				// visible, not silent.
+				if !usedTool {
+					slog.Warn("REFINE_TESTS_CRITIQUE finalized without ever calling run_go_snippet",
+						"bead_id", job.BeadID.Int64, "turn", turn)
+				}
+				return msg.Content, nil
+			}
+			messages = append(messages, msg)
+			messages = append(messages, ollama.Message{Role: "user", Content: "Before giving your final " +
+				"verdict, call run_go_snippet at least once to verify a specific claim from your review " +
+				"against actual Go behavior — even if you feel confident. Confidence is not evidence; that " +
+				"gap is exactly what this tool exists to close. Then give your final JSON verdict."})
+			continue
 		}
 
 		messages = append(messages, msg)
@@ -694,6 +726,7 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 			} else {
 				result = out
 			}
+			usedTool = true
 			messages = append(messages, ollama.Message{Role: "tool", Content: result})
 		}
 	}
