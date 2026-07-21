@@ -327,14 +327,26 @@ Respond with JSON only, no prose before or after:
 
 const refineTestsWriteSystemPrompt = `You are a Go test function writer. Your job is to write or correct individual test functions.
 
-You have one tool: write_function(name, body).
+You have two tools:
+
+write_function(name, body):
 - name: exact function name, must start with "Test"
 - body: complete function from "func TestXxx" through the closing "}" — no package declaration or imports
+
+run_go_snippet(source): compiles and runs a small, self-contained Go program (package main, stdlib
+imports only) and returns its output. You MUST call it at least once before you finish, to verify some
+runtime-behavior assumption behind an assertion you wrote — e.g. whether a fixture string survives a
+given rendering/escaping/formatting function unchanged, whether two values compare equal with ==, how a
+stdlib function formats a particular input. This is not conditional on feeling uncertain: confidence is
+not evidence, and a value that feels obviously right is exactly as likely to be wrong as one you'd flag
+as uncertain — the failure this exists to catch is being confidently wrong, which by definition does not
+feel uncertain from the inside. Write a minimal program that prints the answer and read its actual
+output; do not reason it out from general impressions of how Go behaves. It has no access to project
+files, so use it only for claims a stdlib-only program can settle.
 
 Rules:
 - Standard library only (testing package). Never import testify or external packages.
 - Named struct fields everywhere: Square{Rank: 2, File: 4} not Square{2, 4}.
-- Never compare structs or interface values with == when you mean field equality — use field-by-field checks.
 - Derive all expected values from the spec and design document, not from guesses. Apply the spec's stated rule literally when it fully determines the answer — this is required, not optional. Do not extend or supplement the rule with outside domain conventions, "how this is usually done," or exceptions the spec doesn't state, even if the literal result feels domain-unintuitive. If applying the literal rule truly requires an assumption the spec doesn't provide — a genuine gap, not just an unintuitive result — write a one-line comment above the assertion naming the gap instead of silently picking a plausible value.
 - Call write_function only for functions you were explicitly asked to produce.
 - Call write_function once per function; if you need to revise a function, call it again with the corrected body.
@@ -512,6 +524,8 @@ Respond with JSON only, no prose before or after:
 
 const adjudicateNextExecutionSystemPrompt = `You make a decision after a completed execution attempt.
 
+You have a run_go_snippet tool: it compiles and runs a small, self-contained Go program and returns its output. You MUST call it at least once before your final decision, to verify some claim about Go or standard-library runtime behavior your reasoning depends on — e.g. whether a specific string survives a given escaping/formatting function unchanged, whether two values compare equal with ==, whether a piece of code as written would actually produce the effect you're attributing to it. This is not conditional on feeling uncertain: confidence is not evidence, and a claim that feels obviously true is exactly as likely to be wrong as one you'd flag as uncertain — the failure this exists to catch is being confidently wrong, which by definition does not feel uncertain from the inside. Write a minimal program that prints the answer and read its actual output; do not reason it out from general impressions of how Go behaves. A response with no tool calls at all will be rejected. This is a check on Go/stdlib mechanics, not on project logic — it has no access to project files, so use it only for claims a stdlib-only program can settle; for claims about this project's own code, check the actual file content already given to you in Input 3 rather than trusting a remembered impression of it.
+
 Two classification fields are required on every output:
 
   trend:         "same" | "narrower" | "unrelated" | "not_applicable"
@@ -553,9 +567,13 @@ decision:
                       across 2 or more attempts AND the implementation is structurally correct
                       (correct algorithm, no compile errors), re_refine is the expected decision.
                       execute_revised without altering the failing assertion cannot improve the
-                      outcome. Before issuing execute_revised on a REFINE_TESTS bead, ask: "Is
-                      there any spec change that would cause this specific assertion to pass with
-                      a correct implementation?" If not, use re_refine.
+                      outcome. Before issuing execute_revised on a REFINE_TESTS bead, use
+                      run_go_snippet to actually check whether the assertion can be satisfied —
+                      e.g. if it compares rendered/formatted output against a literal, write a
+                      snippet that runs the same rendering/formatting step against that literal
+                      and reads the real result, rather than reasoning about it from memory. If
+                      the real output doesn't match what the assertion expects, that is
+                      conclusive, not merely suggestive — use re_refine.
 
 Guidance on choosing between execute_as_is and execute_revised when bead_spec_fit is
 "execution_capability_problem":

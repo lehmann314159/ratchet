@@ -834,10 +834,71 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 		}
 	}
 	userMsg := buildAdjudicateUserMsg(currentBead, revLog, findings, compressedHistory, diffSignal)
-	return oc.Chat(ctx, model, []ollama.Message{
+	messages := []ollama.Message{
 		{Role: "system", Content: guidance.InjectForVerbPath(adjudicateNextExecutionSystemPrompt, project.FolderPath, db.VerbAdjudicateNextExecution, "")},
 		{Role: "user", Content: userMsg},
-	}, nil)
+	}
+
+	// Tool loop requiring at least one run_go_snippet call before any final
+	// decision — same enforcement as REFINE_TESTS_CRITIQUE, and for the same
+	// reason: "verify when uncertain" fails against confident-but-wrong
+	// claims, which is exactly ADJUDICATE's original incident (the </div vs
+	// </div> hallucination — textually identical strings asserted as
+	// different across several rounds, never checked against the real file
+	// content already available in Input 3). Critically, that hallucination
+	// drove execute_as_is/execute_revised, not re_refine — so gating the
+	// requirement only on re_refine (the decision that most obviously
+	// involves an assertion-satisfiability claim) would have missed the
+	// actual incident entirely. Every decision here rests on some claim
+	// about what the code does or would do; requiring verification
+	// universally, not conditioned on the model's own sense of whether this
+	// particular call needs it, is what closes that gap.
+	var lastContent string
+	usedTool := false
+	for turn := 1; turn <= snippetVerificationTurns; turn++ {
+		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetTool}, nil, nil)
+		if toolErr != nil {
+			return "", toolErr
+		}
+		if strings.TrimSpace(msg.Content) != "" {
+			lastContent = msg.Content
+		}
+		if len(msg.ToolCalls) == 0 {
+			if usedTool || turn == snippetVerificationTurns {
+				if !usedTool {
+					slog.Warn("ADJUDICATE_NEXT_EXECUTION finalized without ever calling run_go_snippet",
+						"bead_id", beadID, "turn", turn)
+				}
+				return msg.Content, nil
+			}
+			messages = append(messages, msg)
+			messages = append(messages, ollama.Message{Role: "user", Content: "Before giving your final " +
+				"decision, call run_go_snippet at least once to verify a specific claim about Go/stdlib " +
+				"runtime behavior your reasoning depends on — even if you feel confident. Confidence is " +
+				"not evidence; that gap is exactly what this tool exists to close. Then give your final " +
+				"JSON decision."})
+			continue
+		}
+
+		messages = append(messages, msg)
+		for _, tc := range msg.ToolCalls {
+			var result string
+			if tc.Function.Name != "run_go_snippet" {
+				result = fmt.Sprintf("error: unknown tool %q — only run_go_snippet is available", tc.Function.Name)
+			} else if src, _ := tc.Function.Arguments["source"].(string); strings.TrimSpace(src) == "" {
+				result = "error: source is empty"
+			} else if out, rerr := runGoSnippet(ctx, src); rerr != nil {
+				result = fmt.Sprintf("error: %v", rerr)
+			} else if out == "" {
+				result = "(snippet ran with no output — add a print statement to see a result)"
+			} else {
+				result = out
+			}
+			usedTool = true
+			messages = append(messages, ollama.Message{Role: "tool", Content: result})
+		}
+	}
+	return lastContent, nil
 }
 
 func buildAdjudicateUserMsg(bead *beadState, revLog []revisionEntry, mechanicalFindings, compressedHistory, diffSignal string) string {

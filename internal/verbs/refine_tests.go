@@ -67,8 +67,11 @@ func missingRequiredFuncs(testPath string, required []string) []string {
 const refinementCycleCap = 5
 
 // refinementWriteAttempts is the maximum number of chat rounds within a single
-// REFINE_TESTS_WRITE call to fix compile errors before giving up.
-const refinementWriteAttempts = 3
+// REFINE_TESTS_WRITE call to fix compile errors before giving up. One more
+// than the original 3-round compile-fix budget, to leave room for the
+// mandatory run_go_snippet verification round (see its use in Run) without
+// crowding out compile-error retries.
+const refinementWriteAttempts = 4
 
 // --- shared helpers ---
 
@@ -172,15 +175,15 @@ var maxSnippetRuntime = 10 * time.Second
 // dir creation, writing the file) that have nothing to do with the
 // snippet's own correctness.
 //
-// This exists so REFINE_TESTS_CRITIQUE can verify a specific claim about
-// Go/stdlib runtime behavior by actually executing it, instead of only
-// reasoning about it in text — see refineTestsCritiqueSystemPrompt. Root
-// cause of the 2026-07-20 exprvm-web-v1 incident this closes: across two
-// separate real beads, a CRITIQUE call reasoned in prose about (a) whether
-// html/template escapes '+' in rendered output, and (b) whether two
-// fmt.Errorf-produced errors compare equal with ==, and was confidently
-// wrong both times — an LLM predicting the shape of an answer is not the
-// same as Go actually computing it.
+// This exists so REFINE_TESTS_CRITIQUE, ADJUDICATE_NEXT_EXECUTION, and
+// REFINE_TESTS_WRITE can each verify a specific claim about Go/stdlib
+// runtime behavior by actually executing it, instead of only reasoning
+// about it in text. Root cause of the 2026-07-20 exprvm-web-v1 incidents
+// this closes: across separate real beads, both a CRITIQUE call and an
+// ADJUDICATE call reasoned in prose about (a) whether html/template escapes
+// '+' in rendered output, and (b) whether two fmt.Errorf-produced errors
+// compare equal with ==, and were confidently wrong — an LLM predicting the
+// shape of an answer is not the same as Go actually computing it.
 func runGoSnippet(ctx context.Context, src string) (output string, err error) {
 	dir, mkErr := os.MkdirTemp("", "ratchet-snippet-*")
 	if mkErr != nil {
@@ -327,8 +330,19 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	var funcOrder []string
 	var summary string
 
+	// usedSnippet tracks whether run_go_snippet has been called at least
+	// once. Required before either exit path below (no-tool-calls, or a
+	// clean compile) is allowed to finish — see its gate at each. This is
+	// the same enforcement REFINE_TESTS_CRITIQUE and ADJUDICATE_NEXT_EXECUTION
+	// use and for the same reason: a test-fixture choice that "feels obviously
+	// fine" is exactly as likely to be wrong as one the model would flag as
+	// uncertain (e.g. picking "1 + 1" as fixture text for an assertion
+	// against html/template-rendered output, not realizing '+' gets escaped)
+	// — catching that here, before the function is even submitted, is
+	// earlier and cheaper than catching it in CRITIQUE.
+	usedSnippet := false
 	for turn := 1; turn <= refinementWriteAttempts; turn++ {
-		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{writeFunctionTool}, nil, nil)
+		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{writeFunctionTool, runGoSnippetTool}, nil, nil)
 		if toolErr != nil {
 			return "", toolErr
 		}
@@ -336,15 +350,36 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 			summary = strings.TrimSpace(msg.Content)
 		}
 		if len(msg.ToolCalls) == 0 {
-			break
+			if usedSnippet || turn == refinementWriteAttempts {
+				if !usedSnippet {
+					slog.Warn("REFINE_TESTS_WRITE finalized without ever calling run_go_snippet",
+						"bead_id", beadID, "turn", turn)
+				}
+				break
+			}
+			messages = append(messages, ollama.Message{Role: "user", Content: "Before finishing, call " +
+				"run_go_snippet at least once to verify a specific runtime-behavior assumption behind one " +
+				"of your assertions (e.g. how a rendering/formatting/escaping function actually treats a " +
+				"fixture value you used) — even if you feel confident. Then continue."})
+			continue
 		}
 
 		messages = append(messages, msg)
 		for _, tc := range msg.ToolCalls {
 			var result string
-			if tc.Function.Name != "write_function" {
-				result = fmt.Sprintf("error: unknown tool %q — only write_function is available", tc.Function.Name)
-			} else {
+			switch tc.Function.Name {
+			case "run_go_snippet":
+				if src, _ := tc.Function.Arguments["source"].(string); strings.TrimSpace(src) == "" {
+					result = "error: source is empty"
+				} else if out, rerr := runGoSnippet(ctx, src); rerr != nil {
+					result = fmt.Sprintf("error: %v", rerr)
+				} else if out == "" {
+					result = "(snippet ran with no output — add a print statement to see a result)"
+				} else {
+					result = out
+				}
+				usedSnippet = true
+			case "write_function":
 				name, _ := tc.Function.Arguments["name"].(string)
 				body, _ := tc.Function.Arguments["body"].(string)
 				switch {
@@ -366,6 +401,8 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 					result = fmt.Sprintf("ok: accepted %s (%d bytes)", name, len(body))
 					slog.Info("REFINE_TESTS_WRITE: function accepted", "name", name, "bytes", len(body))
 				}
+			default:
+				result = fmt.Sprintf("error: unknown tool %q — only write_function and run_go_snippet are available", tc.Function.Name)
 			}
 			messages = append(messages, ollama.Message{Role: "tool", Content: result})
 		}
@@ -414,7 +451,18 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 			if summary == "" {
 				summary = "Test functions written and compiling."
 			}
-			break
+			if usedSnippet || turn == refinementWriteAttempts {
+				if !usedSnippet {
+					slog.Warn("REFINE_TESTS_WRITE finalized without ever calling run_go_snippet",
+						"bead_id", beadID, "turn", turn)
+				}
+				break
+			}
+			messages = append(messages, ollama.Message{Role: "user", Content: "Before finishing, call " +
+				"run_go_snippet at least once to verify a specific runtime-behavior assumption behind one " +
+				"of your assertions (e.g. how a rendering/formatting/escaping function actually treats a " +
+				"fixture value you used) — even if you feel confident. Then continue."})
+			continue
 		}
 		slog.Error("REFINE_TESTS_WRITE: compile failed", "bead_id", beadID, "turn", turn, "output", compileOut)
 		if turn < refinementWriteAttempts {
@@ -630,11 +678,11 @@ var runGoSnippetTool = ollama.Tool{
 	},
 }
 
-// critiqueSnippetTurns bounds how many run_go_snippet round-trips a single
-// REFINE_TESTS_CRITIQUE call may use before it must give its final verdict —
-// enough for a handful of independent verifications without letting the
-// call run indefinitely.
-const critiqueSnippetTurns = 6
+// snippetVerificationTurns bounds how many run_go_snippet round-trips a
+// single REFINE_TESTS_CRITIQUE or ADJUDICATE_NEXT_EXECUTION call may use
+// before it must give its final verdict/decision — enough for a handful of
+// independent verifications without letting the call run indefinitely.
+const snippetVerificationTurns = 6
 
 type RefineTestsCritique struct{}
 
@@ -684,7 +732,7 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 	// busywork on a genuinely tool-free review.
 	var lastContent string
 	usedTool := false
-	for turn := 1; turn <= critiqueSnippetTurns; turn++ {
+	for turn := 1; turn <= snippetVerificationTurns; turn++ {
 		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetTool}, nil, nil)
 		if toolErr != nil {
 			return "", toolErr
@@ -693,7 +741,7 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 			lastContent = msg.Content
 		}
 		if len(msg.ToolCalls) == 0 {
-			if usedTool || turn == critiqueSnippetTurns {
+			if usedTool || turn == snippetVerificationTurns {
 				// Accept: either it verified something, or the turn budget is
 				// exhausted — fall back to whatever it gave rather than fail
 				// the job outright. Logged so an unverified verdict is
