@@ -1,0 +1,10 @@
+{{define "title"}}{{.Title}}{{end}}
+{{define "content"}}
+<h1>{{.Title}}</h1>
+<p class="meta" style="margin-bottom:12px;">{{.Path}}</p>
+{{if .Content}}
+<pre>{{.Content}}</pre>
+{{else}}
+<p class="empty">Report not yet generated — this bead or project hasn't reached a terminal state.</p>
+{{end}}
+{{end}}

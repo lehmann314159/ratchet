@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -368,6 +369,125 @@ func TestHandleTrace_NoArbitraryPathParameter(t *testing.T) {
 	s.ServeHTTP(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected the old query-param route to 404 (no matching handler), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// --- handleBeadReport / handleProjectReport ---
+
+// seedProjectWithFolder inserts a minimal project row rooted at folder,
+// returning its ID (always 1) — like seedProject, but with a caller-chosen
+// folder_path so tests can write real traces/ files under a t.TempDir().
+func seedProjectWithFolder(t *testing.T, d *db.DB, folder string) int64 {
+	t.Helper()
+	if _, err := d.ExecContext(context.Background(), `
+		INSERT INTO projects
+		  (id, label, folder_path, design_doc_path, status,
+		   monitor_override_default, execution_budget_default,
+		   audit_reconcile_round_cap, created_at, updated_at)
+		VALUES (1, 'p', ?, 'design.md', 'active', 'honor', 300, 2,
+		        '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, folder); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	return 1
+}
+
+// TestHandleBeadReport_ServesReportFile confirms a bead's mechanically
+// written traces/bead-{id}-report.md is found via its project's folder_path
+// and returned verbatim.
+func TestHandleBeadReport_ServesReportFile(t *testing.T) {
+	s, d := openTestServer(t)
+	dir := t.TempDir()
+	pid := seedProjectWithFolder(t, d, dir)
+	beadID := seedBead(t, d, pid, 300)
+
+	tracesDir := filepath.Join(dir, "traces")
+	if err := os.MkdirAll(tracesDir, 0o755); err != nil {
+		t.Fatalf("mkdir traces: %v", err)
+	}
+	reportPath := filepath.Join(tracesDir, fmt.Sprintf("bead-%d-report.md", beadID))
+	if err := os.WriteFile(reportPath, []byte("# Bead Report\nescalated"), 0o644); err != nil {
+		t.Fatalf("write report: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/beads/%d/report", beadID), nil)
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "escalated") {
+		t.Errorf("expected response to contain report content, got: %s", w.Body.String())
+	}
+}
+
+// TestHandleBeadReport_MissingReportShowsPlaceholder confirms a bead that
+// hasn't reached a terminal state yet (no report file written) renders a
+// placeholder instead of erroring.
+func TestHandleBeadReport_MissingReportShowsPlaceholder(t *testing.T) {
+	s, d := openTestServer(t)
+	dir := t.TempDir()
+	pid := seedProjectWithFolder(t, d, dir)
+	beadID := seedBead(t, d, pid, 300)
+
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/beads/%d/report", beadID), nil)
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "not yet generated") {
+		t.Errorf("expected placeholder message, got: %s", w.Body.String())
+	}
+}
+
+// TestHandleBeadReport_UnknownBeadNotFound confirms a nonexistent bead ID
+// 404s rather than attempting any filesystem read.
+func TestHandleBeadReport_UnknownBeadNotFound(t *testing.T) {
+	s, _ := openTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/beads/999999/report", nil)
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestHandleProjectReport_ServesReportFile confirms a project's
+// traces/project-report.md is found via folder_path and returned verbatim.
+func TestHandleProjectReport_ServesReportFile(t *testing.T) {
+	s, d := openTestServer(t)
+	dir := t.TempDir()
+	pid := seedProjectWithFolder(t, d, dir)
+
+	tracesDir := filepath.Join(dir, "traces")
+	if err := os.MkdirAll(tracesDir, 0o755); err != nil {
+		t.Fatalf("mkdir traces: %v", err)
+	}
+	reportPath := filepath.Join(tracesDir, "project-report.md")
+	if err := os.WriteFile(reportPath, []byte("# Project Report\ncomplete"), 0o644); err != nil {
+		t.Fatalf("write report: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/projects/%d/report", pid), nil)
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "complete") {
+		t.Errorf("expected response to contain report content, got: %s", w.Body.String())
+	}
+}
+
+// TestHandleProjectReport_UnknownProjectNotFound confirms a nonexistent
+// project ID 404s rather than attempting any filesystem read.
+func TestHandleProjectReport_UnknownProjectNotFound(t *testing.T) {
+	s, _ := openTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/projects/999999/report", nil)
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

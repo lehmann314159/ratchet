@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -546,6 +547,74 @@ func (s *server) handleTrace(w http.ResponseWriter, r *http.Request) {
 	}
 	s.render(w, s.tmpl.trace, traceData{
 		baseData: s.base(r),
+		Path:     path,
+		Content:  content,
+	})
+}
+
+// --- Reports ---
+//
+// bead-report.md and project-report.md are written mechanically (no model
+// call — see docs/post-execution-report-spec.md) whenever a bead or project
+// reaches a terminal state, including escalation. These handlers just find
+// and display them; the report content itself is the forensic record.
+
+type reportData struct {
+	baseData
+	Title   string
+	Path    string
+	Content string
+}
+
+// handleBeadReport serves traces/bead-{id}-report.md for a bead. The path is
+// resolved server-side from the bead's project folder_path, never
+// client-supplied, mirroring handleTrace's path-resolution pattern.
+func (s *server) handleBeadReport(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid bead id", http.StatusBadRequest)
+		return
+	}
+	folder, err := queryBeadProjectFolder(r.Context(), s.db, id)
+	if err != nil {
+		http.Error(w, "bead not found", http.StatusNotFound)
+		return
+	}
+	path := filepath.Join(folder, "traces", fmt.Sprintf("bead-%d-report.md", id))
+	b, err := os.ReadFile(path)
+	content := ""
+	if err == nil {
+		content = string(b)
+	}
+	s.render(w, s.tmpl.report, reportData{
+		baseData: s.base(r),
+		Title:    fmt.Sprintf("Bead %d Report", id),
+		Path:     path,
+		Content:  content,
+	})
+}
+
+// handleProjectReport serves traces/project-report.md for a project.
+func (s *server) handleProjectReport(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid project id", http.StatusBadRequest)
+		return
+	}
+	folder, err := queryProjectFolder(r.Context(), s.db, id)
+	if err != nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	path := filepath.Join(folder, "traces", "project-report.md")
+	b, err := os.ReadFile(path)
+	content := ""
+	if err == nil {
+		content = string(b)
+	}
+	s.render(w, s.tmpl.report, reportData{
+		baseData: s.base(r),
+		Title:    "Project Report",
 		Path:     path,
 		Content:  content,
 	})

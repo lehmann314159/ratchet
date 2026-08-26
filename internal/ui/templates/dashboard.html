@@ -19,6 +19,7 @@
   <button type="submit" class="action-close">Full Stop</button>
 </form>
 {{end}}
+<a href="/projects/{{.Project.ID}}/report" style="font-size:0.6em;font-weight:normal;margin-left:0.5rem">full report →</a>
 </h1>
 <p class="meta">{{.Project.FolderPath}}/{{.Project.DesignDoc}}</p>
 
@@ -91,6 +92,7 @@
       <td><span class="status {{.Status}}">{{.Status}}</span></td>
       <td class="meta">{{.CreatedAt}}</td>
       <td>
+        <a href="/projects/{{.ID}}/report">report</a>
         {{if eq .Status "paused"}}
         <form method="post" action="/projects/{{.ID}}/resume" style="display:inline">
           <button type="submit" class="action-ok">Resume</button>

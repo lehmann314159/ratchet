@@ -4,7 +4,7 @@
 
 <table style="width:auto; margin-bottom:20px;">
   <tr><th>Verb</th><td>{{.Job.Verb}}</td></tr>
-  <tr><th>Bead</th><td>{{if .Job.BeadID.Valid}}{{if .Job.BeadTitle}}{{.Job.BeadTitle}} (bead-{{.Job.BeadID.Int64}}){{else}}bead-{{.Job.BeadID.Int64}}{{end}}{{else}}— (project-scoped){{end}}</td></tr>
+  <tr><th>Bead</th><td>{{if .Job.BeadID.Valid}}{{if .Job.BeadTitle}}{{.Job.BeadTitle}} (bead-{{.Job.BeadID.Int64}}){{else}}bead-{{.Job.BeadID.Int64}}{{end}} — <a href="/beads/{{.Job.BeadID.Int64}}/report">full report →</a>{{else}}— (project-scoped){{end}}</td></tr>
   <tr><th>Strikes</th><td>{{.Job.Strikes}}</td></tr>
   {{if .Job.Budget}}<tr><th>Budget</th><td>{{.Job.Budget}}s</td></tr>{{end}}
   <tr><th>Updated</th><td class="meta">{{.Job.UpdatedAt}}</td></tr>

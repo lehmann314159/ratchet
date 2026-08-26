@@ -358,3 +358,17 @@ func queryTracePath(ctx context.Context, d *db.DB, execID int64) (string, error)
 	err := d.QueryRowContext(ctx, `SELECT trace_path FROM executions WHERE id = ?`, execID).Scan(&path)
 	return path, err
 }
+
+func queryBeadProjectFolder(ctx context.Context, d *db.DB, beadID int64) (string, error) {
+	var folder string
+	err := d.QueryRowContext(ctx, `
+		SELECT p.folder_path FROM beads b JOIN projects p ON p.id = b.project_id WHERE b.id = ?`,
+		beadID).Scan(&folder)
+	return folder, err
+}
+
+func queryProjectFolder(ctx context.Context, d *db.DB, projectID int64) (string, error) {
+	var folder string
+	err := d.QueryRowContext(ctx, `SELECT folder_path FROM projects WHERE id = ?`, projectID).Scan(&folder)
+	return folder, err
+}
