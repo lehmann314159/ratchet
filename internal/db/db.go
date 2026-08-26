@@ -34,6 +34,7 @@ var columnMigrations = []columnMigration{
 	{"projects", "pause_after_verb", "TEXT"},
 	{"projects", "pause_after_bead_id", "INTEGER"},
 	{"projects", "decompose_ambiguities", "TEXT"},
+	{"projects", "reconcile_self_resolve", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 //go:embed schema.sql

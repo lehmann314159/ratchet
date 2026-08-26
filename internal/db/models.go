@@ -7,21 +7,21 @@ import (
 
 // Verb constants.
 const (
-	VerbSurveySpec                 = "SURVEY_SPEC"
-	VerbVerifyManifest             = "VERIFY_MANIFEST"
-	VerbCertifyManifest            = "CERTIFY_MANIFEST"
-	VerbDecomposeSpec              = "DECOMPOSE_SPEC"
-	VerbAuditDecomposition         = "AUDIT_DECOMPOSITION"
-	VerbReconcileDecomposition     = "RECONCILE_DECOMPOSITION"
-	VerbExecuteBead                = "EXECUTE_BEAD"
-	VerbMonitorExecution           = "MONITOR_EXECUTION"
-	VerbAnalyzeExecution           = "ANALYZE_EXECUTION"
-	VerbCompressAnalysis           = "COMPRESS_ANALYSIS"
-	VerbAdjudicateNextExecution    = "ADJUDICATE_NEXT_EXECUTION"
-	VerbRevisePending              = "REVISE_PENDING"
-	VerbRefineTestsWrite           = "REFINE_TESTS_WRITE"
-	VerbRefineTestsCritique        = "REFINE_TESTS_CRITIQUE"
-	VerbRefineTestsJudge           = "REFINE_TESTS_JUDGE"
+	VerbSurveySpec              = "SURVEY_SPEC"
+	VerbVerifyManifest          = "VERIFY_MANIFEST"
+	VerbCertifyManifest         = "CERTIFY_MANIFEST"
+	VerbDecomposeSpec           = "DECOMPOSE_SPEC"
+	VerbAuditDecomposition      = "AUDIT_DECOMPOSITION"
+	VerbReconcileDecomposition  = "RECONCILE_DECOMPOSITION"
+	VerbExecuteBead             = "EXECUTE_BEAD"
+	VerbMonitorExecution        = "MONITOR_EXECUTION"
+	VerbAnalyzeExecution        = "ANALYZE_EXECUTION"
+	VerbCompressAnalysis        = "COMPRESS_ANALYSIS"
+	VerbAdjudicateNextExecution = "ADJUDICATE_NEXT_EXECUTION"
+	VerbRevisePending           = "REVISE_PENDING"
+	VerbRefineTestsWrite        = "REFINE_TESTS_WRITE"
+	VerbRefineTestsCritique     = "REFINE_TESTS_CRITIQUE"
+	VerbRefineTestsJudge        = "REFINE_TESTS_JUDGE"
 )
 
 // AllVerbs lists every model-assigned verb in FSM order.
@@ -45,22 +45,31 @@ var AllVerbs = []string{
 
 // Project represents a row in the projects table.
 type Project struct {
-	ID                       int64
-	Label                    string
-	FolderPath               string
-	DesignDocPath            string
-	Status                   string // 'active' | 'full_stopped' | 'complete' | 'paused' | 'fixture'
-	RecoveredFromProjectID   sql.NullInt64
-	MonitorOverrideDefault   string // 'honor' | 'ignore'
-	ExecutionBudgetDefault   int
-	AuditReconcileRoundCap   int
-	MaxExecutionAttempts     int
-	Language                 string // 'go' | 'python' | ... (default 'go')
-	PauseAfterReconcile      bool
-	PauseAfterVerb           sql.NullString
-	PauseAfterBeadID         sql.NullInt64
-	CreatedAt                time.Time
-	UpdatedAt                time.Time
+	ID                     int64
+	Label                  string
+	FolderPath             string
+	DesignDocPath          string
+	Status                 string // 'active' | 'full_stopped' | 'complete' | 'paused' | 'fixture'
+	RecoveredFromProjectID sql.NullInt64
+	MonitorOverrideDefault string // 'honor' | 'ignore'
+	ExecutionBudgetDefault int
+	AuditReconcileRoundCap int
+	MaxExecutionAttempts   int
+	Language               string // 'go' | 'python' | ... (default 'go')
+	PauseAfterReconcile    bool
+	PauseAfterVerb         sql.NullString
+	PauseAfterBeadID       sql.NullInt64
+	// ReconcileSelfResolve controls who wins a live, unresolved disagreement
+	// between AUDIT_DECOMPOSITION and RECONCILE_DECOMPOSITION. false
+	// (cautious, the default): every disagreement is treated as live
+	// regardless of RECONCILE's already_addressed self-report, so it either
+	// converges through genuine agreement or rides the round cap to a real
+	// human escalation. true (permissive): RECONCILE's already_addressed
+	// self-report is trusted to end a disagreement in its own favor without
+	// further debate or escalation. See reconcile_decomposition.go's Commit.
+	ReconcileSelfResolve bool
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 }
 
 // VerbModelAssignment represents a row in the verb_model_assignments table.
@@ -72,9 +81,9 @@ type VerbModelAssignment struct {
 
 // Bead represents a row in the beads table.
 type Bead struct {
-	ID               int64
-	ProjectID        int64
-	Status           string // 'pending' | 'executing' | 'succeeded' | 'failed' | 'full_stopped'
+	ID                int64
+	ProjectID         int64
+	Status            string // 'pending' | 'executing' | 'succeeded' | 'failed' | 'full_stopped'
 	CurrentRevisionID sql.NullInt64
 }
 
@@ -142,8 +151,8 @@ type Adjudication struct {
 	ProjectID               int64
 	BeadID                  int64
 	ExecutionID             int64
-	Trend                   string  // 'same' | 'narrower' | 'unrelated'
-	BeadSpecFit             string  // 'bead_problem' | 'execution_capability_problem'
+	Trend                   string // 'same' | 'narrower' | 'unrelated'
+	BeadSpecFit             string // 'bead_problem' | 'execution_capability_problem'
 	ReasoningText           string
 	AttemptBudgetCost       float64
 	MonitorEscalationStatus bool

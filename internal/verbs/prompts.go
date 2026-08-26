@@ -275,7 +275,7 @@ Respond with JSON only, no prose before or after:
 }`
 }
 
-func reconcileDecompositionSystemPrompt(lang string) string {
+func reconcileDecompositionSystemPrompt(lang string, selfResolve bool) string {
 	goSection := ""
 	if lang == "go" {
 		goSection = "When the corrected Bead owns a *_test.go file, the updated full_text must explicitly name the\n" +
@@ -283,6 +283,21 @@ func reconcileDecompositionSystemPrompt(lang string) string {
 			"executor that writes the implementation without the test functions will see " +
 			"`go test -run TestEncode .`" +
 			"\nexit 0 with \"no tests to run\" and may not realize the test functions are still missing.\n\n"
+	}
+	alreadyAddressedSection := "already_addressed is not available in this project's configuration: every disagreement is\n" +
+		"treated as live regardless of how you set this field, and will either be resolved through\n" +
+		"genuine agreement or reach a human for review once the debate round cap is hit. State your\n" +
+		"honest disagreement and reason each round rather than relying on already_addressed — it has\n" +
+		"no effect here.\n"
+	if selfResolve {
+		alreadyAddressedSection = "If you disagree with a finding, set already_addressed to true only when this exact finding\n" +
+			"was already raised in an earlier round, you already disagreed with it there giving a specific\n" +
+			"reason, and the current critique offers no new argument beyond restating it — even if AUDIT\n" +
+			"reworded it. Name the earlier round in your reason. This is a factual claim about the debate\n" +
+			"history, not a way to end the round in your favor — it will be checked against that history.\n" +
+			"If AUDIT's current finding raises new evidence, a new argument, or a genuinely different\n" +
+			"concern — even about a bead you disagreed about before — leave already_addressed false and\n" +
+			"engage with it as new; only disagree if you can state precisely why the finding is wrong.\n"
 	}
 	return `You receive a specific critique of a decomposition you authored. For each finding, respond with one of:
 - agree_and_fix: the finding is correct; provide the corrected Bead in updated_bead
@@ -302,15 +317,7 @@ updated criteria.
 ` + goSection + `When previous debate rounds appear in the message, read them before responding — your
 answer must account for what was already argued.
 
-If you disagree with a finding, set already_addressed to true only when this exact finding
-was already raised in an earlier round, you already disagreed with it there giving a specific
-reason, and the current critique offers no new argument beyond restating it — even if AUDIT
-reworded it. Name the earlier round in your reason. Setting already_addressed converges this
-round in your favor instead of burning another debate round or escalating. If AUDIT's current
-finding raises new evidence, a new argument, or a genuinely different concern — even about a
-bead you disagreed about before — leave already_addressed false and engage with it as new;
-only disagree if you can state precisely why the finding is wrong.
-
+` + alreadyAddressedSection + `
 Respond with JSON only, no prose before or after:
 {
   "responses": [

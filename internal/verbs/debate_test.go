@@ -344,10 +344,18 @@ func TestDebateLoopTwoRoundsEscalated(t *testing.T) {
 // its own a second disagree at the cap would normally escalate (see
 // TestDebateLoopTwoRoundsEscalated, which is the AlreadyAddressed=false
 // case at the identical cap and round number).
+//
+// This behavior is now gated behind reconcile_self_resolve (loop-mode
+// audit) — this test explicitly opts into permissive mode to keep exercising
+// it; TestDebateLoopTwoRoundsAlreadyAddressedEscalatesByDefault covers the
+// same scenario under the cautious default.
 func TestDebateLoopTwoRoundsAlreadyAddressedConverges(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 	seedProject(t, d, -1, "fixture: debate loop/already-addressed converges")
+	if _, err := d.ExecContext(ctx, `UPDATE projects SET reconcile_self_resolve = 1 WHERE id = -1`); err != nil {
+		t.Fatalf("enable reconcile_self_resolve: %v", err)
+	}
 	seedBead(t, d, -1, "B01")
 
 	// --- Round 1: RECONCILE disagrees, stating a specific reason ---
@@ -401,6 +409,66 @@ func TestDebateLoopTwoRoundsAlreadyAddressedConverges(t *testing.T) {
 	}
 	if n := countRows(t, d, `SELECT COUNT(*) FROM handoff_jobs WHERE project_id = -1 AND verb = 'EXECUTE_BEAD'`); n != 1 {
 		t.Errorf("EXECUTE_BEAD jobs after convergence = %d, want 1", n)
+	}
+}
+
+// TestDebateLoopTwoRoundsAlreadyAddressedEscalatesByDefault is the
+// loop-mode-audit counterpart to TestDebateLoopTwoRoundsAlreadyAddressedConverges:
+// the identical scenario (a disagree at the round cap with AlreadyAddressed
+// set), but under reconcile_self_resolve's cautious default (seedProject
+// never sets it, so it's false). AlreadyAddressed must be ignored entirely —
+// RECONCILE's own self-report is no longer trusted to end a live
+// disagreement in its own favor — so this rides the round cap to a real
+// escalation exactly like TestDebateLoopTwoRoundsEscalated's genuinely-live
+// disagreement does.
+func TestDebateLoopTwoRoundsAlreadyAddressedEscalatesByDefault(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "fixture: debate loop/already-addressed escalates by default")
+	seedBead(t, d, -1, "B01")
+
+	seedAuditComplete(t, d, -1, auditFindingsJSON, "2026-01-01T00:00:00Z")
+	reconcile1Job := seedJob(t, d, -1, db.VerbReconcileDecomposition, sql.NullInt64{})
+	h1 := &ReconcileDecomposition{lastCritique: auditFindingsJSON, lastRoundsSoFar: 0}
+	inTx(t, d, func(tx *sql.Tx) error {
+		return h1.Commit(ctx, tx, reconcile1Job, ReconcileDecompositionOutput{
+			Responses: []ReconcileResponse{{BeadTitle: "B01", Action: "disagree", Reason: "finding is wrong: §3.1 specifies this"}},
+		})
+	})
+
+	seedAuditComplete(t, d, -1, auditFindingsJSON, "2026-01-01T00:01:00Z")
+	reconcile2Job := seedJob(t, d, -1, db.VerbReconcileDecomposition, sql.NullInt64{})
+	h2 := &ReconcileDecomposition{lastCritique: auditFindingsJSON, lastRoundsSoFar: 1}
+	inTx(t, d, func(tx *sql.Tx) error {
+		return h2.Commit(ctx, tx, reconcile2Job, ReconcileDecompositionOutput{
+			Responses: []ReconcileResponse{{
+				BeadTitle: "B01", Action: "disagree",
+				Reason:           "same complaint as round 1, still no new argument from AUDIT",
+				AlreadyAddressed: true,
+			}},
+		})
+	})
+
+	var r2outcome string
+	if err := d.QueryRowContext(ctx,
+		`SELECT outcome FROM audit_reconcile_rounds WHERE round_number=2 AND project_id=-1`,
+	).Scan(&r2outcome); err != nil {
+		t.Fatalf("round 2 row missing: %v", err)
+	}
+	if r2outcome != "escalated" {
+		t.Errorf("round 2 outcome = %q, want escalated (already_addressed must not be honored under the cautious default)", r2outcome)
+	}
+	var jobStatus string
+	if err := d.QueryRowContext(ctx,
+		`SELECT status FROM handoff_jobs WHERE id = ?`, reconcile2Job.ID,
+	).Scan(&jobStatus); err != nil {
+		t.Fatalf("reconcile job row: %v", err)
+	}
+	if jobStatus != "escalated" {
+		t.Errorf("reconcile job status = %q, want escalated", jobStatus)
+	}
+	if n := countRows(t, d, `SELECT COUNT(*) FROM handoff_jobs WHERE project_id = -1 AND verb = 'EXECUTE_BEAD'`); n != 0 {
+		t.Errorf("EXECUTE_BEAD jobs = %d after escalation, want 0", n)
 	}
 }
 

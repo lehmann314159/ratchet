@@ -83,16 +83,19 @@ func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFold
 		PauseAfterReconcile    bool
 		PauseAfterVerb         sql.NullString
 		PauseAfterBeadID       sql.NullInt64
+		ReconcileSelfResolve   bool
 		FolderPath             string
 	}
 	if err = d.QueryRowContext(ctx, `
 		SELECT design_doc_path, monitor_override_default, execution_budget_default,
 		       audit_reconcile_round_cap, max_execution_attempts, language,
-		       pause_after_reconcile, pause_after_verb, pause_after_bead_id, folder_path
+		       pause_after_reconcile, pause_after_verb, pause_after_bead_id,
+		       reconcile_self_resolve, folder_path
 		FROM projects WHERE id = ?`, fromID,
 	).Scan(&src.DesignDocPath, &src.MonitorOverrideDefault, &src.ExecutionBudgetDefault,
 		&src.AuditReconcileRoundCap, &src.MaxExecutionAttempts, &src.Language,
-		&src.PauseAfterReconcile, &src.PauseAfterVerb, &src.PauseAfterBeadID, &src.FolderPath,
+		&src.PauseAfterReconcile, &src.PauseAfterVerb, &src.PauseAfterBeadID,
+		&src.ReconcileSelfResolve, &src.FolderPath,
 	); err == sql.ErrNoRows {
 		return 0, fmt.Errorf("project not found: %d", fromID)
 	} else if err != nil {
@@ -142,11 +145,13 @@ func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFold
 		   monitor_override_default, execution_budget_default,
 		   audit_reconcile_round_cap, max_execution_attempts,
 		   language, pause_after_reconcile, pause_after_verb, pause_after_bead_id,
+		   reconcile_self_resolve,
 		   created_at, updated_at)
 		SELECT ?, ?, ?, 'active',
 		       monitor_override_default, execution_budget_default,
 		       audit_reconcile_round_cap, max_execution_attempts,
 		       language, pause_after_reconcile, pause_after_verb, pause_after_bead_id,
+		       reconcile_self_resolve,
 		       datetime('now'), datetime('now')
 		FROM projects WHERE id = ?`,
 		newLabel, newFolderAbs, src.DesignDocPath, fromID)
@@ -359,7 +364,7 @@ func fixupCurrentRevisionIDs(ctx context.Context, tx *sql.Tx, fromID int64, bead
 		return fmt.Errorf("query beads for fixup: %w", err)
 	}
 	type row struct {
-		oldBeadID    int64
+		oldBeadID     int64
 		oldRevisionID int64
 	}
 	var buf []row

@@ -28,6 +28,13 @@ type Params struct {
 	PauseAfterReconcile  bool              // halt after RECONCILE converges; resume with resume-project
 	PauseAfterVerb       string            // halt after this verb's forward-progress branch commits; "" disables
 	PauseAfterBeadID     int64             // halt once this bead succeeds and REVISE_PENDING dispatches the next one; 0 disables
+	// ReconcileSelfResolve controls who wins a live, unresolved disagreement
+	// between AUDIT_DECOMPOSITION and RECONCILE_DECOMPOSITION. false
+	// (cautious, the default): every disagreement rides the round cap to a
+	// real human escalation regardless of RECONCILE's already_addressed
+	// self-report. true (permissive): that self-report is trusted to end a
+	// disagreement in RECONCILE's own favor without further debate.
+	ReconcileSelfResolve bool
 }
 
 // pausableVerbs lists the verbs that actually check pause_after_verb (see
@@ -110,18 +117,23 @@ func Create(ctx context.Context, d *db.DB, p Params) (int64, error) {
 	if p.PauseAfterBeadID != 0 {
 		pauseAfterBeadID = p.PauseAfterBeadID
 	}
+	reconcileSelfResolve := 0
+	if p.ReconcileSelfResolve {
+		reconcileSelfResolve = 1
+	}
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO projects
 		  (label, folder_path, design_doc_path, status,
 		   monitor_override_default, execution_budget_default,
 		   audit_reconcile_round_cap, max_execution_attempts,
 		   language, pause_after_reconcile, pause_after_verb, pause_after_bead_id,
+		   reconcile_self_resolve,
 		   created_at, updated_at)
-		VALUES (?, ?, ?, 'active', ?, ?, 2, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, 'active', ?, ?, 2, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.Label, folderAbs, p.DesignDocPath,
 		p.MonitorOverride, p.ExecutionBudget,
 		p.MaxExecutionAttempts, p.Language, pauseAfterReconcile,
-		pauseAfterVerb, pauseAfterBeadID, now, now)
+		pauseAfterVerb, pauseAfterBeadID, reconcileSelfResolve, now, now)
 	if err != nil {
 		_ = tx.Rollback()
 		return 0, fmt.Errorf("insert project: %w", err)
@@ -169,6 +181,7 @@ func RunNewProjectMain(args []string) {
 	pauseAfterReconcile := flags.Bool("pause-after-reconcile", false, "halt after RECONCILE converges instead of starting bead execution; resume with resume-project")
 	pauseAfterVerb := flags.String("pause-after-verb", "", fmt.Sprintf("halt after this verb's forward-progress branch commits; resume with resume-project. One of: %v", pausableVerbs))
 	pauseAfterBead := flags.Int64("pause-after-bead", 0, "halt once this bead ID succeeds and REVISE_PENDING dispatches the next one; resume with resume-project. Bead IDs are assigned during decomposition, so this is only useful once you already know one (e.g. re-running a design doc you've decomposed before)")
+	reconcileSelfResolve := flags.Bool("reconcile-self-resolve", false, "let RECONCILE's already_addressed self-report end an AUDIT disagreement in its own favor without human review; default (false) always rides the round cap to a real escalation instead")
 	_ = flags.Parse(args)
 
 	if *label == "" {
@@ -212,6 +225,7 @@ func RunNewProjectMain(args []string) {
 		PauseAfterReconcile:  *pauseAfterReconcile,
 		PauseAfterVerb:       *pauseAfterVerb,
 		PauseAfterBeadID:     *pauseAfterBead,
+		ReconcileSelfResolve: *reconcileSelfResolve,
 	})
 	if err != nil {
 		slog.Error("new-project: create failed", "error", err)

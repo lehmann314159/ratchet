@@ -79,7 +79,7 @@ func (h *ReconcileDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.C
 	h.folderPath = project.FolderPath
 
 	return oc.Chat(ctx, model, []ollama.Message{
-		{Role: "system", Content: reconcileDecompositionSystemPrompt(detectLang(project.FolderPath, beadOutputFiles(beads)))},
+		{Role: "system", Content: reconcileDecompositionSystemPrompt(detectLang(project.FolderPath, beadOutputFiles(beads)), project.ReconcileSelfResolve)},
 		{Role: "user", Content: buildReconcileUserMsg(doc, beads, history, critique, rejectFeedback)},
 	}, nil)
 }
@@ -196,7 +196,8 @@ func (h *ReconcileDecomposition) Validate(raw string) (string, any) {
 // if the round cap is reached. RECONCILE is explicitly not given authority
 // to declare convergence itself — the comparator is this code, not a model.
 //
-// One exception: a disagree response with AlreadyAddressed set does not
+// One conditional exception, gated by the project's reconcile_self_resolve
+// setting: when true, a disagree response with AlreadyAddressed set does not
 // count against convergence — RECONCILE is self-certifying, in the same
 // single judgment call that produced the disagreement, that this is a finding
 // it already disputed in an earlier round with no new argument from AUDIT.
@@ -211,6 +212,15 @@ func (h *ReconcileDecomposition) Validate(raw string) (string, any) {
 // finding with a new argument — RECONCILE is expected to leave
 // AlreadyAddressed false in that case, which still follows the normal
 // continue-or-escalate path below.
+//
+// reconcile_self_resolve defaults to false (cautious): AlreadyAddressed is
+// never honored, so every live disagreement rides the round cap to a real
+// human escalation. This does reintroduce the exact false-escalation risk
+// the mechanism above was built to fix — a paraphrased-but-already-settled
+// finding will ride the cap too — but under the loop-mode philosophy that's
+// an acceptable, cheap-to-resolve cost (a human glances at it and closes it
+// out) rather than the correctness risk of letting RECONCILE be the sole
+// judge of its own rebuttal in a genuinely live disagreement.
 func (h *ReconcileDecomposition) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJob, parsed any) error {
 	out := parsed.(ReconcileDecompositionOutput)
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -227,10 +237,11 @@ func (h *ReconcileDecomposition) Commit(ctx context.Context, tx *sql.Tx, job *db
 	}
 
 	var roundCap int
+	var reconcileSelfResolve bool
 	if err := tx.QueryRowContext(ctx,
-		`SELECT audit_reconcile_round_cap FROM projects WHERE id = ?`,
+		`SELECT audit_reconcile_round_cap, reconcile_self_resolve FROM projects WHERE id = ?`,
 		job.ProjectID,
-	).Scan(&roundCap); err != nil {
+	).Scan(&roundCap, &reconcileSelfResolve); err != nil {
 		return fmt.Errorf("load round cap: %w", err)
 	}
 
@@ -240,7 +251,7 @@ func (h *ReconcileDecomposition) Commit(ctx context.Context, tx *sql.Tx, job *db
 	for _, r := range out.Responses {
 		if r.Action == "disagree" {
 			hasDisagree = true
-			if !r.AlreadyAddressed {
+			if !reconcileSelfResolve || !r.AlreadyAddressed {
 				allDisagreesAreRepeats = false
 			}
 		}

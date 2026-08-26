@@ -63,16 +63,17 @@ func RunRestartProjectMain(args []string) {
 		MaxExecutionAttempts int
 		Language             string
 		PauseAfterReconcile  bool
+		ReconcileSelfResolve bool
 		Status               string
 	}
 	if err := d.QueryRowContext(ctx, `
 		SELECT folder_path, design_doc_path, monitor_override_default,
 		       execution_budget_default, max_execution_attempts, language,
-		       pause_after_reconcile, status
+		       pause_after_reconcile, reconcile_self_resolve, status
 		FROM projects WHERE id = ?`, *oldProjectID,
 	).Scan(&old.FolderPath, &old.DesignDocPath, &old.MonitorOverride,
 		&old.ExecutionBudget, &old.MaxExecutionAttempts, &old.Language,
-		&old.PauseAfterReconcile, &old.Status,
+		&old.PauseAfterReconcile, &old.ReconcileSelfResolve, &old.Status,
 	); err != nil {
 		slog.Error("restart-project: load old project", "id", *oldProjectID, "error", err)
 		os.Exit(1)
@@ -176,6 +177,7 @@ func RunRestartProjectMain(args []string) {
 		Fleet:                fleet,
 		Language:             languageVal,
 		PauseAfterReconcile:  old.PauseAfterReconcile,
+		ReconcileSelfResolve: old.ReconcileSelfResolve,
 	})
 	if err != nil {
 		slog.Error("restart-project: create new project (old project is already full-stopped; folder is prepared at "+newFolderAbs+" — fix the issue and run new-project directly)", "error", err)
