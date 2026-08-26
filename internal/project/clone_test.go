@@ -42,11 +42,13 @@ func seedCloneFullProject(t *testing.T, d *db.DB, projectID int64) (folder strin
 		  (id, label, folder_path, design_doc_path, status,
 		   monitor_override_default, execution_budget_default, audit_reconcile_round_cap,
 		   max_execution_attempts, language, pause_after_reconcile, pause_after_verb, pause_after_bead_id,
+		   lineage_root_id, iteration_number,
 		   created_at, updated_at)
 		VALUES (?, 'clone-source', ?, 'design_doc.md', 'active',
 		        'honor', 300, 2, 5, 'go', 0, NULL, NULL,
+		        ?, 1,
 		        '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		projectID, folder)
+		projectID, folder, projectID)
 
 	mustExecFixture(t, d, `INSERT INTO verb_model_assignments (project_id, verb, model) VALUES (?, 'DECOMPOSE_SPEC', 'm1')`, projectID)
 
@@ -169,7 +171,7 @@ func TestCloneProject_DeepCopiesEveryTable(t *testing.T) {
 	folder, beadAID, beadBID, jobAID, _, rev2ID := seedCloneFullProject(t, d, 50)
 
 	newFolder := filepath.Join(t.TempDir(), "clone")
-	newID, err := cloneProject(ctx, d, 50, "clone-1", newFolder)
+	newID, _, _, err := cloneProject(ctx, d, 50, "clone-1", newFolder)
 	if err != nil {
 		t.Fatalf("cloneProject: %v", err)
 	}
@@ -372,7 +374,7 @@ func TestCloneProject_IndependentMutability(t *testing.T) {
 	_, beadAID, _, _, _, _ := seedCloneFullProject(t, d, 51)
 
 	newFolder := filepath.Join(t.TempDir(), "clone")
-	newID, err := cloneProject(ctx, d, 51, "clone-2", newFolder)
+	newID, _, _, err := cloneProject(ctx, d, 51, "clone-2", newFolder)
 	if err != nil {
 		t.Fatalf("cloneProject: %v", err)
 	}
@@ -410,7 +412,7 @@ func TestCloneProject_DispatchableRoundTrip(t *testing.T) {
 	seedCloneFullProject(t, d, 52)
 
 	newFolder := filepath.Join(t.TempDir(), "clone")
-	newID, err := cloneProject(ctx, d, 52, "clone-3", newFolder)
+	newID, _, _, err := cloneProject(ctx, d, 52, "clone-3", newFolder)
 	if err != nil {
 		t.Fatalf("cloneProject: %v", err)
 	}
@@ -450,7 +452,7 @@ func TestCloneProject_RefusesWithRunningJob(t *testing.T) {
 		VALUES (53, 'EXECUTE_BEAD', NULL, 'running', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
 
 	newFolder := filepath.Join(t.TempDir(), "clone")
-	if _, err := cloneProject(ctx, d, 53, "clone-4", newFolder); err == nil {
+	if _, _, _, err := cloneProject(ctx, d, 53, "clone-4", newFolder); err == nil {
 		t.Fatal("expected error for a source project with a running job, got nil")
 	}
 	if _, err := os.Stat(newFolder); err == nil {
@@ -464,7 +466,7 @@ func TestCloneProject_RefusesExistingFolder(t *testing.T) {
 	seedCloneFullProject(t, d, 54)
 
 	existing := t.TempDir() // already exists
-	if _, err := cloneProject(ctx, d, 54, "clone-5", existing); err == nil {
+	if _, _, _, err := cloneProject(ctx, d, 54, "clone-5", existing); err == nil {
 		t.Fatal("expected error for an already-existing folder, got nil")
 	}
 }
@@ -473,7 +475,7 @@ func TestCloneProject_NotFound(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 	newFolder := filepath.Join(t.TempDir(), "clone")
-	if _, err := cloneProject(ctx, d, 999, "clone-6", newFolder); err == nil {
+	if _, _, _, err := cloneProject(ctx, d, 999, "clone-6", newFolder); err == nil {
 		t.Fatal("expected error for an unknown source project, got nil")
 	}
 }
@@ -492,7 +494,7 @@ func TestCloneProject_WorksFromNegativeFixtureID(t *testing.T) {
 	}
 
 	newFolder := filepath.Join(t.TempDir(), "clone")
-	newID, err := cloneProject(ctx, d, fixtureID, "clone-from-fixture", newFolder)
+	newID, _, _, err := cloneProject(ctx, d, fixtureID, "clone-from-fixture", newFolder)
 	if err != nil {
 		t.Fatalf("cloneProject from a fixture id: %v", err)
 	}
@@ -502,5 +504,133 @@ func TestCloneProject_WorksFromNegativeFixtureID(t *testing.T) {
 	}
 	if status != "active" {
 		t.Errorf("status = %q, want active even though the source was a fixture", status)
+	}
+}
+
+// --- Lineage awareness ---
+
+func queryLineage(t *testing.T, d *db.DB, projectID int64) (lineageRootID sql.NullInt64, iterationNumber int) {
+	t.Helper()
+	if err := d.QueryRowContext(context.Background(),
+		`SELECT lineage_root_id, iteration_number FROM projects WHERE id = ?`, projectID,
+	).Scan(&lineageRootID, &iterationNumber); err != nil {
+		t.Fatalf("query lineage for project %d: %v", projectID, err)
+	}
+	return lineageRootID, iterationNumber
+}
+
+// TestCloneProject_ContinuesSourceLineage verifies a clone inherits the
+// source's lineage_root_id (not its own id) and takes iteration_number =
+// source's + 1 — this is the whole point of making clone lineage-aware.
+func TestCloneProject_ContinuesSourceLineage(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedCloneFullProject(t, d, 60)
+
+	srcRoot, srcIter := queryLineage(t, d, 60)
+	if !srcRoot.Valid || srcRoot.Int64 != 60 || srcIter != 1 {
+		t.Fatalf("source lineage = (root=%v, iter=%d), want (root=60, iter=1)", srcRoot, srcIter)
+	}
+
+	newFolder := filepath.Join(t.TempDir(), "clone")
+	newID, lineageRootID, iterationNumber, err := cloneProject(ctx, d, 60, "clone-iter-2", newFolder)
+	if err != nil {
+		t.Fatalf("cloneProject: %v", err)
+	}
+	if lineageRootID != 60 {
+		t.Errorf("returned lineageRootID = %d, want 60 (the source's root, not the clone's own id %d)", lineageRootID, newID)
+	}
+	if iterationNumber != 2 {
+		t.Errorf("returned iterationNumber = %d, want 2", iterationNumber)
+	}
+
+	gotRoot, gotIter := queryLineage(t, d, newID)
+	if !gotRoot.Valid || gotRoot.Int64 != 60 {
+		t.Errorf("stored lineage_root_id = %v, want valid and equal to 60", gotRoot)
+	}
+	if gotIter != 2 {
+		t.Errorf("stored iteration_number = %d, want 2", gotIter)
+	}
+}
+
+// TestCloneProject_ChainedClonesContinueSameLineage verifies iteration 3
+// (cloned from iteration 2) still points at iteration 1's original id as its
+// lineage root, not iteration 2's id — the root never moves as a lineage
+// grows, which is what lets "does iteration N of lineage L exist" stay a
+// single indexed lookup instead of a chain walk.
+func TestCloneProject_ChainedClonesContinueSameLineage(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedCloneFullProject(t, d, 61)
+
+	folder2 := filepath.Join(t.TempDir(), "clone-2")
+	iter2ID, root2, num2, err := cloneProject(ctx, d, 61, "clone-iter-2", folder2)
+	if err != nil {
+		t.Fatalf("clone to iteration 2: %v", err)
+	}
+	if root2 != 61 || num2 != 2 {
+		t.Fatalf("iteration 2 lineage = (root=%d, iter=%d), want (root=61, iter=2)", root2, num2)
+	}
+
+	folder3 := filepath.Join(t.TempDir(), "clone-3")
+	iter3ID, root3, num3, err := cloneProject(ctx, d, iter2ID, "clone-iter-3", folder3)
+	if err != nil {
+		t.Fatalf("clone to iteration 3: %v", err)
+	}
+	if root3 != 61 {
+		t.Errorf("iteration 3 lineage_root_id = %d, want 61 (iteration 1's id, not iteration 2's id %d)", root3, iter2ID)
+	}
+	if num3 != 3 {
+		t.Errorf("iteration 3 iteration_number = %d, want 3", num3)
+	}
+
+	gotRoot, gotIter := queryLineage(t, d, iter3ID)
+	if !gotRoot.Valid || gotRoot.Int64 != 61 {
+		t.Errorf("stored lineage_root_id for iteration 3 = %v, want valid and equal to 61", gotRoot)
+	}
+	if gotIter != 3 {
+		t.Errorf("stored iteration_number for iteration 3 = %d, want 3", gotIter)
+	}
+}
+
+// TestCloneProject_RefusesDuplicateIteration verifies cloning the same
+// source project twice (which would both compute the same next iteration
+// number) fails on the second attempt rather than creating two projects
+// that both claim to be "iteration 2" of the same lineage — a lineage must
+// have at most one project per iteration_number.
+func TestCloneProject_RefusesDuplicateIteration(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedCloneFullProject(t, d, 62)
+
+	folderA := filepath.Join(t.TempDir(), "clone-a")
+	firstID, _, _, err := cloneProject(ctx, d, 62, "clone-a", folderA)
+	if err != nil {
+		t.Fatalf("first clone: %v", err)
+	}
+
+	folderB := filepath.Join(t.TempDir(), "clone-b")
+	if _, _, _, err := cloneProject(ctx, d, 62, "clone-b", folderB); err == nil {
+		t.Fatal("expected the second clone (same computed iteration number) to be refused")
+	} else if !strings.Contains(err.Error(), "already has an iteration") {
+		t.Errorf("error = %q, want a message naming the existing iteration conflict", err.Error())
+	}
+
+	// The refused attempt must not have left a partial project row or folder.
+	var count int
+	if err := d.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE label = 'clone-b'`).Scan(&count); err != nil {
+		t.Fatalf("count clone-b rows: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("found %d project row(s) labeled clone-b, want 0 (refused clone must not partially commit)", count)
+	}
+	if _, statErr := os.Stat(folderB); !os.IsNotExist(statErr) {
+		t.Errorf("expected folder %s not to exist after a refused clone", folderB)
+	}
+
+	// The first clone must be untouched by the second attempt's failure.
+	gotRoot, gotIter := queryLineage(t, d, firstID)
+	if !gotRoot.Valid || gotRoot.Int64 != 62 || gotIter != 2 {
+		t.Errorf("first clone's lineage = (root=%v, iter=%d), want (root=62, iter=2), unaffected by the refused second clone", gotRoot, gotIter)
 	}
 }

@@ -213,5 +213,20 @@ func renumberFixtureID(ctx context.Context, tx *sql.Tx, oldID, newID int64, now 
 		return fmt.Errorf("repoint recovered_from_project_id: %w", err)
 	}
 
+	// Same repoint for lineage_root_id (loop-mode iteration model). This one
+	// self-references far more often than recovered_from_project_id ever
+	// does — every never-iterated project's lineage_root_id equals its own
+	// id (project.Create's backfill) — so the rename above (`id = oldID` ->
+	// `id = newID`) breaks that self-reference unless this is repointed too;
+	// without it, oldID's own row (and every other iteration in its lineage)
+	// is left pointing at an id that no longer exists, which the
+	// lineage_root_id REFERENCES constraint then rejects.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE projects SET lineage_root_id = ? WHERE lineage_root_id = ?`,
+		newID, oldID,
+	); err != nil {
+		return fmt.Errorf("repoint lineage_root_id: %w", err)
+	}
+
 	return nil
 }

@@ -46,7 +46,7 @@ func RunCloneProjectMain(args []string) {
 	}
 	defer d.Close()
 
-	newID, err := cloneProject(context.Background(), d, *fromID, *label, *folder)
+	newID, lineageRootID, iterationNumber, err := cloneProject(context.Background(), d, *fromID, *label, *folder)
 	if err != nil {
 		slog.Error("clone-project", "error", err)
 		os.Exit(1)
@@ -54,10 +54,11 @@ func RunCloneProjectMain(args []string) {
 
 	folderAbs, _ := filepath.Abs(*folder)
 	fmt.Printf("project cloned\n")
-	fmt.Printf("  from id: %d\n", *fromID)
-	fmt.Printf("  new id:  %d\n", newID)
-	fmt.Printf("  label:   %s\n", *label)
-	fmt.Printf("  folder:  %s\n", folderAbs)
+	fmt.Printf("  from id:    %d\n", *fromID)
+	fmt.Printf("  new id:     %d\n", newID)
+	fmt.Printf("  label:      %s\n", *label)
+	fmt.Printf("  folder:     %s\n", folderAbs)
+	fmt.Printf("  lineage:    root project %d, iteration %d\n", lineageRootID, iterationNumber)
 }
 
 // cloneProject makes a true deep copy of fromID (positive live project or
@@ -69,10 +70,22 @@ func RunCloneProjectMain(args []string) {
 // repeatedly without mutating it. One transaction: either every table's rows
 // land correctly remapped, or nothing is written.
 //
+// Lineage-aware (loop-mode iteration model): the clone continues the
+// source's lineage rather than starting a new one — it inherits the
+// source's lineage_root_id and takes iteration_number = source's + 1. This
+// is exactly clone-project's original stated purpose ("run the same
+// starting point repeatedly") applied to the lineage columns; a genuinely
+// unrelated fork should use new-project instead. Refuses to create a
+// duplicate iteration if one already exists for this lineage — a lineage
+// must have at most one project per iteration_number, or "does iteration N
+// exist" stops being a well-defined question.
+//
 // Preconditions: the source project must exist, must have zero 'running'
 // handoff_jobs (a copied 'running' row would be orphaned in the new project —
-// nothing is actually executing it there), and newFolder must not already exist.
-func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFolder string) (newID int64, err error) {
+// nothing is actually executing it there), newFolder must not already exist,
+// and no project may already claim the computed next iteration number in
+// this lineage.
+func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFolder string) (newID, lineageRootID int64, iterationNumber int, err error) {
 	var src struct {
 		DesignDocPath          string
 		MonitorOverrideDefault string
@@ -84,54 +97,60 @@ func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFold
 		PauseAfterVerb         sql.NullString
 		PauseAfterBeadID       sql.NullInt64
 		ReconcileSelfResolve   bool
+		LineageRootID          sql.NullInt64
+		IterationNumber        int
 		FolderPath             string
 	}
 	if err = d.QueryRowContext(ctx, `
 		SELECT design_doc_path, monitor_override_default, execution_budget_default,
 		       audit_reconcile_round_cap, max_execution_attempts, language,
 		       pause_after_reconcile, pause_after_verb, pause_after_bead_id,
-		       reconcile_self_resolve, folder_path
+		       reconcile_self_resolve, lineage_root_id, iteration_number, folder_path
 		FROM projects WHERE id = ?`, fromID,
 	).Scan(&src.DesignDocPath, &src.MonitorOverrideDefault, &src.ExecutionBudgetDefault,
 		&src.AuditReconcileRoundCap, &src.MaxExecutionAttempts, &src.Language,
 		&src.PauseAfterReconcile, &src.PauseAfterVerb, &src.PauseAfterBeadID,
-		&src.ReconcileSelfResolve, &src.FolderPath,
+		&src.ReconcileSelfResolve, &src.LineageRootID, &src.IterationNumber, &src.FolderPath,
 	); err == sql.ErrNoRows {
-		return 0, fmt.Errorf("project not found: %d", fromID)
+		return 0, 0, 0, fmt.Errorf("project not found: %d", fromID)
 	} else if err != nil {
-		return 0, fmt.Errorf("query project: %w", err)
+		return 0, 0, 0, fmt.Errorf("query project: %w", err)
 	}
+	if !src.LineageRootID.Valid {
+		// Should be unreachable: project.Create and the backfillLineageRootID
+		// migration both guarantee every project has a lineage_root_id. Caught
+		// here rather than silently propagating NULL into the clone, which
+		// would leave it lineage-untracked with no way to find it later.
+		return 0, 0, 0, fmt.Errorf("project %d has no lineage_root_id — data invariant violated", fromID)
+	}
+	nextIterationNumber := src.IterationNumber + 1
 
 	var runningCount int
 	if err = d.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM handoff_jobs WHERE project_id = ? AND status = 'running'`, fromID,
 	).Scan(&runningCount); err != nil {
-		return 0, fmt.Errorf("count running jobs: %w", err)
+		return 0, 0, 0, fmt.Errorf("count running jobs: %w", err)
 	}
 	if runningCount > 0 {
-		return 0, fmt.Errorf("project %d has %d running job(s) — wait for them to finish before cloning", fromID, runningCount)
+		return 0, 0, 0, fmt.Errorf("project %d has %d running job(s) — wait for them to finish before cloning", fromID, runningCount)
 	}
 
 	newFolderAbs, err := filepath.Abs(newFolder)
 	if err != nil {
-		return 0, fmt.Errorf("resolve new folder path: %w", err)
+		return 0, 0, 0, fmt.Errorf("resolve new folder path: %w", err)
 	}
 	if _, statErr := os.Stat(newFolderAbs); statErr == nil {
-		return 0, fmt.Errorf("folder already exists: %s", newFolderAbs)
+		return 0, 0, 0, fmt.Errorf("folder already exists: %s", newFolderAbs)
 	}
 
 	oldFolderAbs, err := filepath.Abs(src.FolderPath)
 	if err != nil {
-		return 0, fmt.Errorf("resolve source folder path: %w", err)
-	}
-
-	if err = copyDir(oldFolderAbs, newFolderAbs); err != nil {
-		return 0, fmt.Errorf("copy folder tree: %w", err)
+		return 0, 0, 0, fmt.Errorf("resolve source folder path: %w", err)
 	}
 
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("begin tx: %w", err)
+		return 0, 0, 0, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() {
 		if err != nil {
@@ -139,100 +158,122 @@ func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFold
 		}
 	}()
 
+	// Checked inside the transaction (not before it started) so a concurrent
+	// clone of the same lineage can't both pass this check before either
+	// commits — mirrors save-fixture's same-transaction ID allocation for the
+	// same reason. Deliberately before copyDir below: there's no reason to
+	// pay for a full folder-tree copy only to discard it on a conflict this
+	// check would have caught for free.
+	var conflictID int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT id FROM projects WHERE lineage_root_id = ? AND iteration_number = ?`,
+		src.LineageRootID.Int64, nextIterationNumber,
+	).Scan(&conflictID)
+	if err == nil {
+		return 0, 0, 0, fmt.Errorf("lineage %d already has an iteration %d (project %d) — clone from that project to continue the lineage, or use new-project to start an unrelated one",
+			src.LineageRootID.Int64, nextIterationNumber, conflictID)
+	} else if err != sql.ErrNoRows {
+		return 0, 0, 0, fmt.Errorf("check existing iteration: %w", err)
+	}
+
+	if err = copyDir(oldFolderAbs, newFolderAbs); err != nil {
+		return 0, 0, 0, fmt.Errorf("copy folder tree: %w", err)
+	}
+
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO projects
 		  (label, folder_path, design_doc_path, status,
 		   monitor_override_default, execution_budget_default,
 		   audit_reconcile_round_cap, max_execution_attempts,
 		   language, pause_after_reconcile, pause_after_verb, pause_after_bead_id,
-		   reconcile_self_resolve,
+		   reconcile_self_resolve, lineage_root_id, iteration_number,
 		   created_at, updated_at)
 		SELECT ?, ?, ?, 'active',
 		       monitor_override_default, execution_budget_default,
 		       audit_reconcile_round_cap, max_execution_attempts,
 		       language, pause_after_reconcile, pause_after_verb, pause_after_bead_id,
-		       reconcile_self_resolve,
+		       reconcile_self_resolve, lineage_root_id, ?,
 		       datetime('now'), datetime('now')
 		FROM projects WHERE id = ?`,
-		newLabel, newFolderAbs, src.DesignDocPath, fromID)
+		newLabel, newFolderAbs, src.DesignDocPath, nextIterationNumber, fromID)
 	if err != nil {
-		return 0, fmt.Errorf("insert cloned project: %w", err)
+		return 0, 0, 0, fmt.Errorf("insert cloned project: %w", err)
 	}
 	newID, err = res.LastInsertId()
 	if err != nil {
-		return 0, fmt.Errorf("cloned project id: %w", err)
+		return 0, 0, 0, fmt.Errorf("cloned project id: %w", err)
 	}
 
 	if err = cloneVerbModelAssignments(ctx, tx, fromID, newID); err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 
 	beadIDs, err := cloneBeads(ctx, tx, fromID, newID)
 	if err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 
 	revisionIDs, err := cloneBeadRevisions(ctx, tx, fromID, newID, beadIDs)
 	if err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 
 	if err = fixupCurrentRevisionIDs(ctx, tx, fromID, beadIDs, revisionIDs); err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 
 	if err = cloneAuditReconcileRounds(ctx, tx, fromID, newID); err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 
 	executionIDs, err := cloneExecutions(ctx, tx, fromID, newID, beadIDs, revisionIDs, oldFolderAbs, newFolderAbs)
 	if err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 
 	if err = cloneAnalyses(ctx, tx, fromID, newID, executionIDs); err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 
 	if err = cloneCompressedHistory(ctx, tx, fromID, newID, beadIDs); err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 
 	if err = cloneAdjudications(ctx, tx, fromID, newID, beadIDs, executionIDs); err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 
 	if err = cloneSpecRevisions(ctx, tx, fromID, newID, beadIDs, revisionIDs); err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 
 	jobIDs, err := cloneHandoffJobs(ctx, tx, fromID, newID, beadIDs)
 	if err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 
 	if err = cloneHandoffAttempts(ctx, tx, jobIDs); err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 
 	verifyAttemptIDs, err := cloneVerifyAttempts(ctx, tx, fromID, newID, jobIDs)
 	if err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 
 	if err = cloneCertifications(ctx, tx, fromID, newID, verifyAttemptIDs); err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 
 	if err = cloneTestRefinements(ctx, tx, fromID, newID, beadIDs); err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 
 	if err = tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit: %w", err)
+		return 0, 0, 0, fmt.Errorf("commit: %w", err)
 	}
 
-	return newID, nil
+	return newID, src.LineageRootID.Int64, nextIterationNumber, nil
 }
 
 func cloneVerbModelAssignments(ctx context.Context, tx *sql.Tx, fromID, newID int64) error {
