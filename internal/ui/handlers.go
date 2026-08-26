@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"ratchet/internal/project"
@@ -513,6 +515,9 @@ func (s *server) handleBeadDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("bead detail: %v", err), http.StatusInternalServerError)
 		return
 	}
+	if folder, ferr := queryBeadProjectFolder(r.Context(), s.db, id); ferr == nil {
+		d.RewindSnapshots = listRewindSnapshots(folder, id)
+	}
 	d.baseData = s.base(r)
 	s.render(w, s.tmpl.beadDetail, d)
 }
@@ -616,6 +621,95 @@ func (s *server) handleProjectReport(w http.ResponseWriter, r *http.Request) {
 		baseData: s.base(r),
 		Title:    "Project Report",
 		Path:     path,
+		Content:  content,
+	})
+}
+
+// --- Rewind snapshots ---
+//
+// rewindBead (internal/project/rewind.go) preserves a bead's pre-rewind file
+// content under traces/bead-{id}-rewind-{n}/ before deleting tests or
+// stubbing impl files. These handlers list and display those snapshots —
+// on-disk only, not tracked in the DB, so listing means scanning the
+// project's traces/ directory rather than querying a table.
+
+// listRewindSnapshots returns the sorted snapshot numbers found for beadID
+// under folder/traces, or nil if none exist (including if folder can't be read).
+func listRewindSnapshots(folder string, beadID int64) []int {
+	entries, err := os.ReadDir(filepath.Join(folder, "traces"))
+	if err != nil {
+		return nil
+	}
+	prefix := fmt.Sprintf("bead-%d-rewind-", beadID)
+	var nums []int
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+		if n, err := strconv.Atoi(strings.TrimPrefix(e.Name(), prefix)); err == nil {
+			nums = append(nums, n)
+		}
+	}
+	sort.Ints(nums)
+	return nums
+}
+
+// renderSnapshotDir concatenates a rewind snapshot's README.md manifest and
+// every preserved file's content into one display string, README first.
+func renderSnapshotDir(dir string) (string, error) {
+	readme, err := os.ReadFile(filepath.Join(dir, "README.md"))
+	if err != nil {
+		return "", err
+	}
+	var sb strings.Builder
+	sb.Write(readme)
+
+	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, relErr := filepath.Rel(dir, path)
+		if relErr != nil || rel == "README.md" {
+			return relErr
+		}
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		fmt.Fprintf(&sb, "\n\n## %s\n\n```\n%s\n```\n", rel, content)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return sb.String(), nil
+}
+
+// handleBeadSnapshot serves a single rewind snapshot's contents. The path is
+// built server-side from the bead's project folder plus the bead/snapshot
+// IDs, never client-supplied.
+func (s *server) handleBeadSnapshot(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid bead id", http.StatusBadRequest)
+		return
+	}
+	n, err := strconv.Atoi(r.PathValue("n"))
+	if err != nil || n < 1 {
+		http.Error(w, "invalid snapshot number", http.StatusBadRequest)
+		return
+	}
+	folder, err := queryBeadProjectFolder(r.Context(), s.db, id)
+	if err != nil {
+		http.Error(w, "bead not found", http.StatusNotFound)
+		return
+	}
+	dir := filepath.Join(folder, "traces", fmt.Sprintf("bead-%d-rewind-%d", id, n))
+	content, _ := renderSnapshotDir(dir)
+	s.render(w, s.tmpl.report, reportData{
+		baseData: s.base(r),
+		Title:    fmt.Sprintf("Bead %d Rewind Snapshot %d", id, n),
+		Path:     dir,
 		Content:  content,
 	})
 }

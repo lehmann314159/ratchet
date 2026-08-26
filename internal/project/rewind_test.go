@@ -513,6 +513,175 @@ func TestRewindBead_PreservesRevisePendingProseButNotAdjudicatePatches(t *testin
 	}
 }
 
+// TestRewindBead_SnapshotsPreRewindContentBeforeDestroying verifies rewind
+// preserves the actual broken file content that led to escalation — not just
+// the bead-report.md text snapshot already written at escalation time, but a
+// real runnable/diffable copy — before test files are deleted and impl files
+// are stubbed. Loop-mode forensics goal: a human reviewing this rewind should
+// be able to see exactly what the failing attempt looked like on disk.
+func TestRewindBead_SnapshotsPreRewindContentBeforeDestroying(t *testing.T) {
+	d := openTestDB(t)
+	folder := t.TempDir()
+	seedRewindProject(t, d, 1, folder)
+	ctx := context.Background()
+
+	res, err := d.ExecContext(ctx,
+		`INSERT INTO beads (project_id, status) VALUES (1, 'pending')`)
+	if err != nil {
+		t.Fatalf("seed bead: %v", err)
+	}
+	beadID, _ := res.LastInsertId()
+
+	rev1 := verbs.ParsedBead{
+		Title: "game bead", FullText: "implement the game", ExecutionBudget: 300,
+		MonitorOverride: "honor", OutputFiles: []string{"game.go", "game_test.go"},
+		ExitCriteria: []string{"go build ./..."},
+	}
+	if _, err := d.ExecContext(ctx, `
+		INSERT INTO bead_revisions
+		  (project_id, bead_id, revision_number, full_text, execution_budget,
+		   monitor_override, created_by_verb, created_at)
+		VALUES (1, ?, 1, ?, 300, 'honor', 'DECOMPOSE_SPEC', '2026-01-01T00:00:00Z')`,
+		beadID, mustMarshal(t, rev1)); err != nil {
+		t.Fatalf("seed revision 1: %v", err)
+	}
+	var revID int64
+	if err := d.QueryRowContext(ctx, `SELECT id FROM bead_revisions WHERE bead_id = ?`, beadID).Scan(&revID); err != nil {
+		t.Fatalf("query revision id: %v", err)
+	}
+	if _, err := d.ExecContext(ctx,
+		`UPDATE beads SET current_revision_id = ? WHERE id = ?`, revID, beadID,
+	); err != nil {
+		t.Fatalf("point bead at revision: %v", err)
+	}
+
+	brokenGame := "package main\n\nfunc NewGame() *Game { panic(\"broken\") }\n"
+	brokenTest := "package main\n\nfunc TestNewGame(t *testing.T) { t.Fatal(\"broken\") }\n"
+	if err := os.WriteFile(filepath.Join(folder, "game.go"), []byte(brokenGame), 0644); err != nil {
+		t.Fatalf("write game.go: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(folder, "game_test.go"), []byte(brokenTest), 0644); err != nil {
+		t.Fatalf("write game_test.go: %v", err)
+	}
+
+	result, err := rewindBead(ctx, d, beadID)
+	if err != nil {
+		t.Fatalf("rewindBead: %v", err)
+	}
+
+	if result.SnapshotDir == "" {
+		t.Fatal("expected a non-empty SnapshotDir")
+	}
+	snapshotGame, err := os.ReadFile(filepath.Join(result.SnapshotDir, "game.go"))
+	if err != nil {
+		t.Fatalf("read snapshotted game.go: %v", err)
+	}
+	if string(snapshotGame) != brokenGame {
+		t.Errorf("snapshotted game.go = %q, want the pre-rewind broken content %q", snapshotGame, brokenGame)
+	}
+	snapshotTest, err := os.ReadFile(filepath.Join(result.SnapshotDir, "game_test.go"))
+	if err != nil {
+		t.Fatalf("read snapshotted game_test.go: %v", err)
+	}
+	if string(snapshotTest) != brokenTest {
+		t.Errorf("snapshotted game_test.go = %q, want the pre-rewind broken content %q", snapshotTest, brokenTest)
+	}
+	if _, err := os.Stat(filepath.Join(result.SnapshotDir, "README.md")); err != nil {
+		t.Errorf("expected a README.md manifest in the snapshot dir: %v", err)
+	}
+
+	// The live files, meanwhile, must actually have been changed by rewind —
+	// the snapshot must be a copy, not the only surviving reference.
+	liveGame, err := os.ReadFile(filepath.Join(folder, "game.go"))
+	if err != nil {
+		t.Fatalf("read live game.go: %v", err)
+	}
+	if string(liveGame) == brokenGame {
+		t.Error("live game.go still has the broken content — rewind should have reset it to a stub")
+	}
+	if _, statErr := os.Stat(filepath.Join(folder, "game_test.go")); !os.IsNotExist(statErr) {
+		t.Error("live game_test.go should have been deleted by rewind")
+	}
+}
+
+// TestRewindBead_SecondRewindGetsItsOwnSnapshot verifies rewinding the same
+// bead twice doesn't overwrite the first rewind's snapshot — each attempt's
+// pre-rewind state needs to stay independently inspectable.
+func TestRewindBead_SecondRewindGetsItsOwnSnapshot(t *testing.T) {
+	d := openTestDB(t)
+	folder := t.TempDir()
+	seedRewindProject(t, d, 1, folder)
+	ctx := context.Background()
+
+	res, err := d.ExecContext(ctx,
+		`INSERT INTO beads (project_id, status) VALUES (1, 'pending')`)
+	if err != nil {
+		t.Fatalf("seed bead: %v", err)
+	}
+	beadID, _ := res.LastInsertId()
+
+	rev1 := verbs.ParsedBead{
+		Title: "game bead", FullText: "implement the game", ExecutionBudget: 300,
+		MonitorOverride: "honor", OutputFiles: []string{"game.go"},
+		ExitCriteria: []string{"go build ./..."},
+	}
+	if _, err := d.ExecContext(ctx, `
+		INSERT INTO bead_revisions
+		  (project_id, bead_id, revision_number, full_text, execution_budget,
+		   monitor_override, created_by_verb, created_at)
+		VALUES (1, ?, 1, ?, 300, 'honor', 'DECOMPOSE_SPEC', '2026-01-01T00:00:00Z')`,
+		beadID, mustMarshal(t, rev1)); err != nil {
+		t.Fatalf("seed revision 1: %v", err)
+	}
+	var revID int64
+	if err := d.QueryRowContext(ctx, `SELECT id FROM bead_revisions WHERE bead_id = ?`, beadID).Scan(&revID); err != nil {
+		t.Fatalf("query revision id: %v", err)
+	}
+	if _, err := d.ExecContext(ctx,
+		`UPDATE beads SET current_revision_id = ? WHERE id = ?`, revID, beadID,
+	); err != nil {
+		t.Fatalf("point bead at revision: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(folder, "game.go"), []byte("attempt one, broken"), 0644); err != nil {
+		t.Fatalf("write game.go: %v", err)
+	}
+	result1, err := rewindBead(ctx, d, beadID)
+	if err != nil {
+		t.Fatalf("first rewindBead: %v", err)
+	}
+
+	// Simulate a second failed attempt after the first rewind, then rewind again.
+	if _, err := d.ExecContext(ctx, `UPDATE beads SET status = 'pending' WHERE id = ?`, beadID); err != nil {
+		t.Fatalf("reset bead status: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(folder, "game.go"), []byte("attempt two, also broken"), 0644); err != nil {
+		t.Fatalf("write game.go: %v", err)
+	}
+	result2, err := rewindBead(ctx, d, beadID)
+	if err != nil {
+		t.Fatalf("second rewindBead: %v", err)
+	}
+
+	if result1.SnapshotDir == result2.SnapshotDir {
+		t.Fatalf("expected distinct snapshot dirs, both were %q", result1.SnapshotDir)
+	}
+	first, err := os.ReadFile(filepath.Join(result1.SnapshotDir, "game.go"))
+	if err != nil {
+		t.Fatalf("read first snapshot: %v", err)
+	}
+	if string(first) != "attempt one, broken" {
+		t.Errorf("first snapshot's game.go = %q, want %q", first, "attempt one, broken")
+	}
+	second, err := os.ReadFile(filepath.Join(result2.SnapshotDir, "game.go"))
+	if err != nil {
+		t.Fatalf("read second snapshot: %v", err)
+	}
+	if string(second) != "attempt two, also broken" {
+		t.Errorf("second snapshot's game.go = %q, want %q", second, "attempt two, also broken")
+	}
+}
+
 // TestRewindBead_AlreadySucceededErrors verifies rewind refuses to touch a
 // bead that already succeeded.
 func TestRewindBead_AlreadySucceededErrors(t *testing.T) {

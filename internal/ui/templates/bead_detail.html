@@ -54,4 +54,16 @@
   <p class="empty">No revisions.</p>
   {{end}}
 </div>
+
+{{if .RewindSnapshots}}
+<div class="section">
+  <h2>Rewind Snapshots</h2>
+  <p class="meta">Pre-rewind file content preserved before each rewind's destructive reset.</p>
+  <ul>
+  {{range .RewindSnapshots}}
+    <li><a href="/beads/{{$.BeadID}}/snapshot/{{.}}">snapshot {{.}}</a></li>
+  {{end}}
+  </ul>
+</div>
+{{end}}
 {{end}}

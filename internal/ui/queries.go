@@ -257,10 +257,11 @@ type RevisionRow struct {
 
 type beadDetailData struct {
 	baseData
-	BeadID     int64
-	BeadTitle  string
-	Executions []ExecutionRow
-	Revisions  []RevisionRow
+	BeadID          int64
+	BeadTitle       string
+	Executions      []ExecutionRow
+	Revisions       []RevisionRow
+	RewindSnapshots []int
 }
 
 func queryBeadDetail(ctx context.Context, d *db.DB, beadID int64) (*beadDetailData, error) {

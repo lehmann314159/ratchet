@@ -94,6 +94,7 @@ func (s *server) routes() {
 	s.mux.HandleFunc("POST /projects/{id}/remove", s.handleRemoveProject)
 	s.mux.HandleFunc("GET /beads/{id}", s.handleBeadDetail)
 	s.mux.HandleFunc("GET /beads/{id}/report", s.handleBeadReport)
+	s.mux.HandleFunc("GET /beads/{id}/snapshot/{n}", s.handleBeadSnapshot)
 	s.mux.HandleFunc("GET /projects/{id}/report", s.handleProjectReport)
 	s.mux.HandleFunc("GET /trace/{id}", s.handleTrace)
 }

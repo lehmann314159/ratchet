@@ -491,6 +491,83 @@ func TestHandleProjectReport_UnknownProjectNotFound(t *testing.T) {
 	}
 }
 
+// --- handleBeadSnapshot ---
+
+// TestHandleBeadSnapshot_ServesSnapshotContent confirms a rewind snapshot's
+// README and preserved file content are found via the bead's project
+// folder_path and rendered together.
+func TestHandleBeadSnapshot_ServesSnapshotContent(t *testing.T) {
+	s, d := openTestServer(t)
+	dir := t.TempDir()
+	pid := seedProjectWithFolder(t, d, dir)
+	beadID := seedBead(t, d, pid, 300)
+
+	snapshotDir := filepath.Join(dir, "traces", fmt.Sprintf("bead-%d-rewind-1", beadID))
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
+		t.Fatalf("mkdir snapshot dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(snapshotDir, "README.md"), []byte("# manifest\nfiles preserved"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(snapshotDir, "game.go"), []byte("package main // broken"), 0o644); err != nil {
+		t.Fatalf("write game.go: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/beads/%d/snapshot/1", beadID), nil)
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "files preserved") {
+		t.Errorf("expected response to contain README content, got: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "package main // broken") {
+		t.Errorf("expected response to contain preserved file content, got: %s", w.Body.String())
+	}
+}
+
+// TestHandleBeadSnapshot_UnknownBeadNotFound confirms a nonexistent bead ID
+// 404s rather than attempting any filesystem read.
+func TestHandleBeadSnapshot_UnknownBeadNotFound(t *testing.T) {
+	s, _ := openTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/beads/999999/snapshot/1", nil)
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestListRewindSnapshots_SortsNumbersAndIgnoresUnrelatedEntries confirms the
+// bead-detail page's snapshot list only picks up this bead's own
+// bead-{id}-rewind-{n} directories, sorted numerically, ignoring other
+// beads' snapshots and non-directory entries.
+func TestListRewindSnapshots_SortsNumbersAndIgnoresUnrelatedEntries(t *testing.T) {
+	dir := t.TempDir()
+	tracesDir := filepath.Join(dir, "traces")
+	for _, name := range []string{"bead-5-rewind-2", "bead-5-rewind-1", "bead-5-rewind-10", "bead-6-rewind-1"} {
+		if err := os.MkdirAll(filepath.Join(tracesDir, name), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", name, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(tracesDir, "bead-5-report.md"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write unrelated file: %v", err)
+	}
+
+	got := listRewindSnapshots(dir, 5)
+	want := []int{1, 2, 10}
+	if len(got) != len(want) {
+		t.Fatalf("listRewindSnapshots = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("listRewindSnapshots = %v, want %v", got, want)
+			break
+		}
+	}
+}
+
 // --- handleRemoveProject ---
 
 // TestHandleRemoveProject_WithTestRefinementsSucceeds reproduces a gap found

@@ -68,6 +68,7 @@ func RunRewindBeadMain(args []string) {
 	fmt.Printf("  spec reset to:  last pre-ADJUDICATE_NEXT_EXECUTION prose, current revision for everything else\n")
 	fmt.Printf("  attempt budget: %d → %d\n", result.BudgetFrom, result.BudgetTo)
 	fmt.Printf("  next verb:      REFINE_TESTS_WRITE\n")
+	fmt.Printf("  pre-rewind snapshot: %s\n", result.SnapshotDir)
 	if len(result.DeletedTests) > 0 {
 		fmt.Printf("  test files deleted:\n")
 		for _, f := range result.DeletedTests {
@@ -93,6 +94,7 @@ type rewindResult struct {
 	ProjectID    int64
 	BudgetFrom   int
 	BudgetTo     int
+	SnapshotDir  string
 	DeletedTests []string
 	StubbedFiles []string
 	DeletedFiles []string
@@ -220,6 +222,19 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64) (*rewindResult, err
 		return nil, fmt.Errorf("marshal merged revision: %w", err)
 	}
 	outputFiles := mergedSpec.OutputFiles
+
+	// Preserve the pre-rewind file content before anything below deletes or
+	// stubs it. This is a hard precondition, not best-effort: if we can't
+	// confirm a snapshot exists, we don't proceed with destroying the
+	// originals — no DB state changes yet at this point, so failing here
+	// leaves the escalated bead untouched rather than half-rewound. The
+	// bead-report.md written at escalation already captures file content as
+	// text, but not a runnable/diffable tree — this is what makes attempt N's
+	// actual broken code inspectable (or restorable) after rewind moves on.
+	snapshotDir, err := snapshotBeadFiles(projectFolder, beadID, outputFiles)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot pre-rewind files: %w", err)
+	}
 
 	// Count existing valid executions to grant a fresh budget on top.
 	var existingExecutions int
@@ -358,8 +373,68 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64) (*rewindResult, err
 		ProjectID:    projectID,
 		BudgetFrom:   existingExecutions,
 		BudgetTo:     newAttemptCap,
+		SnapshotDir:  snapshotDir,
 		DeletedTests: deletedTests,
 		StubbedFiles: stubbedFiles,
 		DeletedFiles: deletedFiles,
 	}, nil
+}
+
+// snapshotBeadFiles copies every file in outputFiles from folderPath into a
+// fresh traces/bead-{id}-rewind-{n}/ directory, preserving relative paths,
+// before rewindBead deletes test files or stubs impl files. Missing files
+// (never written, or already stubbed by a prior rewind) are skipped, not an
+// error. n increments per bead so repeated rewinds of the same bead don't
+// overwrite each other's snapshots.
+func snapshotBeadFiles(folderPath string, beadID int64, outputFiles []string) (string, error) {
+	tracesDir := filepath.Join(folderPath, "traces")
+	if err := os.MkdirAll(tracesDir, 0o755); err != nil {
+		return "", fmt.Errorf("create traces dir: %w", err)
+	}
+
+	n := 1
+	for {
+		if _, err := os.Stat(filepath.Join(tracesDir, fmt.Sprintf("bead-%d-rewind-%d", beadID, n))); os.IsNotExist(err) {
+			break
+		}
+		n++
+	}
+	snapshotDir := filepath.Join(tracesDir, fmt.Sprintf("bead-%d-rewind-%d", beadID, n))
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
+		return "", fmt.Errorf("create snapshot dir: %w", err)
+	}
+
+	var copied []string
+	for _, rel := range outputFiles {
+		data, err := os.ReadFile(filepath.Join(folderPath, rel))
+		if os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return "", fmt.Errorf("read %s: %w", rel, err)
+		}
+		dst := filepath.Join(snapshotDir, rel)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return "", fmt.Errorf("create snapshot dir for %s: %w", rel, err)
+		}
+		if err := os.WriteFile(dst, data, 0o644); err != nil {
+			return "", fmt.Errorf("write snapshot of %s: %w", rel, err)
+		}
+		copied = append(copied, rel)
+	}
+
+	var manifest strings.Builder
+	fmt.Fprintf(&manifest, "# Bead %d rewind snapshot\n\n", beadID)
+	fmt.Fprintf(&manifest, "Taken: %s\n\n", time.Now().UTC().Format(time.RFC3339))
+	manifest.WriteString("Pre-rewind content of every output file, before test deletion / impl stubbing:\n\n")
+	if len(copied) == 0 {
+		manifest.WriteString("(no output files existed on disk yet)\n")
+	}
+	for _, f := range copied {
+		fmt.Fprintf(&manifest, "- %s\n", f)
+	}
+	if err := os.WriteFile(filepath.Join(snapshotDir, "README.md"), []byte(manifest.String()), 0o644); err != nil {
+		return "", fmt.Errorf("write snapshot manifest: %w", err)
+	}
+
+	return snapshotDir, nil
 }
