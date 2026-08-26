@@ -171,7 +171,7 @@ func TestCloneProject_DeepCopiesEveryTable(t *testing.T) {
 	folder, beadAID, beadBID, jobAID, _, rev2ID := seedCloneFullProject(t, d, 50)
 
 	newFolder := filepath.Join(t.TempDir(), "clone")
-	newID, _, _, err := cloneProject(ctx, d, 50, "clone-1", newFolder)
+	newID, _, _, err := cloneProject(ctx, d, 50, "clone-1", newFolder, "")
 	if err != nil {
 		t.Fatalf("cloneProject: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestCloneProject_IndependentMutability(t *testing.T) {
 	_, beadAID, _, _, _, _ := seedCloneFullProject(t, d, 51)
 
 	newFolder := filepath.Join(t.TempDir(), "clone")
-	newID, _, _, err := cloneProject(ctx, d, 51, "clone-2", newFolder)
+	newID, _, _, err := cloneProject(ctx, d, 51, "clone-2", newFolder, "")
 	if err != nil {
 		t.Fatalf("cloneProject: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestCloneProject_DispatchableRoundTrip(t *testing.T) {
 	seedCloneFullProject(t, d, 52)
 
 	newFolder := filepath.Join(t.TempDir(), "clone")
-	newID, _, _, err := cloneProject(ctx, d, 52, "clone-3", newFolder)
+	newID, _, _, err := cloneProject(ctx, d, 52, "clone-3", newFolder, "")
 	if err != nil {
 		t.Fatalf("cloneProject: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestCloneProject_RefusesWithRunningJob(t *testing.T) {
 		VALUES (53, 'EXECUTE_BEAD', NULL, 'running', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
 
 	newFolder := filepath.Join(t.TempDir(), "clone")
-	if _, _, _, err := cloneProject(ctx, d, 53, "clone-4", newFolder); err == nil {
+	if _, _, _, err := cloneProject(ctx, d, 53, "clone-4", newFolder, ""); err == nil {
 		t.Fatal("expected error for a source project with a running job, got nil")
 	}
 	if _, err := os.Stat(newFolder); err == nil {
@@ -466,7 +466,7 @@ func TestCloneProject_RefusesExistingFolder(t *testing.T) {
 	seedCloneFullProject(t, d, 54)
 
 	existing := t.TempDir() // already exists
-	if _, _, _, err := cloneProject(ctx, d, 54, "clone-5", existing); err == nil {
+	if _, _, _, err := cloneProject(ctx, d, 54, "clone-5", existing, ""); err == nil {
 		t.Fatal("expected error for an already-existing folder, got nil")
 	}
 }
@@ -475,7 +475,7 @@ func TestCloneProject_NotFound(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 	newFolder := filepath.Join(t.TempDir(), "clone")
-	if _, _, _, err := cloneProject(ctx, d, 999, "clone-6", newFolder); err == nil {
+	if _, _, _, err := cloneProject(ctx, d, 999, "clone-6", newFolder, ""); err == nil {
 		t.Fatal("expected error for an unknown source project, got nil")
 	}
 }
@@ -494,7 +494,7 @@ func TestCloneProject_WorksFromNegativeFixtureID(t *testing.T) {
 	}
 
 	newFolder := filepath.Join(t.TempDir(), "clone")
-	newID, _, _, err := cloneProject(ctx, d, fixtureID, "clone-from-fixture", newFolder)
+	newID, _, _, err := cloneProject(ctx, d, fixtureID, "clone-from-fixture", newFolder, "")
 	if err != nil {
 		t.Fatalf("cloneProject from a fixture id: %v", err)
 	}
@@ -533,7 +533,7 @@ func TestCloneProject_ContinuesSourceLineage(t *testing.T) {
 	}
 
 	newFolder := filepath.Join(t.TempDir(), "clone")
-	newID, lineageRootID, iterationNumber, err := cloneProject(ctx, d, 60, "clone-iter-2", newFolder)
+	newID, lineageRootID, iterationNumber, err := cloneProject(ctx, d, 60, "clone-iter-2", newFolder, "")
 	if err != nil {
 		t.Fatalf("cloneProject: %v", err)
 	}
@@ -564,7 +564,7 @@ func TestCloneProject_ChainedClonesContinueSameLineage(t *testing.T) {
 	seedCloneFullProject(t, d, 61)
 
 	folder2 := filepath.Join(t.TempDir(), "clone-2")
-	iter2ID, root2, num2, err := cloneProject(ctx, d, 61, "clone-iter-2", folder2)
+	iter2ID, root2, num2, err := cloneProject(ctx, d, 61, "clone-iter-2", folder2, "")
 	if err != nil {
 		t.Fatalf("clone to iteration 2: %v", err)
 	}
@@ -573,7 +573,7 @@ func TestCloneProject_ChainedClonesContinueSameLineage(t *testing.T) {
 	}
 
 	folder3 := filepath.Join(t.TempDir(), "clone-3")
-	iter3ID, root3, num3, err := cloneProject(ctx, d, iter2ID, "clone-iter-3", folder3)
+	iter3ID, root3, num3, err := cloneProject(ctx, d, iter2ID, "clone-iter-3", folder3, "")
 	if err != nil {
 		t.Fatalf("clone to iteration 3: %v", err)
 	}
@@ -604,13 +604,13 @@ func TestCloneProject_RefusesDuplicateIteration(t *testing.T) {
 	seedCloneFullProject(t, d, 62)
 
 	folderA := filepath.Join(t.TempDir(), "clone-a")
-	firstID, _, _, err := cloneProject(ctx, d, 62, "clone-a", folderA)
+	firstID, _, _, err := cloneProject(ctx, d, 62, "clone-a", folderA, "")
 	if err != nil {
 		t.Fatalf("first clone: %v", err)
 	}
 
 	folderB := filepath.Join(t.TempDir(), "clone-b")
-	if _, _, _, err := cloneProject(ctx, d, 62, "clone-b", folderB); err == nil {
+	if _, _, _, err := cloneProject(ctx, d, 62, "clone-b", folderB, ""); err == nil {
 		t.Fatal("expected the second clone (same computed iteration number) to be refused")
 	} else if !strings.Contains(err.Error(), "already has an iteration") {
 		t.Errorf("error = %q, want a message naming the existing iteration conflict", err.Error())
@@ -632,5 +632,99 @@ func TestCloneProject_RefusesDuplicateIteration(t *testing.T) {
 	gotRoot, gotIter := queryLineage(t, d, firstID)
 	if !gotRoot.Valid || gotRoot.Int64 != 62 || gotIter != 2 {
 		t.Errorf("first clone's lineage = (root=%v, iter=%d), want (root=62, iter=2), unaffected by the refused second clone", gotRoot, gotIter)
+	}
+}
+
+// --- Design doc override ---
+
+// TestCloneProject_NoDesignDocOverrideCopiesSourceUnchanged is the baseline:
+// with no override given, the cloned folder's design doc must be byte-for-byte
+// what the source's was — the existing copyDir behavior, made explicit here
+// so the override tests below have something to contrast against.
+func TestCloneProject_NoDesignDocOverrideCopiesSourceUnchanged(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedCloneFullProject(t, d, 70)
+
+	newFolder := filepath.Join(t.TempDir(), "clone")
+	_, _, _, err := cloneProject(ctx, d, 70, "clone-no-override", newFolder, "")
+	if err != nil {
+		t.Fatalf("cloneProject: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(newFolder, "design_doc.md"))
+	if err != nil {
+		t.Fatalf("read cloned design doc: %v", err)
+	}
+	if string(got) != "# Design\n" {
+		t.Errorf("cloned design doc = %q, want source's unchanged content %q", got, "# Design\n")
+	}
+}
+
+// TestCloneProject_DesignDocOverrideReplacesContent verifies an override
+// file's content lands at the same design_doc_path within the cloned
+// folder — the injection point for a human's edited/appended design doc
+// when materializing a new loop-mode iteration — while the source project's
+// own design doc on disk is left completely untouched.
+func TestCloneProject_DesignDocOverrideReplacesContent(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	sourceFolder, _, _, _, _, _ := seedCloneFullProject(t, d, 71)
+
+	overridePath := filepath.Join(t.TempDir(), "edited-design.md")
+	overrideContent := "# Design\n\n## Human Guidance Log\n\nNote 1: fix the off-by-one in the stride calc.\n"
+	if err := os.WriteFile(overridePath, []byte(overrideContent), 0o644); err != nil {
+		t.Fatalf("write override file: %v", err)
+	}
+
+	newFolder := filepath.Join(t.TempDir(), "clone")
+	_, _, _, err := cloneProject(ctx, d, 71, "clone-with-override", newFolder, overridePath)
+	if err != nil {
+		t.Fatalf("cloneProject: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(newFolder, "design_doc.md"))
+	if err != nil {
+		t.Fatalf("read cloned design doc: %v", err)
+	}
+	if string(got) != overrideContent {
+		t.Errorf("cloned design doc = %q, want override content %q", got, overrideContent)
+	}
+
+	// The source's own file on disk must be untouched — clone never mutates
+	// what it copies from.
+	sourceContent, err := os.ReadFile(filepath.Join(sourceFolder, "design_doc.md"))
+	if err != nil {
+		t.Fatalf("read source design doc: %v", err)
+	}
+	if string(sourceContent) != "# Design\n" {
+		t.Errorf("source design doc = %q, want unchanged %q", sourceContent, "# Design\n")
+	}
+}
+
+// TestCloneProject_DesignDocOverrideMissingFileErrors verifies a
+// nonexistent override path fails fast — before the folder-tree copy, the
+// duplicate-iteration check, or any DB write — rather than partially
+// cloning and then discovering the override can't be applied.
+func TestCloneProject_DesignDocOverrideMissingFileErrors(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedCloneFullProject(t, d, 72)
+
+	newFolder := filepath.Join(t.TempDir(), "clone")
+	missingOverride := filepath.Join(t.TempDir(), "does-not-exist.md")
+	if _, _, _, err := cloneProject(ctx, d, 72, "clone-bad-override", newFolder, missingOverride); err == nil {
+		t.Fatal("expected an error for a nonexistent design doc override")
+	}
+
+	if _, statErr := os.Stat(newFolder); !os.IsNotExist(statErr) {
+		t.Errorf("expected folder %s not to have been created", newFolder)
+	}
+	var count int
+	if err := d.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE label = 'clone-bad-override'`).Scan(&count); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("found %d project row(s), want 0 (must fail before any DB write)", count)
 	}
 }

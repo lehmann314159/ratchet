@@ -24,6 +24,7 @@ func RunCloneProjectMain(args []string) {
 	fromID := flags.Int64("from", 0, "project ID to clone from — positive for a live project, negative for a fixture (required)")
 	label := flags.String("label", "", "label for the new project (required)")
 	folder := flags.String("folder", "", "folder path for the new project — must not already exist (required)")
+	designDoc := flags.String("design-doc", "", "path to a design doc whose content replaces the source's at the same design_doc_path (optional; defaults to copying the source's design doc unchanged)")
 	_ = flags.Parse(args)
 
 	if *fromID == 0 {
@@ -46,7 +47,7 @@ func RunCloneProjectMain(args []string) {
 	}
 	defer d.Close()
 
-	newID, lineageRootID, iterationNumber, err := cloneProject(context.Background(), d, *fromID, *label, *folder)
+	newID, lineageRootID, iterationNumber, err := cloneProject(context.Background(), d, *fromID, *label, *folder, *designDoc)
 	if err != nil {
 		slog.Error("clone-project", "error", err)
 		os.Exit(1)
@@ -59,6 +60,9 @@ func RunCloneProjectMain(args []string) {
 	fmt.Printf("  label:      %s\n", *label)
 	fmt.Printf("  folder:     %s\n", folderAbs)
 	fmt.Printf("  lineage:    root project %d, iteration %d\n", lineageRootID, iterationNumber)
+	if *designDoc != "" {
+		fmt.Printf("  design doc: replaced with %s\n", *designDoc)
+	}
 }
 
 // cloneProject makes a true deep copy of fromID (positive live project or
@@ -80,12 +84,26 @@ func RunCloneProjectMain(args []string) {
 // must have at most one project per iteration_number, or "does iteration N
 // exist" stops being a well-defined question.
 //
+// designDocOverride, if non-empty, replaces the design doc's *content* at
+// its existing path within the cloned folder — the file at
+// design_doc_path is overwritten with designDocOverride's content once the
+// folder tree is copied; design_doc_path itself is never renamed, so the
+// override file's own name is irrelevant. This is how a human's edited or
+// appended design doc (see the loop-mode iteration model's cascade design)
+// actually gets into a new iteration: clone carries everything else
+// forward unchanged, this is the one deliberate injection point.
+//
 // Preconditions: the source project must exist, must have zero 'running'
 // handoff_jobs (a copied 'running' row would be orphaned in the new project —
 // nothing is actually executing it there), newFolder must not already exist,
-// and no project may already claim the computed next iteration number in
-// this lineage.
-func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFolder string) (newID, lineageRootID int64, iterationNumber int, err error) {
+// designDocOverride (if given) must exist, and no project may already claim
+// the computed next iteration number in this lineage.
+func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFolder, designDocOverride string) (newID, lineageRootID int64, iterationNumber int, err error) {
+	if designDocOverride != "" {
+		if _, statErr := os.Stat(designDocOverride); statErr != nil {
+			return 0, 0, 0, fmt.Errorf("design doc override not found: %s", designDocOverride)
+		}
+	}
 	var src struct {
 		DesignDocPath          string
 		MonitorOverrideDefault string
@@ -178,6 +196,17 @@ func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFold
 
 	if err = copyDir(oldFolderAbs, newFolderAbs); err != nil {
 		return 0, 0, 0, fmt.Errorf("copy folder tree: %w", err)
+	}
+
+	if designDocOverride != "" {
+		overrideData, readErr := os.ReadFile(designDocOverride)
+		if readErr != nil {
+			return 0, 0, 0, fmt.Errorf("read design doc override: %w", readErr)
+		}
+		destPath := filepath.Join(newFolderAbs, src.DesignDocPath)
+		if writeErr := os.WriteFile(destPath, overrideData, 0o644); writeErr != nil {
+			return 0, 0, 0, fmt.Errorf("write design doc override: %w", writeErr)
+		}
 	}
 
 	res, err := tx.ExecContext(ctx, `
