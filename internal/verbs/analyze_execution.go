@@ -133,9 +133,24 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	return string(result), nil
 }
 
+// maxInlineFileBytes bounds how much of a single output file's content
+// checkOutputFiles inlines verbatim. DECOMPOSE caps beads at ~200 lines, so
+// this comfortably covers a real bead file; the cap exists only to protect
+// against a bead that violated that convention, not because inlining is
+// normally expensive.
+const maxInlineFileBytes = 16384
+
 // checkOutputFiles stats each file listed in the bead's output_files and
 // returns a human-readable status string for inclusion in the ANALYZE prompt.
 // A missing file is an objective fact — no causal language needed here.
+//
+// Every present file's actual content is inlined verbatim (not just its
+// size) — this is the only place downstream verbs (ANALYZE's own
+// interpretation, COMPRESS_ANALYSIS, ADJUDICATE_NEXT_EXECUTION) ever see real
+// source. Without it, a claim like "function X is still a stub" or "the test
+// bypasses the constructor" has no ground truth anywhere in the pipeline to
+// check itself against, and — once asserted — persists across every later
+// round unfalsified, since nothing re-reads the file to confirm or refute it.
 func checkOutputFiles(beadFullTextJSON, folderPath string) string {
 	var spec struct {
 		OutputFiles []string `json:"output_files"`
@@ -151,17 +166,27 @@ func checkOutputFiles(beadFullTextJSON, folderPath string) string {
 			fmt.Fprintf(&sb, "%s: missing\n", rel)
 			continue
 		}
+		testNote := ""
 		if strings.HasSuffix(rel, "_test.go") {
 			if content, rerr := os.ReadFile(fullPath); rerr == nil {
 				n := strings.Count(string(content), "\nfunc Test")
 				if n == 0 && strings.HasPrefix(string(content), "func Test") {
 					n = 1 // file starts with a test function (no leading newline)
 				}
-				fmt.Fprintf(&sb, "%s: present (%d bytes, %d test function(s))\n", rel, info.Size(), n)
-				continue
+				testNote = fmt.Sprintf(", %d test function(s)", n)
 			}
 		}
-		fmt.Fprintf(&sb, "%s: present (%d bytes)\n", rel, info.Size())
+		fmt.Fprintf(&sb, "%s: present (%d bytes%s)\n", rel, info.Size(), testNote)
+		if info.Size() > maxInlineFileBytes {
+			fmt.Fprintf(&sb, "(content omitted — exceeds %d bytes)\n", maxInlineFileBytes)
+			continue
+		}
+		content, rerr := os.ReadFile(fullPath)
+		if rerr != nil {
+			fmt.Fprintf(&sb, "(content unreadable: %v)\n", rerr)
+			continue
+		}
+		fmt.Fprintf(&sb, "```\n%s\n```\n", string(content))
 	}
 	return strings.TrimRight(sb.String(), "\n")
 }
