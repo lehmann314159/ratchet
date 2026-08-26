@@ -140,7 +140,7 @@ func TestRewindBead_PreservesOutputFilesAddedAfterRevision1(t *testing.T) {
 		t.Fatalf("write game_test.go: %v", err)
 	}
 
-	result, err := rewindBead(ctx, d, beadID)
+	result, err := rewindBead(ctx, d, beadID, RewindOptions{})
 	if err != nil {
 		t.Fatalf("rewindBead: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestRewindBead_UsesCurrentRevisionExecutionBudgetNotStaleJSONField(t *testi
 		t.Fatalf("point bead at revision 2: %v", err)
 	}
 
-	if _, err := rewindBead(ctx, d, beadID); err != nil {
+	if _, err := rewindBead(ctx, d, beadID, RewindOptions{}); err != nil {
 		t.Fatalf("rewindBead: %v", err)
 	}
 
@@ -383,7 +383,7 @@ func TestRewindBead_SelfHealsInheritedBrokenExitCriteria(t *testing.T) {
 		t.Fatalf("point bead at revision 2: %v", err)
 	}
 
-	if _, err := rewindBead(ctx, d, beadID); err != nil {
+	if _, err := rewindBead(ctx, d, beadID, RewindOptions{}); err != nil {
 		t.Fatalf("rewindBead: %v", err)
 	}
 
@@ -486,7 +486,7 @@ func TestRewindBead_PreservesRevisePendingProseButNotAdjudicatePatches(t *testin
 		t.Fatalf("point bead at revision 3: %v", err)
 	}
 
-	if _, err := rewindBead(ctx, d, beadID); err != nil {
+	if _, err := rewindBead(ctx, d, beadID, RewindOptions{}); err != nil {
 		t.Fatalf("rewindBead: %v", err)
 	}
 
@@ -564,7 +564,7 @@ func TestRewindBead_SnapshotsPreRewindContentBeforeDestroying(t *testing.T) {
 		t.Fatalf("write game_test.go: %v", err)
 	}
 
-	result, err := rewindBead(ctx, d, beadID)
+	result, err := rewindBead(ctx, d, beadID, RewindOptions{})
 	if err != nil {
 		t.Fatalf("rewindBead: %v", err)
 	}
@@ -646,7 +646,7 @@ func TestRewindBead_SecondRewindGetsItsOwnSnapshot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(folder, "game.go"), []byte("attempt one, broken"), 0644); err != nil {
 		t.Fatalf("write game.go: %v", err)
 	}
-	result1, err := rewindBead(ctx, d, beadID)
+	result1, err := rewindBead(ctx, d, beadID, RewindOptions{})
 	if err != nil {
 		t.Fatalf("first rewindBead: %v", err)
 	}
@@ -658,7 +658,7 @@ func TestRewindBead_SecondRewindGetsItsOwnSnapshot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(folder, "game.go"), []byte("attempt two, also broken"), 0644); err != nil {
 		t.Fatalf("write game.go: %v", err)
 	}
-	result2, err := rewindBead(ctx, d, beadID)
+	result2, err := rewindBead(ctx, d, beadID, RewindOptions{})
 	if err != nil {
 		t.Fatalf("second rewindBead: %v", err)
 	}
@@ -682,6 +682,247 @@ func TestRewindBead_SecondRewindGetsItsOwnSnapshot(t *testing.T) {
 	}
 }
 
+// TestRewindBead_AppendsGuidanceNoteAndRecordsItInManifest verifies a
+// --note passed to rewindBead lands in the merged spec's Guidance Log (not
+// patched into the base prose) and is recorded in the snapshot manifest.
+func TestRewindBead_AppendsGuidanceNoteAndRecordsItInManifest(t *testing.T) {
+	d := openTestDB(t)
+	folder := t.TempDir()
+	seedRewindProject(t, d, 1, folder)
+	ctx := context.Background()
+
+	res, err := d.ExecContext(ctx,
+		`INSERT INTO beads (project_id, status) VALUES (1, 'pending')`)
+	if err != nil {
+		t.Fatalf("seed bead: %v", err)
+	}
+	beadID, _ := res.LastInsertId()
+
+	rev1 := verbs.ParsedBead{
+		Title: "game bead", FullText: "implement the game", ExecutionBudget: 300,
+		MonitorOverride: "honor", OutputFiles: []string{"game.go"},
+		ExitCriteria: []string{"go build ./..."},
+	}
+	if _, err := d.ExecContext(ctx, `
+		INSERT INTO bead_revisions
+		  (project_id, bead_id, revision_number, full_text, execution_budget,
+		   monitor_override, created_by_verb, created_at)
+		VALUES (1, ?, 1, ?, 300, 'honor', 'DECOMPOSE_SPEC', '2026-01-01T00:00:00Z')`,
+		beadID, mustMarshal(t, rev1)); err != nil {
+		t.Fatalf("seed revision 1: %v", err)
+	}
+	var revID int64
+	if err := d.QueryRowContext(ctx, `SELECT id FROM bead_revisions WHERE bead_id = ?`, beadID).Scan(&revID); err != nil {
+		t.Fatalf("query revision id: %v", err)
+	}
+	if _, err := d.ExecContext(ctx,
+		`UPDATE beads SET current_revision_id = ? WHERE id = ?`, revID, beadID,
+	); err != nil {
+		t.Fatalf("point bead at revision: %v", err)
+	}
+
+	result, err := rewindBead(ctx, d, beadID, RewindOptions{Note: "use Square{Row,Col} field order to match game-state"})
+	if err != nil {
+		t.Fatalf("rewindBead: %v", err)
+	}
+	if result.NewNoteNumber != 1 {
+		t.Errorf("NewNoteNumber = %d, want 1", result.NewNoteNumber)
+	}
+
+	var newFullText string
+	if err := d.QueryRowContext(ctx, `
+		SELECT br.full_text FROM beads b
+		JOIN bead_revisions br ON br.id = b.current_revision_id
+		WHERE b.id = ?`, beadID,
+	).Scan(&newFullText); err != nil {
+		t.Fatalf("query post-rewind revision: %v", err)
+	}
+	var merged verbs.ParsedBead
+	if err := json.Unmarshal([]byte(newFullText), &merged); err != nil {
+		t.Fatalf("parse merged spec: %v", err)
+	}
+	if !strings.HasPrefix(merged.FullText, rev1.FullText) {
+		t.Errorf("expected base prose preserved at the start, got: %q", merged.FullText)
+	}
+	if !strings.Contains(merged.FullText, "use Square{Row,Col} field order to match game-state") {
+		t.Errorf("expected the guidance note in the merged full_text, got: %q", merged.FullText)
+	}
+
+	manifest, err := os.ReadFile(filepath.Join(result.SnapshotDir, "README.md"))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if !strings.Contains(string(manifest), "use Square{Row,Col} field order to match game-state") {
+		t.Errorf("expected the manifest to record the guidance note, got:\n%s", manifest)
+	}
+}
+
+// TestRewindBead_GuidanceNoteSurvivesASubsequentRewind verifies a note added
+// at rewind N is still present (not discarded as if it were an
+// ADJUDICATE_NEXT_EXECUTION patch) after a second rewind N+1 with no note of
+// its own — exercising the composition between applyGuidance and the
+// existing "restore to last pre-ADJUDICATE_NEXT_EXECUTION revision" logic.
+func TestRewindBead_GuidanceNoteSurvivesASubsequentRewind(t *testing.T) {
+	d := openTestDB(t)
+	folder := t.TempDir()
+	seedRewindProject(t, d, 1, folder)
+	ctx := context.Background()
+
+	res, err := d.ExecContext(ctx,
+		`INSERT INTO beads (project_id, status) VALUES (1, 'pending')`)
+	if err != nil {
+		t.Fatalf("seed bead: %v", err)
+	}
+	beadID, _ := res.LastInsertId()
+
+	rev1 := verbs.ParsedBead{
+		Title: "game bead", FullText: "implement the game", ExecutionBudget: 300,
+		MonitorOverride: "honor", OutputFiles: []string{"game.go"},
+		ExitCriteria: []string{"go build ./..."},
+	}
+	if _, err := d.ExecContext(ctx, `
+		INSERT INTO bead_revisions
+		  (project_id, bead_id, revision_number, full_text, execution_budget,
+		   monitor_override, created_by_verb, created_at)
+		VALUES (1, ?, 1, ?, 300, 'honor', 'DECOMPOSE_SPEC', '2026-01-01T00:00:00Z')`,
+		beadID, mustMarshal(t, rev1)); err != nil {
+		t.Fatalf("seed revision 1: %v", err)
+	}
+	var revID int64
+	if err := d.QueryRowContext(ctx, `SELECT id FROM bead_revisions WHERE bead_id = ?`, beadID).Scan(&revID); err != nil {
+		t.Fatalf("query revision id: %v", err)
+	}
+	if _, err := d.ExecContext(ctx,
+		`UPDATE beads SET current_revision_id = ? WHERE id = ?`, revID, beadID,
+	); err != nil {
+		t.Fatalf("point bead at revision: %v", err)
+	}
+
+	if _, err := rewindBead(ctx, d, beadID, RewindOptions{Note: "first attempt's guidance"}); err != nil {
+		t.Fatalf("first rewindBead: %v", err)
+	}
+
+	// Simulate ADJUDICATE_NEXT_EXECUTION reacting to another failed attempt
+	// with a reactive patch, on top of the rewound (Note-1-bearing) revision.
+	var afterFirstRewindRevID int64
+	var afterFirstRewindFullText string
+	if err := d.QueryRowContext(ctx, `
+		SELECT br.id, br.full_text FROM beads b
+		JOIN bead_revisions br ON br.id = b.current_revision_id
+		WHERE b.id = ?`, beadID,
+	).Scan(&afterFirstRewindRevID, &afterFirstRewindFullText); err != nil {
+		t.Fatalf("query post-first-rewind revision: %v", err)
+	}
+	var afterFirstRewindSpec verbs.ParsedBead
+	if err := json.Unmarshal([]byte(afterFirstRewindFullText), &afterFirstRewindSpec); err != nil {
+		t.Fatalf("parse post-first-rewind spec: %v", err)
+	}
+	adjudicateSpec := afterFirstRewindSpec
+	adjudicateSpec.FullText += " RECURRING FAILURE FIX: do X."
+	var maxRevNum int
+	if err := d.QueryRowContext(ctx, `SELECT MAX(revision_number) FROM bead_revisions WHERE bead_id = ?`, beadID).Scan(&maxRevNum); err != nil {
+		t.Fatalf("max revision number: %v", err)
+	}
+	adjRes, err := d.ExecContext(ctx, `
+		INSERT INTO bead_revisions
+		  (project_id, bead_id, revision_number, full_text, execution_budget,
+		   monitor_override, created_by_verb, created_at)
+		VALUES (1, ?, ?, ?, 300, 'honor', 'ADJUDICATE_NEXT_EXECUTION', '2026-01-01T02:00:00Z')`,
+		beadID, maxRevNum+1, mustMarshal(t, adjudicateSpec))
+	if err != nil {
+		t.Fatalf("seed ADJUDICATE revision: %v", err)
+	}
+	adjRevID, _ := adjRes.LastInsertId()
+	if _, err := d.ExecContext(ctx, `UPDATE beads SET current_revision_id = ?, status = 'pending' WHERE id = ?`, adjRevID, beadID); err != nil {
+		t.Fatalf("point bead at ADJUDICATE revision: %v", err)
+	}
+
+	if _, err := rewindBead(ctx, d, beadID, RewindOptions{}); err != nil {
+		t.Fatalf("second rewindBead: %v", err)
+	}
+
+	var finalFullText string
+	if err := d.QueryRowContext(ctx, `
+		SELECT br.full_text FROM beads b
+		JOIN bead_revisions br ON br.id = b.current_revision_id
+		WHERE b.id = ?`, beadID,
+	).Scan(&finalFullText); err != nil {
+		t.Fatalf("query final revision: %v", err)
+	}
+	var finalSpec verbs.ParsedBead
+	if err := json.Unmarshal([]byte(finalFullText), &finalSpec); err != nil {
+		t.Fatalf("parse final spec: %v", err)
+	}
+	if !strings.Contains(finalSpec.FullText, "first attempt's guidance") {
+		t.Errorf("expected Note 1 to survive a second rewind, got: %q", finalSpec.FullText)
+	}
+	if strings.Contains(finalSpec.FullText, "RECURRING FAILURE FIX") {
+		t.Error("expected ADJUDICATE_NEXT_EXECUTION's reactive patch to be discarded, but it survived")
+	}
+}
+
+// TestRewindBead_SupersedesUnknownNoteErrorsBeforeAnyDestruction verifies a
+// bad --supersedes value fails the whole rewind before anything is touched —
+// snapshot included — rather than partially applying.
+func TestRewindBead_SupersedesUnknownNoteErrorsBeforeAnyDestruction(t *testing.T) {
+	d := openTestDB(t)
+	folder := t.TempDir()
+	seedRewindProject(t, d, 1, folder)
+	ctx := context.Background()
+
+	res, err := d.ExecContext(ctx,
+		`INSERT INTO beads (project_id, status) VALUES (1, 'pending')`)
+	if err != nil {
+		t.Fatalf("seed bead: %v", err)
+	}
+	beadID, _ := res.LastInsertId()
+
+	rev1 := verbs.ParsedBead{
+		Title: "game bead", FullText: "implement the game", ExecutionBudget: 300,
+		MonitorOverride: "honor", OutputFiles: []string{"game.go"},
+		ExitCriteria: []string{"go build ./..."},
+	}
+	if _, err := d.ExecContext(ctx, `
+		INSERT INTO bead_revisions
+		  (project_id, bead_id, revision_number, full_text, execution_budget,
+		   monitor_override, created_by_verb, created_at)
+		VALUES (1, ?, 1, ?, 300, 'honor', 'DECOMPOSE_SPEC', '2026-01-01T00:00:00Z')`,
+		beadID, mustMarshal(t, rev1)); err != nil {
+		t.Fatalf("seed revision 1: %v", err)
+	}
+	var revID int64
+	if err := d.QueryRowContext(ctx, `SELECT id FROM bead_revisions WHERE bead_id = ?`, beadID).Scan(&revID); err != nil {
+		t.Fatalf("query revision id: %v", err)
+	}
+	if _, err := d.ExecContext(ctx,
+		`UPDATE beads SET current_revision_id = ? WHERE id = ?`, revID, beadID,
+	); err != nil {
+		t.Fatalf("point bead at revision: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(folder, "game.go"), []byte("original content"), 0644); err != nil {
+		t.Fatalf("write game.go: %v", err)
+	}
+
+	if _, err := rewindBead(ctx, d, beadID, RewindOptions{Supersedes: 5}); err == nil {
+		t.Fatal("expected an error for --supersedes referencing a nonexistent note")
+	}
+
+	var status string
+	if err := d.QueryRowContext(ctx, `SELECT status FROM beads WHERE id = ?`, beadID).Scan(&status); err != nil {
+		t.Fatalf("query bead status: %v", err)
+	}
+	if status != "pending" {
+		t.Errorf("bead status = %q, want unchanged %q — a failed rewind must not partially apply", status, "pending")
+	}
+	content, err := os.ReadFile(filepath.Join(folder, "game.go"))
+	if err != nil {
+		t.Fatalf("read game.go: %v", err)
+	}
+	if string(content) != "original content" {
+		t.Errorf("game.go was modified despite the rewind failing validation")
+	}
+}
+
 // TestRewindBead_AlreadySucceededErrors verifies rewind refuses to touch a
 // bead that already succeeded.
 func TestRewindBead_AlreadySucceededErrors(t *testing.T) {
@@ -697,7 +938,7 @@ func TestRewindBead_AlreadySucceededErrors(t *testing.T) {
 	}
 	beadID, _ := res.LastInsertId()
 
-	if _, err := rewindBead(ctx, d, beadID); err == nil {
+	if _, err := rewindBead(ctx, d, beadID, RewindOptions{}); err == nil {
 		t.Error("expected error rewinding an already-succeeded bead")
 	}
 }

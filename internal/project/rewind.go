@@ -42,6 +42,8 @@ func RunRewindBeadMain(args []string) {
 	flags := flag.NewFlagSet("rewind-bead", flag.ExitOnError)
 	dbPath := flags.String("db", "ratchet.db", "path to SQLite database")
 	beadID := flags.Int64("bead-id", 0, "bead ID to rewind (required)")
+	note := flags.String("note", "", "optional human guidance note to append for the next attempt")
+	supersedes := flags.Int("supersedes", 0, "note number this note supersedes or retracts (optional)")
 	_ = flags.Parse(args)
 
 	if *beadID == 0 {
@@ -56,7 +58,7 @@ func RunRewindBeadMain(args []string) {
 	}
 	defer d.Close()
 
-	result, err := rewindBead(context.Background(), d, *beadID)
+	result, err := rewindBead(context.Background(), d, *beadID, RewindOptions{Note: *note, Supersedes: *supersedes})
 	if err != nil {
 		slog.Error("rewind-bead", "error", err)
 		os.Exit(1)
@@ -69,6 +71,12 @@ func RunRewindBeadMain(args []string) {
 	fmt.Printf("  attempt budget: %d → %d\n", result.BudgetFrom, result.BudgetTo)
 	fmt.Printf("  next verb:      REFINE_TESTS_WRITE\n")
 	fmt.Printf("  pre-rewind snapshot: %s\n", result.SnapshotDir)
+	if result.NewNoteNumber > 0 {
+		fmt.Printf("  guidance note added: Note %d\n", result.NewNoteNumber)
+	}
+	if *supersedes != 0 {
+		fmt.Printf("  supersedes:          Note %d\n", *supersedes)
+	}
 	if len(result.DeletedTests) > 0 {
 		fmt.Printf("  test files deleted:\n")
 		for _, f := range result.DeletedTests {
@@ -89,22 +97,37 @@ func RunRewindBeadMain(args []string) {
 	}
 }
 
+// RewindOptions carries optional human input for a rewind, layered on top of
+// the automatic prose/budget/exit-criteria merge every rewind performs.
+type RewindOptions struct {
+	// Note, if non-empty, is appended to the restored prose as a new,
+	// numbered Guidance Log entry (see guidance_log.go). Appended, never
+	// patched in place — earlier notes keep their original text forever.
+	Note string
+	// Supersedes, if non-zero, marks that earlier note number's status as
+	// superseded (if Note is also given) or retracted (if not). The earlier
+	// note's text is never edited or removed. Referencing a note number that
+	// doesn't exist is an error, not a silent no-op.
+	Supersedes int
+}
+
 // rewindResult reports what rewindBead actually did, for RunRewindBeadMain to print.
 type rewindResult struct {
-	ProjectID    int64
-	BudgetFrom   int
-	BudgetTo     int
-	SnapshotDir  string
-	DeletedTests []string
-	StubbedFiles []string
-	DeletedFiles []string
+	ProjectID     int64
+	BudgetFrom    int
+	BudgetTo      int
+	SnapshotDir   string
+	NewNoteNumber int // 0 if no Note was given
+	DeletedTests  []string
+	StubbedFiles  []string
+	DeletedFiles  []string
 }
 
 // rewindBead resets bead beadID to a clean, re-runnable state. See
 // RunRewindBeadMain's doc comment for the full behavior; factored out as its
 // own function (mirroring fullStopProject) so it can be exercised directly by
 // tests instead of only through the os.Exit-based CLI entry point.
-func rewindBead(ctx context.Context, d *db.DB, beadID int64) (*rewindResult, error) {
+func rewindBead(ctx context.Context, d *db.DB, beadID int64, opts RewindOptions) (*rewindResult, error) {
 	var projectID int64
 	var beadStatus string
 	var currentRevisionID int64
@@ -208,6 +231,20 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64) (*rewindResult, err
 	mergedSpec.ExecutionBudget = currentExecutionBudget
 	mergedSpec.MonitorOverride = currentMonitorOverride
 
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Layer any human guidance for this attempt on top of the restored prose.
+	// Appended as a new, numbered Guidance Log entry rather than patched into
+	// the prose in place — see guidance_log.go's doc comment for why: that's
+	// exactly the failure mode (ADJUDICATE_NEXT_EXECUTION's reactive patches)
+	// this whole rewind mechanism already exists to undo. A bad --supersedes
+	// value fails loudly here, before anything else about this rewind happens.
+	updatedFullText, newNoteNumber, err := applyGuidance(mergedSpec.FullText, opts.Note, opts.Supersedes, now)
+	if err != nil {
+		return nil, fmt.Errorf("rewind-bead: %w", err)
+	}
+	mergedSpec.FullText = updatedFullText
+
 	// Re-run the mechanical exit-criteria fixes (asterisk-escaping,
 	// apiCheckTestFilename content-check stripping, bare-grep file assignment,
 	// ...) over the inherited exit_criteria. The current revision's
@@ -231,7 +268,7 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64) (*rewindResult, err
 	// bead-report.md written at escalation already captures file content as
 	// text, but not a runnable/diffable tree — this is what makes attempt N's
 	// actual broken code inspectable (or restorable) after rewind moves on.
-	snapshotDir, err := snapshotBeadFiles(projectFolder, beadID, outputFiles)
+	snapshotDir, preservedFiles, err := snapshotBeadFiles(projectFolder, beadID, outputFiles)
 	if err != nil {
 		return nil, fmt.Errorf("snapshot pre-rewind files: %w", err)
 	}
@@ -244,8 +281,6 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64) (*rewindResult, err
 	).Scan(&existingExecutions); err != nil {
 		return nil, fmt.Errorf("count executions: %w", err)
 	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
 
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
@@ -369,14 +404,26 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64) (*rewindResult, err
 		return nil, fmt.Errorf("write scaffold stubs: %w", err)
 	}
 
+	// Finalize the snapshot's manifest now that every fact it reports
+	// (guidance given, what each file's fate was) is actually known — writing
+	// it here rather than up front at snapshotBeadFiles time means one
+	// complete record instead of a partial one a reader has to reconcile
+	// against rewindResult by hand. Purely documentation at this point (the
+	// destructive steps above already happened), so a write failure is a
+	// warning, not an error that unwinds an already-committed rewind.
+	if err := writeRewindManifest(snapshotDir, beadID, opts, preservedFiles, deletedTests, stubbedFiles, deletedFiles); err != nil {
+		slog.Warn("rewind-bead: write snapshot manifest", "dir", snapshotDir, "error", err)
+	}
+
 	return &rewindResult{
-		ProjectID:    projectID,
-		BudgetFrom:   existingExecutions,
-		BudgetTo:     newAttemptCap,
-		SnapshotDir:  snapshotDir,
-		DeletedTests: deletedTests,
-		StubbedFiles: stubbedFiles,
-		DeletedFiles: deletedFiles,
+		ProjectID:     projectID,
+		BudgetFrom:    existingExecutions,
+		BudgetTo:      newAttemptCap,
+		SnapshotDir:   snapshotDir,
+		NewNoteNumber: newNoteNumber,
+		DeletedTests:  deletedTests,
+		StubbedFiles:  stubbedFiles,
+		DeletedFiles:  deletedFiles,
 	}, nil
 }
 
@@ -385,11 +432,13 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64) (*rewindResult, err
 // before rewindBead deletes test files or stubs impl files. Missing files
 // (never written, or already stubbed by a prior rewind) are skipped, not an
 // error. n increments per bead so repeated rewinds of the same bead don't
-// overwrite each other's snapshots.
-func snapshotBeadFiles(folderPath string, beadID int64, outputFiles []string) (string, error) {
+// overwrite each other's snapshots. Returns the snapshot dir and the list of
+// files actually preserved; the dir's manifest is written later by
+// writeRewindManifest, once the rest of the rewind's outcome is known.
+func snapshotBeadFiles(folderPath string, beadID int64, outputFiles []string) (dir string, preserved []string, err error) {
 	tracesDir := filepath.Join(folderPath, "traces")
 	if err := os.MkdirAll(tracesDir, 0o755); err != nil {
-		return "", fmt.Errorf("create traces dir: %w", err)
+		return "", nil, fmt.Errorf("create traces dir: %w", err)
 	}
 
 	n := 1
@@ -401,7 +450,7 @@ func snapshotBeadFiles(folderPath string, beadID int64, outputFiles []string) (s
 	}
 	snapshotDir := filepath.Join(tracesDir, fmt.Sprintf("bead-%d-rewind-%d", beadID, n))
 	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
-		return "", fmt.Errorf("create snapshot dir: %w", err)
+		return "", nil, fmt.Errorf("create snapshot dir: %w", err)
 	}
 
 	var copied []string
@@ -410,31 +459,60 @@ func snapshotBeadFiles(folderPath string, beadID int64, outputFiles []string) (s
 		if os.IsNotExist(err) {
 			continue
 		} else if err != nil {
-			return "", fmt.Errorf("read %s: %w", rel, err)
+			return "", nil, fmt.Errorf("read %s: %w", rel, err)
 		}
 		dst := filepath.Join(snapshotDir, rel)
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return "", fmt.Errorf("create snapshot dir for %s: %w", rel, err)
+			return "", nil, fmt.Errorf("create snapshot dir for %s: %w", rel, err)
 		}
 		if err := os.WriteFile(dst, data, 0o644); err != nil {
-			return "", fmt.Errorf("write snapshot of %s: %w", rel, err)
+			return "", nil, fmt.Errorf("write snapshot of %s: %w", rel, err)
 		}
 		copied = append(copied, rel)
 	}
 
-	var manifest strings.Builder
-	fmt.Fprintf(&manifest, "# Bead %d rewind snapshot\n\n", beadID)
-	fmt.Fprintf(&manifest, "Taken: %s\n\n", time.Now().UTC().Format(time.RFC3339))
-	manifest.WriteString("Pre-rewind content of every output file, before test deletion / impl stubbing:\n\n")
-	if len(copied) == 0 {
-		manifest.WriteString("(no output files existed on disk yet)\n")
+	return snapshotDir, copied, nil
+}
+
+// writeRewindManifest writes the snapshot dir's README.md once every fact it
+// reports is known: the guidance given for the next attempt (if any), the
+// files preserved, and each file's actual fate. This is the single forensic
+// record for one rewind — what changed in the spec and what that cost on
+// disk — rather than the two disconnected pieces (a pre-rewind file list and
+// a CLI printout) it used to be split across.
+func writeRewindManifest(snapshotDir string, beadID int64, opts RewindOptions, preserved, deletedTests, stubbedFiles, deletedFiles []string) error {
+	var m strings.Builder
+	fmt.Fprintf(&m, "# Bead %d rewind snapshot\n\n", beadID)
+	fmt.Fprintf(&m, "Taken: %s\n\n", time.Now().UTC().Format(time.RFC3339))
+
+	m.WriteString("## Guidance for next attempt\n\n")
+	if opts.Note != "" {
+		fmt.Fprintf(&m, "%s\n", opts.Note)
+	} else {
+		m.WriteString("(no new guidance note given)\n")
 	}
-	for _, f := range copied {
-		fmt.Fprintf(&manifest, "- %s\n", f)
-	}
-	if err := os.WriteFile(filepath.Join(snapshotDir, "README.md"), []byte(manifest.String()), 0o644); err != nil {
-		return "", fmt.Errorf("write snapshot manifest: %w", err)
+	if opts.Supersedes != 0 {
+		fmt.Fprintf(&m, "\nSupersedes/retracts: Note %d\n", opts.Supersedes)
 	}
 
-	return snapshotDir, nil
+	m.WriteString("\n## Pre-rewind content preserved\n\n")
+	if len(preserved) == 0 {
+		m.WriteString("(no output files existed on disk yet)\n")
+	}
+	for _, f := range preserved {
+		fmt.Fprintf(&m, "- %s\n", f)
+	}
+
+	m.WriteString("\n## What happened to each file\n\n")
+	for _, f := range deletedTests {
+		fmt.Fprintf(&m, "- %s: deleted (test file, regenerated by REFINE_TESTS_WRITE)\n", f)
+	}
+	for _, f := range stubbedFiles {
+		fmt.Fprintf(&m, "- %s: reset to scaffold stub\n", f)
+	}
+	for _, f := range deletedFiles {
+		fmt.Fprintf(&m, "- %s: deleted (not in SURVEY manifest, no stub baseline)\n", f)
+	}
+
+	return os.WriteFile(filepath.Join(snapshotDir, "README.md"), []byte(m.String()), 0o644)
 }
