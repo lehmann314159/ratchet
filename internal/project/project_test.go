@@ -126,6 +126,45 @@ func TestCreateHappyPath(t *testing.T) {
 	}
 }
 
+// TestCreateBackfillsLineageRootIDToOwnID verifies a fresh project is
+// trivially the sole member of its own one-project lineage: lineage_root_id
+// self-references the project's own id (backfilled after insert, since a
+// fresh INSERT can't reference an autoincrement id that doesn't exist yet),
+// and iteration_number defaults to 1. Guards against repeating the
+// recovered_from_project_id mistake — a project-lineage FK column added but
+// never actually populated by any code path.
+func TestCreateBackfillsLineageRootIDToOwnID(t *testing.T) {
+	d := openTestDB(t)
+	folder, designDoc := seedFolder(t)
+	ctx := context.Background()
+
+	projectID, err := project.Create(ctx, d, project.Params{
+		Label:                "lineage test",
+		FolderPath:           folder,
+		DesignDocPath:        designDoc,
+		MonitorOverride:      "honor",
+		ExecutionBudget:      300,
+		MaxExecutionAttempts: 5,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var lineageRootID sql.NullInt64
+	var iterationNumber int
+	if err := d.QueryRowContext(ctx,
+		`SELECT lineage_root_id, iteration_number FROM projects WHERE id = ?`, projectID,
+	).Scan(&lineageRootID, &iterationNumber); err != nil {
+		t.Fatalf("read project row: %v", err)
+	}
+	if !lineageRootID.Valid || lineageRootID.Int64 != projectID {
+		t.Errorf("lineage_root_id = %v, want valid and equal to own id %d", lineageRootID, projectID)
+	}
+	if iterationNumber != 1 {
+		t.Errorf("iteration_number = %d, want 1", iterationNumber)
+	}
+}
+
 func TestCreateFolderNotExist(t *testing.T) {
 	d := openTestDB(t)
 	_, err := project.Create(context.Background(), d, project.Params{

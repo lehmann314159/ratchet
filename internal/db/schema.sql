@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS projects (
   pause_after_bead_id         INTEGER,
   decompose_ambiguities       TEXT,
   reconcile_self_resolve      INTEGER NOT NULL DEFAULT 0,
+  lineage_root_id             INTEGER REFERENCES projects(id),
+  iteration_number            INTEGER NOT NULL DEFAULT 1,
   created_at                  TIMESTAMP NOT NULL,
   updated_at                  TIMESTAMP NOT NULL
 );

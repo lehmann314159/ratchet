@@ -455,3 +455,55 @@ func TestBackfillPauseColumns(t *testing.T) {
 		t.Errorf("write/read mismatch: pause_after_verb=%q pause_after_bead_id=%d", pauseVerb.String, pauseBeadID.Int64)
 	}
 }
+
+// TestBackfillLineageRootID guards against repeating the
+// recovered_from_project_id mistake — a project-lineage FK column added but
+// never populated by any code path for rows that predate it. Simulates the
+// post-ALTER-TABLE state (column present, existing rows still NULL) and
+// confirms backfillLineageRootID self-references every NULL row while
+// leaving an already-set row untouched (idempotent, doesn't clobber a real
+// lineage assignment on a second run).
+func TestBackfillLineageRootID(t *testing.T) {
+	ctx := context.Background()
+	d := openRawTestDB(t)
+	mustExec(t, d, `CREATE TABLE projects (id INTEGER PRIMARY KEY, label TEXT, lineage_root_id INTEGER)`)
+	mustExec(t, d, `INSERT INTO projects (id, label, lineage_root_id) VALUES (1, 'predates the column', NULL)`)
+	mustExec(t, d, `INSERT INTO projects (id, label, lineage_root_id) VALUES (2, 'predates the column too', NULL)`)
+	mustExec(t, d, `INSERT INTO projects (id, label, lineage_root_id) VALUES (3, 'iteration 2 of project 1''s lineage', 1)`)
+
+	if err := d.backfillLineageRootID(); err != nil {
+		t.Fatalf("backfillLineageRootID: %v", err)
+	}
+
+	rows, err := d.QueryContext(ctx, `SELECT id, lineage_root_id FROM projects ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	want := map[int64]int64{1: 1, 2: 2, 3: 1}
+	got := map[int64]int64{}
+	for rows.Next() {
+		var id, lineageRootID int64
+		if err := rows.Scan(&id, &lineageRootID); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got[id] = lineageRootID
+	}
+	for id, wantVal := range want {
+		if got[id] != wantVal {
+			t.Errorf("project %d: lineage_root_id = %d, want %d", id, got[id], wantVal)
+		}
+	}
+
+	// Idempotent: running it again must not touch project 3's real assignment.
+	if err := d.backfillLineageRootID(); err != nil {
+		t.Fatalf("backfillLineageRootID (second run): %v", err)
+	}
+	var lineageRootID int64
+	if err := d.QueryRowContext(ctx, `SELECT lineage_root_id FROM projects WHERE id = 3`).Scan(&lineageRootID); err != nil {
+		t.Fatalf("re-query project 3: %v", err)
+	}
+	if lineageRootID != 1 {
+		t.Errorf("project 3: lineage_root_id = %d after second run, want unchanged 1", lineageRootID)
+	}
+}

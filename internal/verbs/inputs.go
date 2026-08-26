@@ -34,7 +34,7 @@ func loadProject(ctx context.Context, d *db.DB, projectID int64) (*db.Project, e
 		       monitor_override_default, execution_budget_default,
 		       audit_reconcile_round_cap, max_execution_attempts,
 		       language, pause_after_reconcile, pause_after_verb, pause_after_bead_id,
-		       reconcile_self_resolve,
+		       reconcile_self_resolve, lineage_root_id, iteration_number,
 		       created_at, updated_at
 		FROM projects WHERE id = ?`, projectID)
 	p := &db.Project{}
@@ -45,7 +45,7 @@ func loadProject(ctx context.Context, d *db.DB, projectID int64) (*db.Project, e
 		&p.MonitorOverrideDefault, &p.ExecutionBudgetDefault,
 		&p.AuditReconcileRoundCap, &p.MaxExecutionAttempts,
 		&p.Language, &p.PauseAfterReconcile, &p.PauseAfterVerb, &p.PauseAfterBeadID,
-		&p.ReconcileSelfResolve,
+		&p.ReconcileSelfResolve, &p.LineageRootID, &p.IterationNumber,
 		&createdAt, &updatedAt,
 	); err != nil {
 		return nil, fmt.Errorf("load project %d: %w", projectID, err)

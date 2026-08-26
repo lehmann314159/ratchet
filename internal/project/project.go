@@ -140,6 +140,22 @@ func Create(ctx context.Context, d *db.DB, p Params) (int64, error) {
 	}
 	projectID, _ := res.LastInsertId()
 
+	// Backfill lineage_root_id to the project's own id now that it's known —
+	// a fresh INSERT can't self-reference before the autoincrement id exists.
+	// This makes every project trivially the sole member of its own
+	// one-project lineage by default (iteration_number's schema default of 1
+	// already covers the other half), rather than leaving the column
+	// perpetually NULL the way recovered_from_project_id has sat unused since
+	// this project's first commit. A future "materialize iteration N+1"
+	// operation overrides both columns explicitly instead of using Create's
+	// default self-reference.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE projects SET lineage_root_id = ? WHERE id = ?`, projectID, projectID,
+	); err != nil {
+		_ = tx.Rollback()
+		return 0, fmt.Errorf("backfill lineage_root_id: %w", err)
+	}
+
 	var seedErr error
 	if p.Fleet != nil {
 		seedErr = db.SeedVerbModelAssignmentsFromFleet(ctx, tx, projectID, p.Fleet)

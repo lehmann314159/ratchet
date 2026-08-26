@@ -68,8 +68,21 @@ type Project struct {
 	// self-report is trusted to end a disagreement in its own favor without
 	// further debate or escalation. See reconcile_decomposition.go's Commit.
 	ReconcileSelfResolve bool
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+	// LineageRootID identifies which loop-mode iteration lineage this project
+	// belongs to, by pointing at the id of that lineage's first project (the
+	// project that started it — Create backfills this to a project's own id
+	// for every new project, so a standalone, never-iterated project is
+	// trivially the sole member of its own one-project lineage). Iteration 2+
+	// of a lineage instead points at the same root id its predecessor does,
+	// so every iteration in a lineage shares one LineageRootID regardless of
+	// how many hops deep it is — no chain-walking needed to answer "what
+	// lineage is this" or "does iteration N of lineage L already exist".
+	LineageRootID sql.NullInt64
+	// IterationNumber is this project's position within its lineage (see
+	// LineageRootID), starting at 1. Always 1 for a standalone project.
+	IterationNumber int
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // VerbModelAssignment represents a row in the verb_model_assignments table.

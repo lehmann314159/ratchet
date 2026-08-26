@@ -35,6 +35,8 @@ var columnMigrations = []columnMigration{
 	{"projects", "pause_after_bead_id", "INTEGER"},
 	{"projects", "decompose_ambiguities", "TEXT"},
 	{"projects", "reconcile_self_resolve", "INTEGER NOT NULL DEFAULT 0"},
+	{"projects", "lineage_root_id", "INTEGER REFERENCES projects(id)"},
+	{"projects", "iteration_number", "INTEGER NOT NULL DEFAULT 1"},
 }
 
 //go:embed schema.sql
@@ -156,6 +158,27 @@ func (db *DB) applyTableMigrations() error {
 	}
 	if err := db.migrateProjectsStatusFixture(); err != nil {
 		return err
+	}
+	if err := db.backfillLineageRootID(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// backfillLineageRootID sets lineage_root_id to a project's own id for any
+// project where it's still NULL — applyMigrations' ALTER TABLE ADD COLUMN
+// only adds the column with its schema default (NULL, since a self-reference
+// can't be a column DEFAULT), so every project that existed before this
+// column shipped needs this one-time backfill. Without it, those projects
+// would repeat the exact mistake recovered_from_project_id made: a
+// project-lineage FK column that's simply never populated for rows that
+// predate it. New projects don't need this — project.Create backfills it
+// in the same transaction as the INSERT. Idempotent: once populated, the
+// WHERE clause matches nothing.
+func (db *DB) backfillLineageRootID() error {
+	_, err := db.Exec(`UPDATE projects SET lineage_root_id = id WHERE lineage_root_id IS NULL`)
+	if err != nil {
+		return fmt.Errorf("backfill lineage_root_id: %w", err)
 	}
 	return nil
 }
