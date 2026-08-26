@@ -35,6 +35,7 @@ func loadProject(ctx context.Context, d *db.DB, projectID int64) (*db.Project, e
 		       audit_reconcile_round_cap, max_execution_attempts,
 		       language, pause_after_reconcile, pause_after_verb, pause_after_bead_id,
 		       reconcile_self_resolve, lineage_root_id, iteration_number,
+		       cascade_baseline_project_id,
 		       created_at, updated_at
 		FROM projects WHERE id = ?`, projectID)
 	p := &db.Project{}
@@ -46,6 +47,7 @@ func loadProject(ctx context.Context, d *db.DB, projectID int64) (*db.Project, e
 		&p.AuditReconcileRoundCap, &p.MaxExecutionAttempts,
 		&p.Language, &p.PauseAfterReconcile, &p.PauseAfterVerb, &p.PauseAfterBeadID,
 		&p.ReconcileSelfResolve, &p.LineageRootID, &p.IterationNumber,
+		&p.CascadeBaselineProjectID,
 		&createdAt, &updatedAt,
 	); err != nil {
 		return nil, fmt.Errorf("load project %d: %w", projectID, err)
@@ -81,19 +83,38 @@ type beadState struct {
 	RevisionNumber  int
 }
 
+const loadCurrentBeadsQuery = `
+	SELECT b.id, br.full_text, br.execution_budget, br.monitor_override, br.revision_number
+	FROM beads b
+	JOIN bead_revisions br ON br.id = b.current_revision_id
+	WHERE b.project_id = ?
+	ORDER BY b.id`
+
 // loadCurrentBeads returns all beads for projectID with their current revision.
 func loadCurrentBeads(ctx context.Context, d *db.DB, projectID int64) ([]beadState, error) {
-	rows, err := d.QueryContext(ctx, `
-		SELECT b.id, br.full_text, br.execution_budget, br.monitor_override, br.revision_number
-		FROM beads b
-		JOIN bead_revisions br ON br.id = b.current_revision_id
-		WHERE b.project_id = ?
-		ORDER BY b.id`, projectID)
+	rows, err := d.QueryContext(ctx, loadCurrentBeadsQuery, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("load beads: %w", err)
 	}
 	defer rows.Close()
+	return scanBeadStates(rows)
+}
 
+// loadCurrentBeadsTx is loadCurrentBeads run against an open transaction, for
+// use inside a verb's Commit — reading via d (a separate connection) while a
+// tx from the same single-connection *sql.DB is open would block forever
+// waiting for a connection the tx is holding. Used by enqueueCascadeReview to
+// read both the cascade project's and its baseline's beads mid-Commit.
+func loadCurrentBeadsTx(ctx context.Context, tx *sql.Tx, projectID int64) ([]beadState, error) {
+	rows, err := tx.QueryContext(ctx, loadCurrentBeadsQuery, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("load beads: %w", err)
+	}
+	defer rows.Close()
+	return scanBeadStates(rows)
+}
+
+func scanBeadStates(rows *sql.Rows) ([]beadState, error) {
 	var out []beadState
 	for rows.Next() {
 		var s beadState
@@ -405,7 +426,7 @@ func enqueueFirstBeadForExecution(ctx context.Context, tx *sql.Tx, projectID int
 	return enqueueBeadExecution(ctx, tx, projectID, beadID, now)
 }
 
-// enqueueDecompositionApproved enqueues the first bead for execution and then
+// enqueueDecompositionApproved dispatches the beads for execution and then
 // checks whether the project should pause instead of actually starting bead
 // execution. This is the single invariant checkpoint both FSM paths that
 // leave decomposition converge on: AuditDecomposition.Commit's no_issues
@@ -418,10 +439,38 @@ func enqueueFirstBeadForExecution(ctx context.Context, tx *sql.Tx, projectID int
 // RECONCILE's own Commit, so a decomposition AUDIT approved on the first
 // pass (no RECONCILE round at all) never paused, even with either flag set —
 // confirmed live, chess-v4 (project 99), 2026-07-16.
+//
+// A project with cascade_baseline_project_id set (materialized by
+// clone-project --design-doc, cloning an existing iteration's beads/history
+// wholesale rather than starting from none) does not dispatch bead 1 like a
+// fresh project — most of its beads already succeeded under the clone and
+// must stay untouched. Instead enqueueCascadeReview diffs every bead's
+// now-approved spec against the baseline iteration's and dispatches only the
+// lowest-id bead a real diff proved changed; see cascade_review.go.
 func enqueueDecompositionApproved(ctx context.Context, tx *sql.Tx, projectID int64, now string) error {
-	if err := enqueueFirstBeadForExecution(ctx, tx, projectID, now); err != nil {
+	var cascadeBaselineProjectID sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT cascade_baseline_project_id FROM projects WHERE id = ?`, projectID,
+	).Scan(&cascadeBaselineProjectID); err != nil {
+		return fmt.Errorf("load cascade_baseline_project_id: %w", err)
+	}
+
+	dispatched := true
+	if cascadeBaselineProjectID.Valid {
+		var err error
+		dispatched, err = enqueueCascadeReview(ctx, tx, projectID, cascadeBaselineProjectID.Int64, now)
+		if err != nil {
+			return err
+		}
+	} else if err := enqueueFirstBeadForExecution(ctx, tx, projectID, now); err != nil {
 		return err
 	}
+	if !dispatched {
+		// enqueueCascadeReview found no changed beads and already marked the
+		// project complete — nothing left to pause before.
+		return nil
+	}
+
 	var pauseAfterReconcile bool
 	if err := tx.QueryRowContext(ctx,
 		`SELECT pause_after_reconcile FROM projects WHERE id = ?`, projectID,

@@ -37,6 +37,7 @@ var columnMigrations = []columnMigration{
 	{"projects", "reconcile_self_resolve", "INTEGER NOT NULL DEFAULT 0"},
 	{"projects", "lineage_root_id", "INTEGER REFERENCES projects(id)"},
 	{"projects", "iteration_number", "INTEGER NOT NULL DEFAULT 1"},
+	{"projects", "cascade_baseline_project_id", "INTEGER REFERENCES projects(id)"},
 }
 
 //go:embed schema.sql

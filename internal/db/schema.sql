@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS projects (
   reconcile_self_resolve      INTEGER NOT NULL DEFAULT 0,
   lineage_root_id             INTEGER REFERENCES projects(id),
   iteration_number            INTEGER NOT NULL DEFAULT 1,
+  cascade_baseline_project_id INTEGER REFERENCES projects(id),
   created_at                  TIMESTAMP NOT NULL,
   updated_at                  TIMESTAMP NOT NULL
 );

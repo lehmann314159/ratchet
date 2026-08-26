@@ -81,8 +81,18 @@ type Project struct {
 	// IterationNumber is this project's position within its lineage (see
 	// LineageRootID), starting at 1. Always 1 for a standalone project.
 	IterationNumber int
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	// CascadeBaselineProjectID, if set, marks this project as a cascade
+	// iteration: cloned from that project id with an edited design doc, with
+	// AUDIT_DECOMPOSITION/RECONCILE_DECOMPOSITION re-run against the new doc
+	// over the inherited beads. When their loop converges,
+	// enqueueDecompositionApproved diffs each bead's now-approved spec against
+	// the corresponding bead (matched by title) in this project instead of
+	// dispatching bead 1 like a fresh project — see cascade_review.go. NULL
+	// for a standalone project or an ordinary clone with no design-doc
+	// override.
+	CascadeBaselineProjectID sql.NullInt64
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
 }
 
 // VerbModelAssignment represents a row in the verb_model_assignments table.

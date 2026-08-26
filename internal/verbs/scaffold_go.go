@@ -2,6 +2,7 @@ package verbs
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -72,10 +73,46 @@ func scaffoldGoProject(pkg, module, folderPath string, files []SurveyManifestFil
 // Returns the files actually stubbed and the files actually deleted, so
 // callers can report what really happened instead of assuming success.
 func WriteScaffoldStubs(ctx context.Context, d *db.DB, projectID int64, folderPath string, outputFiles []string) (stubbed, deleted []string, err error) {
+	if !hasNonTestFile(outputFiles) {
+		return nil, nil, nil
+	}
 	manifest, err := latestSurveyManifest(ctx, d, projectID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load survey manifest: %w", err)
 	}
+	return writeScaffoldStubsFromManifest(manifest, folderPath, outputFiles)
+}
+
+// WriteScaffoldStubsTx is WriteScaffoldStubs run against an open transaction
+// instead of d — for use inside a verb's Commit (e.g. enqueueCascadeReview's
+// bead reset), where reading via d while a tx from the same single-connection
+// *sql.DB is open would block forever waiting for a connection the tx holds.
+func WriteScaffoldStubsTx(ctx context.Context, tx *sql.Tx, projectID int64, folderPath string, outputFiles []string) (stubbed, deleted []string, err error) {
+	if !hasNonTestFile(outputFiles) {
+		return nil, nil, nil
+	}
+	manifest, err := latestSurveyManifestTx(ctx, tx, projectID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load survey manifest: %w", err)
+	}
+	return writeScaffoldStubsFromManifest(manifest, folderPath, outputFiles)
+}
+
+// hasNonTestFile reports whether outputFiles contains at least one file that
+// isn't a _test.go — i.e. whether a manifest lookup is even needed. Guards
+// WriteScaffoldStubs/WriteScaffoldStubsTx against a bead with no impl output
+// files (or none yet), which would otherwise fail the manifest lookup for no
+// reason: the loop below only ever consults the manifest for non-test files.
+func hasNonTestFile(outputFiles []string) bool {
+	for _, f := range outputFiles {
+		if !strings.HasSuffix(f, "_test.go") {
+			return true
+		}
+	}
+	return false
+}
+
+func writeScaffoldStubsFromManifest(manifest *SurveySpecOutput, folderPath string, outputFiles []string) (stubbed, deleted []string, err error) {
 	declByPath := make(map[string]string, len(manifest.Files))
 	for _, mf := range manifest.Files {
 		declByPath[mf.Path] = mf.Declarations

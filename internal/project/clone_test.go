@@ -670,6 +670,10 @@ func TestCloneProject_DesignDocOverrideReplacesContent(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 	sourceFolder, _, _, _, _, _ := seedCloneFullProject(t, d, 71)
+	// A design-doc-override clone starts a cascade review, which requires the
+	// source at a clean rest point — settle the fixture's seeded pending
+	// SURVEY_SPEC job first.
+	mustExecFixture(t, d, `UPDATE handoff_jobs SET status = 'complete' WHERE project_id = 71 AND status = 'pending'`)
 
 	overridePath := filepath.Join(t.TempDir(), "edited-design.md")
 	overrideContent := "# Design\n\n## Human Guidance Log\n\nNote 1: fix the off-by-one in the stride calc.\n"
@@ -726,5 +730,101 @@ func TestCloneProject_DesignDocOverrideMissingFileErrors(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("found %d project row(s), want 0 (must fail before any DB write)", count)
+	}
+}
+
+// TestCloneProject_DesignDocOverrideStartsCascade verifies a design-doc-
+// override clone auto-starts the cascade review described in
+// project_loop_mode_pivot: it points the new project's
+// cascade_baseline_project_id at the source, enqueues exactly one pending
+// AUDIT_DECOMPOSITION job (bypassing DECOMPOSE_SPEC since beads already
+// exist from the clone), and skips cloning audit_reconcile_rounds so the
+// fresh re-audit starts with a clean round-cap counter instead of inheriting
+// the source's — see cascade_review.go and clone.go's cloneAuditReconcileRounds
+// call site.
+func TestCloneProject_DesignDocOverrideStartsCascade(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedCloneFullProject(t, d, 73)
+	mustExecFixture(t, d, `UPDATE handoff_jobs SET status = 'complete' WHERE project_id = 73 AND status = 'pending'`)
+
+	overridePath := filepath.Join(t.TempDir(), "edited-design.md")
+	if err := os.WriteFile(overridePath, []byte("# Design v2\n"), 0o644); err != nil {
+		t.Fatalf("write override file: %v", err)
+	}
+
+	newFolder := filepath.Join(t.TempDir(), "clone")
+	newID, _, _, err := cloneProject(ctx, d, 73, "clone-cascade", newFolder, overridePath)
+	if err != nil {
+		t.Fatalf("cloneProject: %v", err)
+	}
+
+	var cascadeBaselineProjectID sql.NullInt64
+	if err := d.QueryRowContext(ctx,
+		`SELECT cascade_baseline_project_id FROM projects WHERE id = ?`, newID,
+	).Scan(&cascadeBaselineProjectID); err != nil {
+		t.Fatalf("query cascade_baseline_project_id: %v", err)
+	}
+	if !cascadeBaselineProjectID.Valid || cascadeBaselineProjectID.Int64 != 73 {
+		t.Errorf("cascade_baseline_project_id = %v, want valid 73", cascadeBaselineProjectID)
+	}
+
+	var pendingCount int
+	var verb string
+	if err := d.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM handoff_jobs WHERE project_id = ? AND status IN ('pending', 'failed_retry')`, newID,
+	).Scan(&pendingCount); err != nil {
+		t.Fatalf("count pending jobs: %v", err)
+	}
+	if pendingCount != 1 {
+		t.Errorf("pending/failed_retry job count = %d, want exactly 1 (no DECOMPOSE_SPEC — beads already cloned)", pendingCount)
+	}
+	if err := d.QueryRowContext(ctx,
+		`SELECT verb FROM handoff_jobs WHERE project_id = ? AND status = 'pending'`, newID,
+	).Scan(&verb); err != nil {
+		t.Fatalf("query pending job verb: %v", err)
+	}
+	if verb != "AUDIT_DECOMPOSITION" {
+		t.Errorf("pending job verb = %q, want AUDIT_DECOMPOSITION", verb)
+	}
+
+	var roundsCount int
+	if err := d.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM audit_reconcile_rounds WHERE project_id = ?`, newID,
+	).Scan(&roundsCount); err != nil {
+		t.Fatalf("query audit_reconcile_rounds: %v", err)
+	}
+	if roundsCount != 0 {
+		t.Errorf("audit_reconcile_rounds count = %d, want 0 (not carried into a cascade project)", roundsCount)
+	}
+}
+
+// TestCloneProject_RefusesCascadeWithPendingJob verifies a design-doc-
+// override clone rejects a source with a pending/failed_retry job — closing
+// the dispatch-ordering race where a cloned stale job (older created_at)
+// would run before the freshly-injected AUDIT_DECOMPOSITION job.
+func TestCloneProject_RefusesCascadeWithPendingJob(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedCloneFullProject(t, d, 74) // seeds one pending, project-scoped SURVEY_SPEC job
+
+	overridePath := filepath.Join(t.TempDir(), "edited-design.md")
+	if err := os.WriteFile(overridePath, []byte("# Design v2\n"), 0o644); err != nil {
+		t.Fatalf("write override file: %v", err)
+	}
+
+	newFolder := filepath.Join(t.TempDir(), "clone")
+	if _, _, _, err := cloneProject(ctx, d, 74, "clone-cascade-blocked", newFolder, overridePath); err == nil {
+		t.Fatal("expected an error for a cascade clone with a pending source job")
+	}
+	if _, statErr := os.Stat(newFolder); !os.IsNotExist(statErr) {
+		t.Errorf("expected folder %s not to have been created", newFolder)
+	}
+
+	// A plain clone (no override) of the same source must still succeed —
+	// the stricter precondition only applies to a cascade-triggering clone.
+	plainFolder := filepath.Join(t.TempDir(), "clone-plain")
+	if _, _, _, err := cloneProject(ctx, d, 74, "clone-plain", plainFolder, ""); err != nil {
+		t.Fatalf("plain clone of a project with a pending job should still succeed: %v", err)
 	}
 }

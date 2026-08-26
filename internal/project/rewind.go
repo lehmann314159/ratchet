@@ -268,7 +268,7 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64, opts RewindOptions)
 	// bead-report.md written at escalation already captures file content as
 	// text, but not a runnable/diffable tree — this is what makes attempt N's
 	// actual broken code inspectable (or restorable) after rewind moves on.
-	snapshotDir, preservedFiles, err := snapshotBeadFiles(projectFolder, beadID, outputFiles)
+	snapshotDir, preservedFiles, err := verbs.SnapshotBeadFiles(projectFolder, "rewind", beadID, outputFiles)
 	if err != nil {
 		return nil, fmt.Errorf("snapshot pre-rewind files: %w", err)
 	}
@@ -425,53 +425,6 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64, opts RewindOptions)
 		StubbedFiles:  stubbedFiles,
 		DeletedFiles:  deletedFiles,
 	}, nil
-}
-
-// snapshotBeadFiles copies every file in outputFiles from folderPath into a
-// fresh traces/bead-{id}-rewind-{n}/ directory, preserving relative paths,
-// before rewindBead deletes test files or stubs impl files. Missing files
-// (never written, or already stubbed by a prior rewind) are skipped, not an
-// error. n increments per bead so repeated rewinds of the same bead don't
-// overwrite each other's snapshots. Returns the snapshot dir and the list of
-// files actually preserved; the dir's manifest is written later by
-// writeRewindManifest, once the rest of the rewind's outcome is known.
-func snapshotBeadFiles(folderPath string, beadID int64, outputFiles []string) (dir string, preserved []string, err error) {
-	tracesDir := filepath.Join(folderPath, "traces")
-	if err := os.MkdirAll(tracesDir, 0o755); err != nil {
-		return "", nil, fmt.Errorf("create traces dir: %w", err)
-	}
-
-	n := 1
-	for {
-		if _, err := os.Stat(filepath.Join(tracesDir, fmt.Sprintf("bead-%d-rewind-%d", beadID, n))); os.IsNotExist(err) {
-			break
-		}
-		n++
-	}
-	snapshotDir := filepath.Join(tracesDir, fmt.Sprintf("bead-%d-rewind-%d", beadID, n))
-	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
-		return "", nil, fmt.Errorf("create snapshot dir: %w", err)
-	}
-
-	var copied []string
-	for _, rel := range outputFiles {
-		data, err := os.ReadFile(filepath.Join(folderPath, rel))
-		if os.IsNotExist(err) {
-			continue
-		} else if err != nil {
-			return "", nil, fmt.Errorf("read %s: %w", rel, err)
-		}
-		dst := filepath.Join(snapshotDir, rel)
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return "", nil, fmt.Errorf("create snapshot dir for %s: %w", rel, err)
-		}
-		if err := os.WriteFile(dst, data, 0o644); err != nil {
-			return "", nil, fmt.Errorf("write snapshot of %s: %w", rel, err)
-		}
-		copied = append(copied, rel)
-	}
-
-	return snapshotDir, copied, nil
 }
 
 // writeRewindManifest writes the snapshot dir's README.md once every fact it

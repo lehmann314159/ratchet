@@ -62,6 +62,7 @@ func RunCloneProjectMain(args []string) {
 	fmt.Printf("  lineage:    root project %d, iteration %d\n", lineageRootID, iterationNumber)
 	if *designDoc != "" {
 		fmt.Printf("  design doc: replaced with %s\n", *designDoc)
+		fmt.Printf("  cascade:    started — AUDIT_DECOMPOSITION queued against project %d's beads\n", *fromID)
 	}
 }
 
@@ -153,6 +154,29 @@ func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFold
 		return 0, 0, 0, fmt.Errorf("project %d has %d running job(s) — wait for them to finish before cloning", fromID, runningCount)
 	}
 
+	// A design-doc override starts a cascade: clone-project enqueues a single
+	// AUDIT_DECOMPOSITION job for the new project below, with created_at set
+	// to now. handoff_jobs are otherwise cloned wholesale with their original
+	// created_at (cloneHandoffJobs), so any pending/failed_retry job already
+	// sitting in the source — necessarily older than that new job — would
+	// dispatch first once the clone goes active, running against pre-edit
+	// specs before the re-audit the design-doc edit exists to trigger even
+	// starts. Requiring the source to be at a genuine rest point (complete,
+	// paused, escalated, or full_stopped — not mid-dispatch) closes this off
+	// entirely: nothing pending gets cloned in, so the injected
+	// AUDIT_DECOMPOSITION job is guaranteed to be the only pending job.
+	if designDocOverride != "" {
+		var restartableCount int
+		if err = d.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM handoff_jobs WHERE project_id = ? AND status IN ('pending', 'failed_retry')`, fromID,
+		).Scan(&restartableCount); err != nil {
+			return 0, 0, 0, fmt.Errorf("count pending jobs: %w", err)
+		}
+		if restartableCount > 0 {
+			return 0, 0, 0, fmt.Errorf("project %d has %d pending/failed_retry job(s) — a design-doc-override clone starts a cascade review and requires the source at a clean rest point (complete, paused, escalated, or full_stopped)", fromID, restartableCount)
+		}
+	}
+
 	newFolderAbs, err := filepath.Abs(newFolder)
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("resolve new folder path: %w", err)
@@ -209,6 +233,16 @@ func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFold
 		}
 	}
 
+	// cascade_baseline_project_id is set only for a design-doc-override
+	// clone — it marks the new project as a cascade iteration and points
+	// enqueueDecompositionApproved at fromID to diff against once
+	// AUDIT_DECOMPOSITION/RECONCILE_DECOMPOSITION converge (cascade_review.go).
+	// NULL for an ordinary clone.
+	var cascadeBaselineProjectID sql.NullInt64
+	if designDocOverride != "" {
+		cascadeBaselineProjectID = sql.NullInt64{Int64: fromID, Valid: true}
+	}
+
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO projects
 		  (label, folder_path, design_doc_path, status,
@@ -216,15 +250,17 @@ func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFold
 		   audit_reconcile_round_cap, max_execution_attempts,
 		   language, pause_after_reconcile, pause_after_verb, pause_after_bead_id,
 		   reconcile_self_resolve, lineage_root_id, iteration_number,
+		   cascade_baseline_project_id,
 		   created_at, updated_at)
 		SELECT ?, ?, ?, 'active',
 		       monitor_override_default, execution_budget_default,
 		       audit_reconcile_round_cap, max_execution_attempts,
 		       language, pause_after_reconcile, pause_after_verb, pause_after_bead_id,
 		       reconcile_self_resolve, lineage_root_id, ?,
+		       ?,
 		       datetime('now'), datetime('now')
 		FROM projects WHERE id = ?`,
-		newLabel, newFolderAbs, src.DesignDocPath, nextIterationNumber, fromID)
+		newLabel, newFolderAbs, src.DesignDocPath, nextIterationNumber, cascadeBaselineProjectID, fromID)
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("insert cloned project: %w", err)
 	}
@@ -251,8 +287,19 @@ func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFold
 		return 0, 0, 0, err
 	}
 
-	if err = cloneAuditReconcileRounds(ctx, tx, fromID, newID); err != nil {
-		return 0, 0, 0, err
+	// Skipped for a cascade clone: those rounds debated fit against the
+	// source's design doc, which this clone just replaced. Carrying them
+	// forward would both feed AUDIT/RECONCILE stale "Previous Debate History"
+	// about defects in a doc that no longer exists, and inflate
+	// nextRoundNumber's MAX(round_number)+1 (project-wide, no notion of
+	// "rounds before vs. after the cascade started") so the fresh re-audit's
+	// own first round could already be at or past audit_reconcile_round_cap
+	// purely from inherited history. A cascade project starts with a clean
+	// round-cap counter instead.
+	if designDocOverride == "" {
+		if err = cloneAuditReconcileRounds(ctx, tx, fromID, newID); err != nil {
+			return 0, 0, 0, err
+		}
 	}
 
 	executionIDs, err := cloneExecutions(ctx, tx, fromID, newID, beadIDs, revisionIDs, oldFolderAbs, newFolderAbs)
@@ -296,6 +343,22 @@ func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFold
 
 	if err = cloneTestRefinements(ctx, tx, fromID, newID, beadIDs); err != nil {
 		return 0, 0, 0, err
+	}
+
+	// A design-doc override starts the cascade review immediately: the new
+	// project already has beads (cloned above), so it enters the
+	// AUDIT_DECOMPOSITION/RECONCILE_DECOMPOSITION loop directly against the
+	// replaced doc rather than going through DECOMPOSE_SPEC again. This is
+	// the only pending job in the new project (guaranteed by the
+	// pending/failed_retry precondition above), so it's the first thing the
+	// orchestrator dispatches once the project goes active.
+	if designDocOverride != "" {
+		if _, err = tx.ExecContext(ctx, `
+			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
+			VALUES (?, ?, NULL, 'pending', datetime('now'), datetime('now'))`,
+			newID, db.VerbAuditDecomposition); err != nil {
+			return 0, 0, 0, fmt.Errorf("enqueue cascade AUDIT_DECOMPOSITION: %w", err)
+		}
 	}
 
 	if err = tx.Commit(); err != nil {
