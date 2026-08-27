@@ -1087,7 +1087,29 @@ func (h *RefineTestsJudge) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	return oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: refineTestsJudgeSystemPrompt},
 		{Role: "user", Content: userMsg},
-	}, nil)
+	}, &ollama.Options{Format: refineTestsJudgeFormatSchema})
+}
+
+// refineTestsJudgeFormatSchema grammar-constrains REFINE_TESTS_JUDGE's
+// output so "summary" is structurally unreachable-to-omit, mirroring
+// Validate's own unconditional requirement below. Only "decision" and
+// "summary" are marked required — "functions_to_rewrite"/"instructions"
+// are genuinely conditional on decision=="revise", which JSON Schema's flat
+// "required" can't express without an if/then that Ollama's schema-to-
+// grammar conversion isn't confirmed to support; Validate already enforces
+// that conditional requirement in code, so the schema only needs to close
+// the gap that actually recurred live (connect-four-v2 bead 56,
+// 2026-08-27: 3/3 REFINE_TESTS_JUDGE attempts omitted "summary" despite the
+// prompt listing it, escalating on `malformed: summary is empty`).
+var refineTestsJudgeFormatSchema = map[string]any{
+	"type": "object",
+	"properties": map[string]any{
+		"decision":             map[string]any{"type": "string"},
+		"functions_to_rewrite": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"instructions":         map[string]any{"type": "string"},
+		"summary":              map[string]any{"type": "string"},
+	},
+	"required": []string{"decision", "summary"},
 }
 
 func (h *RefineTestsJudge) Validate(rawOutput string) (string, any) {

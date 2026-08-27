@@ -94,13 +94,28 @@ type Options struct {
 	// NumCtx overrides the default context window size (see defaultNumCtx)
 	// when positive. Zero means "use the default."
 	NumCtx int
+	// Format overrides the request's format constraint when non-nil.
+	// Ollama accepts either the loose string "json" (any syntactically
+	// valid JSON — the default every call gets when this is nil) or a full
+	// JSON Schema object (map[string]any, matching
+	// https://github.com/ollama/ollama/blob/main/docs/api.md's structured
+	// outputs support), which additionally grammar-constrains which keys
+	// must be present. Confirmed live against this deployment (Ollama
+	// 0.30.6) that a schema's "required" array is actually enforced at
+	// generation time, not just documentation: a field the model's own
+	// reasoning never planned to emit still appeared in the output because
+	// the schema required it. Use this for a verb whose Validate has been
+	// burned by a model omitting a required key (e.g. REFINE_TESTS_JUDGE's
+	// "summary" — 3/3 identical failures on connect-four-v2 bead 56,
+	// 2026-08-27) rather than relying on retry-after-rejection alone.
+	Format any
 }
 
 type chatRequest struct {
 	Model    string         `json:"model"`
 	Messages []Message      `json:"messages"`
 	Stream   bool           `json:"stream"`
-	Format   string         `json:"format,omitempty"`
+	Format   any            `json:"format,omitempty"`
 	Options  map[string]any `json:"options,omitempty"`
 }
 
@@ -172,6 +187,7 @@ func (c *Client) Warmup(ctx context.Context, model string) error {
 func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *Options) (string, error) {
 	temp := DefaultTemperature
 	numCtx := defaultNumCtx
+	var format any = "json"
 	if opts != nil {
 		if opts.Temperature > 0 {
 			temp = opts.Temperature
@@ -179,13 +195,16 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 		if opts.NumCtx > 0 {
 			numCtx = opts.NumCtx
 		}
+		if opts.Format != nil {
+			format = opts.Format
+		}
 	}
 
 	req := chatRequest{
 		Model:    model,
 		Messages: msgs,
 		Stream:   false,
-		Format:   "json",
+		Format:   format,
 		Options:  map[string]any{"temperature": temp, "num_ctx": numCtx},
 	}
 
@@ -245,12 +264,16 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message, tools []Tool, opts *Options, tokenWriter io.Writer) (Message, error) {
 	temp := DefaultTemperature
 	numCtx := defaultNumCtx
+	var format any = "json"
 	if opts != nil {
 		if opts.Temperature > 0 {
 			temp = opts.Temperature
 		}
 		if opts.NumCtx > 0 {
 			numCtx = opts.NumCtx
+		}
+		if opts.Format != nil {
+			format = opts.Format
 		}
 	}
 
@@ -259,14 +282,14 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		Messages []Message      `json:"messages"`
 		Tools    []Tool         `json:"tools"`
 		Stream   bool           `json:"stream"`
-		Format   string         `json:"format,omitempty"`
+		Format   any            `json:"format,omitempty"`
 		Options  map[string]any `json:"options,omitempty"`
 	}{
 		Model:    model,
 		Messages: msgs,
 		Tools:    tools,
 		Stream:   true,
-		Format:   "json",
+		Format:   format,
 		Options:  map[string]any{"temperature": temp, "num_ctx": numCtx, "think": false},
 	}
 
