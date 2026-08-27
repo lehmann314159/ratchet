@@ -47,6 +47,9 @@ func main() {
 		case "rewind-bead":
 			project.RunRewindBeadMain(os.Args[2:])
 			return
+		case "reanalyze-bead":
+			project.RunReanalyzeBeadMain(os.Args[2:])
+			return
 		case "start":
 			runStart(os.Args[2:])
 			return
