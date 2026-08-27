@@ -1,11 +1,14 @@
 package ollama
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -213,5 +216,72 @@ func TestExtractJSONControlCharsOutsideStringsUntouched(t *testing.T) {
 	}
 	if got != "{\n\t\"a\": 1,\n\t\"b\": 2\n}" {
 		t.Errorf("structural whitespace was rewritten: got %q", got)
+	}
+}
+
+// captureLogs swaps the default slog logger for one writing to a buffer,
+// restoring the previous default on test cleanup, and returns the buffer.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// TestChatWithToolsLogsEmptyTurnWithDoneReason reproduces a real
+// ADJUDICATE_NEXT_EXECUTION escalation (connect-four-v1, bead 47,
+// 2026-08-26): all 3 attempts stored a 0-byte raw_output with no logged
+// indication of why — json.Unmarshal on that empty string produced only a
+// generic "unexpected end of JSON input" many steps downstream. Confirms
+// ChatWithTools now logs done_reason at the point of occurrence whenever a
+// turn has neither content nor a tool call, so a future one is directly
+// diagnosable (e.g. "length" means the model ran out of context/output
+// budget mid-turn) instead of requiring after-the-fact inference.
+func TestChatWithToolsLogsEmptyTurnWithDoneReason(t *testing.T) {
+	buf := captureLogs(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"message":{"role":"assistant","content":"","tool_calls":null},"done":true,"done_reason":"length"}`+"\n")
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	tools := []Tool{{Type: "function", Function: ToolFunction{Name: "run_go_snippet"}}}
+	msg, err := c.ChatWithTools(context.Background(), "some-model", []Message{{Role: "user", Content: "hi"}}, tools, nil, nil)
+	if err != nil {
+		t.Fatalf("ChatWithTools: %v", err)
+	}
+	if msg.Content != "" || len(msg.ToolCalls) != 0 {
+		t.Fatalf("expected an empty turn, got content=%q toolCalls=%v", msg.Content, msg.ToolCalls)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "neither content nor a tool call") {
+		t.Errorf("expected empty-turn warning in log, got: %s", logged)
+	}
+	if !strings.Contains(logged, "done_reason=length") {
+		t.Errorf("expected done_reason=length in log, got: %s", logged)
+	}
+}
+
+// TestChatWithToolsNoWarningOnNormalTurn confirms a well-formed turn
+// (either real content or a real tool call) never logs the empty-turn
+// warning — it must only fire for the genuinely degenerate case.
+func TestChatWithToolsNoWarningOnNormalTurn(t *testing.T) {
+	buf := captureLogs(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"message":{"role":"assistant","content":"looks fine"},"done":true,"done_reason":"stop"}`+"\n")
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	tools := []Tool{{Type: "function", Function: ToolFunction{Name: "run_go_snippet"}}}
+	if _, err := c.ChatWithTools(context.Background(), "some-model", []Message{{Role: "user", Content: "hi"}}, tools, nil, nil); err != nil {
+		t.Fatalf("ChatWithTools: %v", err)
+	}
+	if strings.Contains(buf.String(), "neither content nor a tool call") {
+		t.Errorf("unexpected empty-turn warning for a normal turn: %s", buf.String())
 	}
 }

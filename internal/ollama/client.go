@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -104,9 +105,10 @@ type chatRequest struct {
 }
 
 type chatResponse struct {
-	Message Message `json:"message"`
-	Done    bool    `json:"done"`
-	Error   string  `json:"error,omitempty"`
+	Message    Message `json:"message"`
+	Done       bool    `json:"done"`
+	DoneReason string  `json:"done_reason,omitempty"`
+	Error      string  `json:"error,omitempty"`
 }
 
 // Warmup sends a trivial "hello" chat request to the given model with a
@@ -305,6 +307,7 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 
 	var contentSB strings.Builder
 	var toolCalls []ToolCall
+	var doneReason string
 	dec := json.NewDecoder(resp.Body)
 	for {
 		// Check context before each decode so a cancelled budget timer unblocks
@@ -333,12 +336,31 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 			toolCalls = append(toolCalls, chunk.Message.ToolCalls...)
 		}
 		if chunk.Done {
+			doneReason = chunk.DoneReason
 			break
 		}
 	}
 	// Terminate streamed content with a newline so subsequent trace lines start clean.
 	if tokenWriter != nil && contentSB.Len() > 0 {
 		fmt.Fprintln(tokenWriter)
+	}
+	// A turn with neither content nor a tool call is never useful to a
+	// caller — every ChatWithTools caller's loop (REFINE_TESTS_WRITE,
+	// REFINE_TESTS_CRITIQUE, ADJUDICATE_NEXT_EXECUTION) treats "no tool
+	// calls" as "the model gave its final answer" and reads Content as that
+	// answer. An empty answer here previously surfaced only indirectly, many
+	// steps downstream, as a bare "unexpected end of JSON input" from
+	// json.Unmarshal on an empty string — logging done_reason at the actual
+	// point of occurrence makes a future one directly diagnosable (e.g.
+	// "length" means the model ran out of context/output budget mid-turn,
+	// as opposed to some other cause) instead of requiring after-the-fact
+	// inference from an empty handoff_attempts row. Confirmed against a real
+	// ADJUDICATE_NEXT_EXECUTION escalation (connect-four-v1, bead 47,
+	// 2026-08-26): all 3 attempts stored a 0-byte raw_output with no
+	// indication of why.
+	if contentSB.Len() == 0 && len(toolCalls) == 0 {
+		slog.Warn("ChatWithTools: turn produced neither content nor a tool call",
+			"model", model, "done_reason", doneReason, "message_count", len(msgs))
 	}
 	return Message{
 		Role:      "assistant",
