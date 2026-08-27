@@ -128,14 +128,26 @@ func (s *server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 	// requeuing a job that's already been resolved or is currently 'running'
 	// under the orchestrator — without this, that write would race the
 	// orchestrator's own status writes with no coordination at all.
-	// For REFINE_TESTS jobs, increment refinement_cycle_id so the cap check resets.
+	//
+	// refinement_cycle_id is deliberately left untouched. It used to be
+	// bumped here on the theory that a fresh cycle number "resets the cap
+	// check" — but every REFINE_TESTS_JUDGE/WRITE cap check
+	// (refine_tests.go's RefineTestsJudge.Commit "revise" branch) computes
+	// its next cycle from the job's *own* cycle_id, so bumping it here only
+	// pushes that job further past the cap, never resets anything. Worse,
+	// REFINE_TESTS_JUDGE's critique-findings lookup (and REFINE_TESTS_WRITE's
+	// prior-JUDGE lookup) is scoped by exact cycle_id equality against a
+	// sibling job/row created earlier in the *same* cycle — bumping only the
+	// requeued job's own row orphans it from that sibling data, silently
+	// degrading to an empty lookup. Confirmed live (connect-four-v2 bead 56,
+	// 2026-08-27): requeuing an escalated REFINE_TESTS_JUDGE this way made it
+	// lose ADJUDICATE_NEXT_EXECUTION's injected re_refine diagnosis entirely,
+	// so it judged an empty critique section and wrongly approved a test file
+	// that was never actually revised. A plain requeue — same cycle, same
+	// job, same input, fresh model call — is both correct and sufficient.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE handoff_jobs
-		SET status = 'pending', updated_at = ?,
-		    refinement_cycle_id = CASE
-		        WHEN verb LIKE 'REFINE_TESTS%' THEN COALESCE(refinement_cycle_id, 1) + 1
-		        ELSE refinement_cycle_id
-		    END
+		SET status = 'pending', updated_at = ?
 		WHERE id = ? AND status = 'escalated'`, now, id)
 	if err != nil {
 		_ = tx.Rollback()
