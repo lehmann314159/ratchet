@@ -628,10 +628,12 @@ func (s *server) handleProjectReport(w http.ResponseWriter, r *http.Request) {
 // --- Rewind snapshots ---
 //
 // rewindBead (internal/project/rewind.go) preserves a bead's pre-rewind file
-// content under traces/bead-{id}-rewind-{n}/ before deleting tests or
+// content under traces/_bead-{id}-rewind-{n}/ before deleting tests or
 // stubbing impl files. These handlers list and display those snapshots —
 // on-disk only, not tracked in the DB, so listing means scanning the
-// project's traces/ directory rather than querying a table.
+// project's traces/ directory rather than querying a table. The leading
+// underscore keeps `go test ./...` from picking up the copied .go files as
+// a second package (see SnapshotBeadFiles's doc comment) — must match here.
 
 // listRewindSnapshots returns the sorted snapshot numbers found for beadID
 // under folder/traces, or nil if none exist (including if folder can't be read).
@@ -640,7 +642,7 @@ func listRewindSnapshots(folder string, beadID int64) []int {
 	if err != nil {
 		return nil
 	}
-	prefix := fmt.Sprintf("bead-%d-rewind-", beadID)
+	prefix := fmt.Sprintf("_bead-%d-rewind-", beadID)
 	var nums []int
 	for _, e := range entries {
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
@@ -704,7 +706,7 @@ func (s *server) handleBeadSnapshot(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bead not found", http.StatusNotFound)
 		return
 	}
-	dir := filepath.Join(folder, "traces", fmt.Sprintf("bead-%d-rewind-%d", id, n))
+	dir := filepath.Join(folder, "traces", fmt.Sprintf("_bead-%d-rewind-%d", id, n))
 	content, _ := renderSnapshotDir(dir)
 	s.render(w, s.tmpl.report, reportData{
 		baseData: s.base(r),

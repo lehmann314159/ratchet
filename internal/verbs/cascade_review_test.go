@@ -122,7 +122,7 @@ func TestEnqueueCascadeReview_AllUnchangedMarksProjectComplete(t *testing.T) {
 	// The project-complete report writes its own traces/project-report.md,
 	// but the unchanged bead itself must not have been snapshotted — that
 	// only happens for a bead resetBeadForRerun actually touches.
-	snapshotDir := filepath.Join(cascadeFolder, "traces", fmt.Sprintf("bead-%d-cascade-1", cascadeBeadID))
+	snapshotDir := filepath.Join(cascadeFolder, "traces", fmt.Sprintf("_bead-%d-cascade-1", cascadeBeadID))
 	if _, statErr := os.Stat(snapshotDir); !os.IsNotExist(statErr) {
 		t.Errorf("expected no cascade snapshot dir for the unchanged bead at %s", snapshotDir)
 	}
@@ -208,7 +208,7 @@ func TestEnqueueCascadeReview_ChangedBeadResetUnchangedLeftAlone(t *testing.T) {
 		t.Errorf("REFINE_TESTS_WRITE jobs for B2 = %d, want 1", n)
 	}
 
-	snapshotDir := filepath.Join(cascadeFolder, "traces", fmt.Sprintf("bead-%d-cascade-1", b2ID))
+	snapshotDir := filepath.Join(cascadeFolder, "traces", fmt.Sprintf("_bead-%d-cascade-1", b2ID))
 	if _, statErr := os.Stat(filepath.Join(snapshotDir, "b2_test.go")); statErr != nil {
 		t.Errorf("expected pre-reset snapshot of b2_test.go at %s: %v", snapshotDir, statErr)
 	}

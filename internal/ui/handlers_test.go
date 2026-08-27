@@ -502,7 +502,7 @@ func TestHandleBeadSnapshot_ServesSnapshotContent(t *testing.T) {
 	pid := seedProjectWithFolder(t, d, dir)
 	beadID := seedBead(t, d, pid, 300)
 
-	snapshotDir := filepath.Join(dir, "traces", fmt.Sprintf("bead-%d-rewind-1", beadID))
+	snapshotDir := filepath.Join(dir, "traces", fmt.Sprintf("_bead-%d-rewind-1", beadID))
 	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		t.Fatalf("mkdir snapshot dir: %v", err)
 	}
@@ -541,12 +541,12 @@ func TestHandleBeadSnapshot_UnknownBeadNotFound(t *testing.T) {
 
 // TestListRewindSnapshots_SortsNumbersAndIgnoresUnrelatedEntries confirms the
 // bead-detail page's snapshot list only picks up this bead's own
-// bead-{id}-rewind-{n} directories, sorted numerically, ignoring other
+// _bead-{id}-rewind-{n} directories, sorted numerically, ignoring other
 // beads' snapshots and non-directory entries.
 func TestListRewindSnapshots_SortsNumbersAndIgnoresUnrelatedEntries(t *testing.T) {
 	dir := t.TempDir()
 	tracesDir := filepath.Join(dir, "traces")
-	for _, name := range []string{"bead-5-rewind-2", "bead-5-rewind-1", "bead-5-rewind-10", "bead-6-rewind-1"} {
+	for _, name := range []string{"_bead-5-rewind-2", "_bead-5-rewind-1", "_bead-5-rewind-10", "_bead-6-rewind-1"} {
 		if err := os.MkdirAll(filepath.Join(tracesDir, name), 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", name, err)
 		}
