@@ -1,9 +1,68 @@
 package ollama
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
+
+// TestChatSetsJSONFormat confirms Chat() asks Ollama for grammar-constrained
+// JSON output — the fix for a real ADJUDICATE_NEXT_EXECUTION escalation
+// where a model quoted Go source with unescaped tabs/quotes inside a JSON
+// string field (see ExtractJSON's escapeRawControlCharsInStrings doc
+// comment and Chat()'s own doc comment for the full incident). Without
+// format:"json" in the request body, that malformed-output class is left to
+// chance; this locks in that every Chat() call asks for the constraint.
+func TestChatSetsJSONFormat(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &gotBody); err != nil {
+			t.Fatalf("unmarshal request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"message":{"role":"assistant","content":"{}"},"done":true}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	if _, err := c.Chat(context.Background(), "some-model", []Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if gotBody["format"] != "json" {
+		t.Errorf(`request body format = %v, want "json"`, gotBody["format"])
+	}
+}
+
+// TestChatWithToolsSetsJSONFormat is TestChatSetsJSONFormat's counterpart
+// for the tool-calling path (REFINE_TESTS_WRITE, REFINE_TESTS_CRITIQUE,
+// ADJUDICATE_NEXT_EXECUTION) — confirmed live that format:"json" and tools
+// coexist without Ollama refusing to emit a real tool call; this locks in
+// that the request actually carries the constraint.
+func TestChatWithToolsSetsJSONFormat(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &gotBody); err != nil {
+			t.Fatalf("unmarshal request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"message":{"role":"assistant","content":"{}"},"done":true}` + "\n"))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	tools := []Tool{{Type: "function", Function: ToolFunction{Name: "run_go_snippet"}}}
+	if _, err := c.ChatWithTools(context.Background(), "some-model", []Message{{Role: "user", Content: "hi"}}, tools, nil, nil); err != nil {
+		t.Fatalf("ChatWithTools: %v", err)
+	}
+	if gotBody["format"] != "json" {
+		t.Errorf(`request body format = %v, want "json"`, gotBody["format"])
+	}
+}
 
 func TestExtractJSONPlain(t *testing.T) {
 	got := ExtractJSON(`{"decision": "execute_as_is"}`)

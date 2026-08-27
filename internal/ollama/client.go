@@ -99,6 +99,7 @@ type chatRequest struct {
 	Model    string         `json:"model"`
 	Messages []Message      `json:"messages"`
 	Stream   bool           `json:"stream"`
+	Format   string         `json:"format,omitempty"`
 	Options  map[string]any `json:"options,omitempty"`
 }
 
@@ -146,6 +147,26 @@ func (c *Client) Warmup(ctx context.Context, model string) error {
 // across the thousands of tokens a large model generates, and these calls already
 // have a 30-minute client timeout. Observability for handoff verbs comes from the
 // structured outputs stored in handoff_attempts, not from a token stream.
+//
+// format:"json" is set on every call: Ollama enforces this via grammar-
+// constrained decoding, restricting the sampler to only JSON-syntactically-
+// valid token continuations at every step — including proper escaping of
+// quotes and control characters inside string values. Without it, a model
+// composing a long free-text reasoning field (routinely quoting Go source it
+// just examined via run_go_snippet) will drift into normal prose habits —
+// literal tabs for code indentation, a bare `"` for emphasis — that are
+// invalid inside a JSON string but otherwise read as perfectly natural
+// writing. Confirmed against a real ADJUDICATE_NEXT_EXECUTION escalation
+// (connect-four-v1, bead 47, 2026-08-26): 3 of 3 attempts had this exact
+// shape of defect, none of them a real judgment call, all three burning a
+// full retry cycle before exhausting tolerance and escalating. A downstream
+// text-repair pass was tried and rejected: it fixes simple isolated cases,
+// but a stray unescaped quote that happens to be followed by a comma is
+// structurally identical to a real string boundary, and guessing wrong
+// there risks silently accepting a wrong split and producing garbled field
+// values instead of just failing loudly and retrying. format:"json" avoids
+// the ambiguity entirely by making the malformed byte sequence unreachable
+// during generation, rather than trying to disambiguate it after the fact.
 func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *Options) (string, error) {
 	temp := DefaultTemperature
 	numCtx := defaultNumCtx
@@ -162,6 +183,7 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 		Model:    model,
 		Messages: msgs,
 		Stream:   false,
+		Format:   "json",
 		Options:  map[string]any{"temperature": temp, "num_ctx": numCtx},
 	}
 
@@ -207,6 +229,17 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 // they arrive if non-nil, giving real-time observability. The caller is
 // responsible for the multi-turn loop: executing tool calls and feeding
 // results back as tool messages.
+//
+// format:"json" is set here too, same rationale as Chat() — every caller of
+// this function (REFINE_TESTS_WRITE, REFINE_TESTS_CRITIQUE,
+// ADJUDICATE_NEXT_EXECUTION) eventually parses the final turn's Content as a
+// single JSON object via ollama.ExtractJSON, exactly like the plain Chat()
+// path, just reached through a tool-calling loop instead of a single
+// request. Confirmed live against this deployment's Ollama server that
+// format:"json" and tools coexist without interference: a request
+// combining both still returns a proper tool_calls entry with empty
+// Content, rather than the format constraint blocking or corrupting the
+// tool call.
 func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message, tools []Tool, opts *Options, tokenWriter io.Writer) (Message, error) {
 	temp := DefaultTemperature
 	numCtx := defaultNumCtx
@@ -224,12 +257,14 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		Messages []Message      `json:"messages"`
 		Tools    []Tool         `json:"tools"`
 		Stream   bool           `json:"stream"`
+		Format   string         `json:"format,omitempty"`
 		Options  map[string]any `json:"options,omitempty"`
 	}{
 		Model:    model,
 		Messages: msgs,
 		Tools:    tools,
 		Stream:   true,
+		Format:   "json",
 		Options:  map[string]any{"temperature": temp, "num_ctx": numCtx, "think": false},
 	}
 
