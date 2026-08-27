@@ -113,3 +113,46 @@ func TestExtractJSONArrayTopLevel(t *testing.T) {
 		t.Errorf("len(arr) = %d, want 3", len(arr))
 	}
 }
+
+// TestExtractJSONRawTabInString reproduces a real ADJUDICATE_NEXT_EXECUTION
+// escalation (connect-four-v1, bead 47, 2026-08-26): the model's
+// "reasoning" field quoted a Go function verbatim, tabs and all, without
+// escaping them — RFC 8259 requires every control character inside a JSON
+// string to be escaped, and Go's strict encoding/json rejected the raw tab
+// outright ("invalid character '\t' in string literal") on all 3 retries
+// before the job exhausted tolerance and escalated for what was actually a
+// purely mechanical formatting defect, never a real judgment call.
+func TestExtractJSONRawTabInString(t *testing.T) {
+	raw := "```json\n" +
+		"{\"reasoning\": \"func (g *Game) IsFull() bool {\\n\tfor r := 0; r < NumRows; r++ {\\n\t\treturn false\\n\t}\\n}\", \"decision\": \"execute_as_is\"}" +
+		"\n```"
+	got := ExtractJSON(raw)
+	var m map[string]any
+	if err := json.Unmarshal([]byte(got), &m); err != nil {
+		t.Fatalf("json.Unmarshal(%q): %v", got, err)
+	}
+	if m["decision"] != "execute_as_is" {
+		t.Errorf("decision = %v", m["decision"])
+	}
+}
+
+// TestExtractJSONControlCharsOutsideStringsUntouched confirms the raw-tab
+// fix only rewrites bytes inside JSON string literals — structural
+// whitespace between tokens (indentation, newlines separating array
+// elements) is legal JSON as-is and must be left exactly as the model wrote
+// it, not escaped into a literal "\t"/"\n" two-character sequence, which
+// would corrupt the JSON structure rather than fix it.
+func TestExtractJSONControlCharsOutsideStringsUntouched(t *testing.T) {
+	raw := "```json\n{\n\t\"a\": 1,\n\t\"b\": 2\n}\n```"
+	got := ExtractJSON(raw)
+	var m map[string]any
+	if err := json.Unmarshal([]byte(got), &m); err != nil {
+		t.Fatalf("json.Unmarshal(%q): %v", got, err)
+	}
+	if m["a"] != float64(1) || m["b"] != float64(2) {
+		t.Errorf("m = %v", m)
+	}
+	if got != "{\n\t\"a\": 1,\n\t\"b\": 2\n}" {
+		t.Errorf("structural whitespace was rewritten: got %q", got)
+	}
+}

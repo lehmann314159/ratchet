@@ -363,9 +363,74 @@ func ExtractJSON(raw string) string {
 	if end < 0 {
 		// Unterminated (truncated model output) — best effort: everything
 		// from the JSON start onward, at least free of leading fence noise.
-		return strings.TrimSpace(s[start:])
+		return escapeRawControlCharsInStrings(strings.TrimSpace(s[start:]))
 	}
-	return s[start : end+1]
+	return escapeRawControlCharsInStrings(s[start : end+1])
+}
+
+// escapeRawControlCharsInStrings escapes raw tab, newline, carriage-return,
+// and other sub-0x20 control bytes that appear *inside* JSON string
+// literals, leaving structural whitespace between tokens untouched.
+//
+// A model frequently quotes a Go code snippet verbatim inside a JSON string
+// field (a reasoning/explanation field citing the implementation it just
+// examined, e.g. via the mandatory run_go_snippet verification step) — real
+// Go source uses literal tabs for indentation, but RFC 8259 requires every
+// control character inside a JSON string to be escaped, and Go's strict
+// encoding/json rejects a raw one outright ("invalid character '\t' in
+// string literal"). Confirmed against a real ADJUDICATE_NEXT_EXECUTION
+// escalation, 2026-08-26 (connect-four-v1, bead 47): the model's own
+// "reasoning" field mixed correctly-escaped "\n" sequences with literal,
+// unescaped tab bytes from a quoted `IsFull` implementation in the same
+// string, three attempts in a row, before it exhausted retry tolerance and
+// escalated for a purely mechanical formatting defect — never a real
+// judgment call for a human to review. Applied here, in ExtractJSON itself,
+// so every JSON-parsing verb gets the fix for free rather than requiring a
+// per-verb patch; every verb's Validate already funnels through ExtractJSON
+// before json.Unmarshal.
+//
+// Only bytes encountered while inString is true are rewritten — the same
+// string/escape tracking matchingJSONEnd already uses above, so structural
+// JSON whitespace (indentation between keys, newlines between array
+// elements) is left exactly as the model wrote it.
+func escapeRawControlCharsInStrings(s string) string {
+	var sb strings.Builder
+	inString := false
+	escaped := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !inString {
+			if c == '"' {
+				inString = true
+			}
+			sb.WriteByte(c)
+			continue
+		}
+		if escaped {
+			escaped = false
+			sb.WriteByte(c)
+			continue
+		}
+		switch {
+		case c == '\\':
+			escaped = true
+			sb.WriteByte(c)
+		case c == '"':
+			inString = false
+			sb.WriteByte(c)
+		case c == '\t':
+			sb.WriteString(`\t`)
+		case c == '\n':
+			sb.WriteString(`\n`)
+		case c == '\r':
+			sb.WriteString(`\r`)
+		case c < 0x20:
+			fmt.Fprintf(&sb, `\u%04x`, c)
+		default:
+			sb.WriteByte(c)
+		}
+	}
+	return sb.String()
 }
 
 // indexOfJSONStart returns the byte index of the first '{' or '[' in s, or -1.
