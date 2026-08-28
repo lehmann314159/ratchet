@@ -94,7 +94,7 @@ func queryBeads(ctx context.Context, d *db.DB, projectID int64) ([]BeadRow, erro
 		       COALESCE(b.execution_attempts_override, p.max_execution_attempts),
 		       (SELECT COUNT(*) FROM executions e WHERE e.bead_id = b.id AND e.infra_failure = 1),
 		       COALESCE((
-		         SELECT CAST((julianday('now') - julianday(e2.started_at)) * 86400 AS INTEGER)
+		         SELECT CAST(ROUND((julianday('now') - julianday(e2.started_at)) * 86400) AS INTEGER)
 		         FROM executions e2
 		         WHERE e2.bead_id = b.id AND e2.termination_cause IS NULL
 		         ORDER BY e2.started_at DESC LIMIT 1
@@ -174,7 +174,7 @@ func queryRecentJobs(ctx context.Context, d *db.DB, projectID int64) ([]JobRow, 
 		       COALESCE(json_extract(br.full_text, '$.title'), ''),
 		       hj.status, hj.updated_at,
 		       CASE WHEN hj.verb = 'EXECUTE_BEAD' THEN (
-		           SELECT CAST((julianday(COALESCE(e.ended_at, datetime('now'))) - julianday(e.started_at)) * 86400 AS INTEGER)
+		           SELECT CAST(ROUND((julianday(COALESCE(e.ended_at, datetime('now'))) - julianday(e.started_at)) * 86400) AS INTEGER)
 		           FROM executions e
 		           WHERE e.bead_id = hj.bead_id
 		             AND (SELECT COUNT(*) FROM executions e2 WHERE e2.bead_id = e.bead_id AND e2.started_at <= e.started_at) - 1
@@ -182,11 +182,11 @@ func queryRecentJobs(ctx context.Context, d *db.DB, projectID int64) ([]JobRow, 
 		                    WHERE hj2.bead_id = hj.bead_id AND hj2.verb = 'EXECUTE_BEAD' AND hj2.id < hj.id)
 		       ) ELSE (
 		           (SELECT CAST(COALESCE(SUM(
-		               (julianday(ha.ended_at) - julianday(ha.created_at)) * 86400
+		               ROUND((julianday(ha.ended_at) - julianday(ha.created_at)) * 86400)
 		           ), 0) AS INTEGER)
 		            FROM handoff_attempts ha WHERE ha.job_id = hj.id)
 		           + CASE WHEN hj.status = 'running'
-		                  THEN CAST((julianday('now') - julianday(hj.updated_at)) * 86400 AS INTEGER)
+		                  THEN CAST(ROUND((julianday('now') - julianday(hj.updated_at)) * 86400) AS INTEGER)
 		                  ELSE 0 END
 		       ) END
 		FROM handoff_jobs hj
@@ -336,7 +336,7 @@ func queryBeadDetail(ctx context.Context, d *db.DB, beadID int64) (*beadDetailDa
 		       ROW_NUMBER() OVER (ORDER BY e.started_at) AS attempt_num,
 		       COALESCE(e.termination_cause, 'running'),
 		       br.execution_budget,
-		       CAST((julianday(COALESCE(e.ended_at, 'now')) - julianday(e.started_at)) * 86400 AS INTEGER),
+		       CAST(ROUND((julianday(COALESCE(e.ended_at, 'now')) - julianday(e.started_at)) * 86400) AS INTEGER),
 		       COALESCE(e.monitor_fired, 0),
 		       e.started_at,
 		       COALESCE(adj.decision, ''),
