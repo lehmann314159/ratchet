@@ -130,15 +130,26 @@ func queryBeads(ctx context.Context, d *db.DB, projectID int64) ([]BeadRow, erro
 }
 
 func queryRecentJobs(ctx context.Context, d *db.DB, projectID int64) ([]JobRow, error) {
+	// Elapsed is summed from handoff_attempts' own created_at/ended_at
+	// (actual dispatch-to-completion windows), not hj.created_at/updated_at.
+	// The job row's created_at is set at *enqueue* time, which can sit in
+	// the pending queue arbitrarily long — most visibly across a
+	// pause-after-reconcile/verb/bead gap, where a job can be created
+	// minutes before a human even reviews the pause, then sit for however
+	// long the review takes before resume-project dispatches it. That
+	// queue-wait was previously indistinguishable from real model-call
+	// time (connect-four-v3 bead 59, 2026-08-27: REFINE_TESTS_WRITE showed
+	// as taking ~76 minutes; the actual call was ~19). A running attempt
+	// (ended_at IS NULL) contributes up to now(); a job with zero attempts
+	// yet (still pending) correctly sums to 0.
 	rows, err := d.QueryContext(ctx, `
 		SELECT hj.id, hj.verb, hj.bead_id,
 		       COALESCE(json_extract(br.full_text, '$.title'), ''),
 		       hj.status, hj.updated_at,
-		       CAST((julianday(CASE
-		           WHEN hj.status IN ('complete','escalated') THEN hj.updated_at
-		           WHEN hj.status = 'running' THEN datetime('now')
-		           ELSE NULL
-		       END) - julianday(hj.created_at)) * 86400 AS INTEGER)
+		       (SELECT CAST(COALESCE(SUM(
+		           (julianday(COALESCE(ha.ended_at, datetime('now'))) - julianday(ha.created_at)) * 86400
+		       ), 0) AS INTEGER)
+		        FROM handoff_attempts ha WHERE ha.job_id = hj.id)
 		FROM handoff_jobs hj
 		LEFT JOIN beads b ON b.id = hj.bead_id
 		LEFT JOIN bead_revisions br ON br.id = b.current_revision_id
