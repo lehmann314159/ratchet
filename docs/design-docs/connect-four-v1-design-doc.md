@@ -604,6 +604,18 @@ board and exact expected value; do not construct a different example.
   six scenarios listed verbatim in Domain-Specific Test Scenarios above
   (four win cases, two non-win cases). Do not let this bead's spec
   substitute different, unverified coordinates.
+- **Pin the exact full-board draw grid to the `game` bead, literally, not
+  by reference**: scenario 7 in Domain-Specific Test Scenarios above (the
+  `RRRYYYR`/`YYYRRRY` 6×7 grid). A spec that says "use the exact board
+  provided in the design document" instead of reproducing the grid itself
+  forces the executing bead to reconstruct it from scratch with no way to
+  verify the result — confirmed live (connect-four-v5 bead 71,
+  2026-08-28): DECOMPOSE_SPEC referenced the board instead of embedding it,
+  `REFINE_TESTS_WRITE` invented its own fill pattern that turned out to
+  contain an accidental four-in-a-row, and the bead burned all 5
+  `REFINE_TESTS` cycles failing to self-correct before escalating on the
+  cycle cap. Same failure class as the `evaluate` worked example above —
+  do not let this bead's spec keep only a pointer to the grid.
 - **Integration bead — one bounded scenario, not "test a full game":**
   start a new game; send one `POST /drop` with `col=3`; verify the
   resulting board has exactly 2 non-empty cells total (1 Red from the
