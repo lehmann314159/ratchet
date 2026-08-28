@@ -1084,10 +1084,83 @@ func (h *RefineTestsJudge) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	userMsg := "## Test File\n\n" + strings.TrimSpace(currentTestContent)
 	userMsg += "\n\n## Critique Findings\n\n" + critiqueRaw
 
-	return oc.Chat(ctx, model, []ollama.Message{
+	messages := []ollama.Message{
 		{Role: "system", Content: refineTestsJudgeSystemPrompt},
 		{Role: "user", Content: userMsg},
-	}, &ollama.Options{Format: refineTestsJudgeFormatSchema})
+	}
+
+	// Mandatory run_go_snippet verification, same rationale and enforcement
+	// shape as ADJUDICATE_NEXT_EXECUTION's (see its Run for the fuller
+	// incident history this class of fix closes) — but JUDGE previously had
+	// zero tool access at all and decided purely from prose, and unlike
+	// ADJUDICATE's soft nudge-then-finalize-anyway pattern, this is a hard
+	// requirement: never calling the tool is a Run failure (retried via the
+	// normal strike mechanism), not a silently-accepted decision with only a
+	// log warning. Confirmed live (tictactoe-v1 bead 81, 2026-08-28): with
+	// no verification available, JUDGE confidently asserted "HTML escaping
+	// of the apostrophe is not required in this context" — false, and a
+	// direct reversal of ADJUDICATE's own earlier, correct, verified
+	// diagnosis of the same test — sending the bead back into the exact
+	// failure it had just been fixed out of. Every JUDGE decision rests on
+	// some claim about what Go/the stdlib actually does with the test's
+	// assertions; requiring verification unconditionally (not gated on
+	// decision or on the model's own sense of whether this call needs it)
+	// is what closes that gap, mirroring ADJUDICATE's own unconditional
+	// (not decision-gated) rationale for the identical requirement.
+	//
+	// Confirmed live before wiring this in that format (a JSON Schema, not
+	// the loose "json" string) coexists with tool calls the same way the
+	// loose string already does — a tool-call-only turn still returns a
+	// proper tool_calls entry with empty Content, not a schema-violation
+	// error, so the mandatory-summary schema fix (refineTestsJudgeFormatSchema)
+	// doesn't need to be dropped to add this.
+	var lastContent string
+	usedTool := false
+	for turn := 1; turn <= snippetVerificationTurns; turn++ {
+		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetTool},
+			&ollama.Options{Format: refineTestsJudgeFormatSchema}, nil)
+		if toolErr != nil {
+			return "", toolErr
+		}
+		if strings.TrimSpace(msg.Content) != "" {
+			lastContent = msg.Content
+		}
+		if len(msg.ToolCalls) == 0 {
+			if usedTool {
+				return msg.Content, nil
+			}
+			if turn == snippetVerificationTurns {
+				return "", fmt.Errorf("REFINE_TESTS_JUDGE finalized without ever calling run_go_snippet "+
+					"to verify a runtime-behavior claim, after %d prompted turns", snippetVerificationTurns)
+			}
+			messages = append(messages, msg)
+			messages = append(messages, ollama.Message{Role: "user", Content: "Before giving your final " +
+				"decision, call run_go_snippet at least once to verify a specific claim about Go/stdlib " +
+				"runtime behavior your reasoning depends on — even if you feel confident. Confidence is " +
+				"not evidence; that gap is exactly what this tool exists to close. Then give your final " +
+				"JSON decision."})
+			continue
+		}
+
+		messages = append(messages, msg)
+		for _, tc := range msg.ToolCalls {
+			var result string
+			if tc.Function.Name != "run_go_snippet" {
+				result = fmt.Sprintf("error: unknown tool %q — only run_go_snippet is available", tc.Function.Name)
+			} else if src, _ := tc.Function.Arguments["source"].(string); strings.TrimSpace(src) == "" {
+				result = "error: source is empty"
+			} else if out, rerr := runGoSnippet(ctx, src); rerr != nil {
+				result = fmt.Sprintf("error: %v", rerr)
+			} else if out == "" {
+				result = "(snippet ran with no output — add a print statement to see a result)"
+			} else {
+				result = out
+			}
+			usedTool = true
+			messages = append(messages, ollama.Message{Role: "tool", Content: result})
+		}
+	}
+	return lastContent, nil
 }
 
 // refineTestsJudgeFormatSchema grammar-constrains REFINE_TESTS_JUDGE's
