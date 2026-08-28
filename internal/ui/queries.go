@@ -139,17 +139,32 @@ func queryRecentJobs(ctx context.Context, d *db.DB, projectID int64) ([]JobRow, 
 	// long the review takes before resume-project dispatches it. That
 	// queue-wait was previously indistinguishable from real model-call
 	// time (connect-four-v3 bead 59, 2026-08-27: REFINE_TESTS_WRITE showed
-	// as taking ~76 minutes; the actual call was ~19). A running attempt
-	// (ended_at IS NULL) contributes up to now(); a job with zero attempts
-	// yet (still pending) correctly sums to 0.
+	// as taking ~76 minutes; the actual call was ~19).
+	//
+	// handoff_attempts rows are only inserted once an attempt *completes*
+	// (dispatch.go/queue.go's commitAttempt-style writes) — there is never a
+	// row with ended_at IS NULL representing an in-flight call. So a job
+	// still on its first attempt has zero attempt rows and the sum above
+	// alone would show 0 the entire time it's actually running (caught live,
+	// connect-four-v4 bead RECONCILE_DECOMPOSITION, 2026-08-27 — the very
+	// first thing checked after deploying the sum-based fix). For a
+	// currently-'running' job, add now() - hj.updated_at: queue.go's
+	// dispatch sets status='running' *and* bumps updated_at in the same
+	// write, on every dispatch including retries, so it always marks the
+	// start of whichever attempt is currently in flight — on top of the sum
+	// of whatever earlier attempts already completed and recorded their own
+	// real duration.
 	rows, err := d.QueryContext(ctx, `
 		SELECT hj.id, hj.verb, hj.bead_id,
 		       COALESCE(json_extract(br.full_text, '$.title'), ''),
 		       hj.status, hj.updated_at,
 		       (SELECT CAST(COALESCE(SUM(
-		           (julianday(COALESCE(ha.ended_at, datetime('now'))) - julianday(ha.created_at)) * 86400
+		           (julianday(ha.ended_at) - julianday(ha.created_at)) * 86400
 		       ), 0) AS INTEGER)
 		        FROM handoff_attempts ha WHERE ha.job_id = hj.id)
+		       + CASE WHEN hj.status = 'running'
+		              THEN CAST((julianday('now') - julianday(hj.updated_at)) * 86400 AS INTEGER)
+		              ELSE 0 END
 		FROM handoff_jobs hj
 		LEFT JOIN beads b ON b.id = hj.bead_id
 		LEFT JOIN bead_revisions br ON br.id = b.current_revision_id
