@@ -33,10 +33,24 @@ type Client struct {
 	httpClient *http.Client
 }
 
+// handoffClientTimeout bounds every handoff verb's HTTP client (everything
+// except EXECUTE_BEAD/MONITOR_EXECUTION, which use NewUnbounded — see its
+// doc comment for why those two are exempt). This is the only thing
+// standing between a genuinely stalled Ollama request and a handoff verb
+// hanging the (single-threaded) orchestrator forever, so it should stay
+// bounded, not be removed — but 30 minutes turned out to be too tight for
+// a legitimately slow, not stalled, multi-turn tool-calling loop: REFINE_TESTS_CRITIQUE
+// hit this for real twice (connect-four-v5 and tictactoe-v1, both
+// 2026-08-28), each time burning ~37 minutes on an attempt that was still
+// making progress when the client cut it off, then repeating the same
+// wait on a full retry. Raised from 30 to 60 minutes so a legitimately
+// slow attempt usually finishes instead of being thrown away and redone.
+const handoffClientTimeout = 60 * time.Minute
+
 func New(baseURL string) *Client {
 	return &Client{
 		BaseURL:    baseURL,
-		httpClient: &http.Client{Timeout: 30 * time.Minute},
+		httpClient: &http.Client{Timeout: handoffClientTimeout},
 	}
 }
 

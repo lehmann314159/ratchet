@@ -10,7 +10,22 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+// TestNewUsesHourLongTimeout locks in the bump from 30 to 60 minutes
+// (2026-08-28, connect-four-v5 and tictactoe-v1 both hit REFINE_TESTS_CRITIQUE
+// exceeding the old 30-minute bound on a legitimately slow, not stalled,
+// tool-calling loop). The timeout must stay bounded, not become 0
+// (unbounded) — see handoffClientTimeout's doc comment for why every
+// handoff verb except EXECUTE_BEAD/MONITOR_EXECUTION needs this as its
+// only protection against a genuinely stalled request.
+func TestNewUsesHourLongTimeout(t *testing.T) {
+	c := New("http://example.invalid")
+	if got := c.httpClient.Timeout; got != time.Hour {
+		t.Errorf("New() httpClient.Timeout = %v, want 1h", got)
+	}
+}
 
 // TestChatSetsJSONFormat confirms Chat() asks Ollama for grammar-constrained
 // JSON output — the fix for a real ADJUDICATE_NEXT_EXECUTION escalation
