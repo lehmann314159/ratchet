@@ -207,6 +207,19 @@ build failures.
 it must appear here. "Obvious" types are not exempt — write `type Color int` and its
 constants even if they seem self-evident.
 
+**Include unexported helpers too, if a test must call them directly.** "Exported" above is
+the common case, not the boundary that matters — SURVEY only stubs what's declared in this
+section, regardless of export status, and a helper you never listed here simply doesn't
+exist in the scaffold. This bites hardest with Domain-Specific Test Scenarios' worked
+examples: a worked example that exercises internal scoring/evaluation logic directly (rather
+than only through an exported entry point) needs that internal function declared here, or
+the bead's own test file won't compile against the scaffold — `undefined: <helper>` — no
+matter how correctly the test itself is written. Confirmed live (Connect Four, 2026-08-27):
+`evaluate` appeared in the minimax pseudocode and had an exact worked-example expected value
+in Domain-Specific Test Scenarios, but wasn't declared in this section (unlike every other
+function, including one other unexported one) — SURVEY never stubbed it, and every
+`REFINE_TESTS_WRITE` attempt against the resulting `TestEvaluate` failed identically.
+
 **Include package-level variables.** If a bead exports a package-level variable that other
 beads consume (e.g., `var Templates *template.Template`), include it. This prevents name
 drift across beads.
