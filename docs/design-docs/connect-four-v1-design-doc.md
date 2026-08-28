@@ -240,7 +240,9 @@ must happen inside this one call, in this exact order:
 
    This ordering matters: a move that both completes four-in-a-row *and*
    fills the last empty cell must be scored as a win (step 5), never as a
-   draw — step 6 only runs when step 5 found no winner.
+   draw — step 6 only runs when step 5 found no winner. See Domain-Specific
+   Test Scenarios' scenario 7 for the required "drawing move" test's exact
+   board — a genuine draw board is easy to construct wrong.
 
 **`(*Game).CheckWinner() Cell`** — pure read; does not modify `g`. Scans the
 *entire* board for any four-in-a-row (see Domain-Specific Test Scenarios for
@@ -510,6 +512,35 @@ these exact positions (mechanically verified, not hand-derived):
    and Yellow at `(5,3)`. Three Red in a row, but the fourth cell of that
    window is the opponent's color, not empty. `CheckWinner()` must return
    `Empty`.
+7. **Full board, no winner (draw) — required for `DropPiece`'s "drawing
+   move" test:** a naive fill (e.g. one color repeated, or "every cell but
+   one is Red") is virtually guaranteed to contain an accidental
+   four-in-a-row long before the board is full — `CheckWinner` would then
+   correctly return a winner instead of `Empty`, making a draw test
+   unsatisfiable by any correct implementation, no matter how it's written.
+   This happened for real, twice (connect-four-v1 bead 47, connect-four-v3
+   bead 59, 2026-08-27) before being caught — use this exact board instead,
+   mechanically verified against the window enumeration above to contain
+   *zero* four-in-a-row windows anywhere. Row 0 (top) to row 5 (bottom),
+   column 0 to 6 left to right, `R`=Red, `Y`=Yellow:
+   ```
+   RRRYYYR
+   YYYRRRY
+   RRRYYYR
+   YYYRRRY
+   RRRYYYR
+   YYYRRRY
+   ```
+   Construct the test as: pre-fill every cell exactly as shown *except*
+   `(0,0)`, which stays `Empty`; set `Turn = Red` (so the dropped piece
+   matches this board's own `(0,0) = Red`, keeping the completed board
+   identical to the verified one above); call `DropPiece(0)`. Column 0's
+   only empty cell is `(0,0)` (rows 1–5 are already filled), so the piece
+   lands there per the gravity rule. `CheckWinner()` must return `Empty`
+   (verified over the complete 42-cell board, `(0,0)` included), so
+   `IsFull()` becomes `true` and `Draw` must be set to `true`; `Turn` must
+   stay `Red` (the draw branch does not flip it). Do not construct a
+   different full board for this test.
 
 **Required worked example for the `ai` bead's `evaluate` tests** — see the
 worked example already stated in full in the Behavioral Specification
