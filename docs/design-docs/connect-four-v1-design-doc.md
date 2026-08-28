@@ -154,6 +154,7 @@ func (g *Game) ValidMoves() []int
 const SearchDepth = 4
 
 func BestMove(g *Game) (int, error)
+func evaluate(board [NumRows][NumCols]Cell, aiColor Cell) int
 
 type GameView struct {
     Board    [NumRows][NumCols]string // "red", "yellow", or "empty" per cell — same row/col orientation as Game.Board
@@ -189,6 +190,7 @@ var _ func(*Game) Cell = (*Game).CheckWinner
 var _ func(*Game) bool = (*Game).IsFull
 var _ func(*Game) []int = (*Game).ValidMoves
 var _ func(*Game) (int, error) = BestMove
+var _ func([NumRows][NumCols]Cell, Cell) int = evaluate
 var _ func(*Game) GameView = toView
 var _ func(http.ResponseWriter, *http.Request) = HandleIndex
 var _ func(http.ResponseWriter, *http.Request) = HandleDrop
