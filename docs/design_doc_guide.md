@@ -353,6 +353,16 @@ back for those alone. A Decomposition Notes line is reliably carried into the na
 bead's spec near-verbatim; prose in Behavioral Specification or Domain-Specific Test
 Scenarios is not.
 
+**Don't rely on remembering to add the pin.** This exact rule was written down here on
+2026-07-19 and still got missed live on 2026-08-28, in a design doc whose author already
+knew the rule — a worked example (a full-board draw grid) was added to Domain-Specific
+Test Scenarios without its matching Decomposition Notes pin, and the resulting escalation
+cost a full bead's worth of REFINE_TESTS cycles before being caught. Run
+`go run ./cmd/checkdesigndoc --doc <path>` after editing either section — it lists every
+worked example found in Domain-Specific Test Scenarios next to every "Pin ..." bullet
+found in Decomposition Notes, so a missing pin is visible in the counts rather than
+something to catch by re-reading the whole doc from memory.
+
 **Coordinate system mapping.** If the domain uses 0-indexed coordinates that differ from
 the conventional human notation (rank 0 = rank 1 in chess, row 0 = top in image
 processing), include an explicit mapping table in this section or in the Overview. Do not
