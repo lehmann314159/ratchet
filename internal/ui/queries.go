@@ -154,17 +154,41 @@ func queryRecentJobs(ctx context.Context, d *db.DB, projectID int64) ([]JobRow, 
 	// start of whichever attempt is currently in flight — on top of the sum
 	// of whatever earlier attempts already completed and recorded their own
 	// real duration.
+	// EXECUTE_BEAD is a different beast from every other verb: it never
+	// writes to handoff_attempts at all (confirmed live, connect-four-v5
+	// bead 71, 2026-08-28 — showed as "-" in the UI, not merely inflated).
+	// Its actual timing lives in executions (started_at/ended_at), the same
+	// table queryBeadDetail already reads for the bead-detail page. There's
+	// no direct FK from a handoff_jobs row to its executions row, but both
+	// are created in strict 1:1 lockstep per bead (one EXECUTE_BEAD
+	// dispatch, one new executions row), so position matches position: an
+	// execution's 0-based rank within its bead (by started_at) is matched
+	// against how many earlier EXECUTE_BEAD jobs that bead already had (by
+	// id) — the same positional correlation queryBeadDetail's own
+	// ROW_NUMBER() OVER (ORDER BY e.started_at) already relies on. This has
+	// to be a rank comparison in WHERE, not LIMIT/OFFSET — SQLite rejects a
+	// correlated subquery inside LIMIT/OFFSET (caught immediately when
+	// verifying this fix against live data before deploying it).
 	rows, err := d.QueryContext(ctx, `
 		SELECT hj.id, hj.verb, hj.bead_id,
 		       COALESCE(json_extract(br.full_text, '$.title'), ''),
 		       hj.status, hj.updated_at,
-		       (SELECT CAST(COALESCE(SUM(
-		           (julianday(ha.ended_at) - julianday(ha.created_at)) * 86400
-		       ), 0) AS INTEGER)
-		        FROM handoff_attempts ha WHERE ha.job_id = hj.id)
-		       + CASE WHEN hj.status = 'running'
-		              THEN CAST((julianday('now') - julianday(hj.updated_at)) * 86400 AS INTEGER)
-		              ELSE 0 END
+		       CASE WHEN hj.verb = 'EXECUTE_BEAD' THEN (
+		           SELECT CAST((julianday(COALESCE(e.ended_at, datetime('now'))) - julianday(e.started_at)) * 86400 AS INTEGER)
+		           FROM executions e
+		           WHERE e.bead_id = hj.bead_id
+		             AND (SELECT COUNT(*) FROM executions e2 WHERE e2.bead_id = e.bead_id AND e2.started_at <= e.started_at) - 1
+		                 = (SELECT COUNT(*) FROM handoff_jobs hj2
+		                    WHERE hj2.bead_id = hj.bead_id AND hj2.verb = 'EXECUTE_BEAD' AND hj2.id < hj.id)
+		       ) ELSE (
+		           (SELECT CAST(COALESCE(SUM(
+		               (julianday(ha.ended_at) - julianday(ha.created_at)) * 86400
+		           ), 0) AS INTEGER)
+		            FROM handoff_attempts ha WHERE ha.job_id = hj.id)
+		           + CASE WHEN hj.status = 'running'
+		                  THEN CAST((julianday('now') - julianday(hj.updated_at)) * 86400 AS INTEGER)
+		                  ELSE 0 END
+		       ) END
 		FROM handoff_jobs hj
 		LEFT JOIN beads b ON b.id = hj.bead_id
 		LEFT JOIN bead_revisions br ON br.id = b.current_revision_id
