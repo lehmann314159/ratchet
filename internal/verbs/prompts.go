@@ -204,6 +204,14 @@ func auditDecompositionSystemPrompt(lang string) string {
 			"   Also flag if the exit criterion starts a server on a fixed port (e.g. :8080) rather than\n" +
 			"   using `net/http/httptest.NewServer` — a fixed port may collide with the execution\n" +
 			"   environment and cause the criterion to silently verify the wrong server.\n" +
+			"   Also flag any exit criterion that wraps a shell command in an external `timeout` command\n" +
+			"   (e.g. `timeout 5s bash -c '...'`) — the harness already enforces its own 60-second timeout\n" +
+			"   per criterion (internal/execcheck/verify.go), independent of the shell, and `timeout` is not\n" +
+			"   guaranteed to be installed. Confirmed live (tictactoe-v1 bead \"main-entry\", 2026-08-29): a\n" +
+			"   `timeout`-wrapped criterion failed with \"command not found\" before the actual check inside\n" +
+			"   it ever ran, on every execution attempt, despite the implementation being correct every\n" +
+			"   time — this must be flagged even on a re-audit of an already-existing Bead whose exit\n" +
+			"   criterion previously looked sufficient (has a runtime check) but is actually broken this way.\n" +
 			"   Integration Bead clobber risk: if an integration Bead's output_files includes a *_test.go\n" +
 			"   file that already appears in a prior Bead's output_files, flag it — integration test files\n" +
 			"   must be new and dedicated; sharing a *_test.go with a prior Bead risks overwriting\n" +
