@@ -1,8 +1,9 @@
 # Design doc drafting + rigorizing tool — design
 
-Status: **combined design pass, ready for implementation review.** Supersedes the
-2026-08-29 planning sketch (git 2338750). Written 2026-08-29. Nothing implemented yet —
-this document is the design; implementation follows sign-off, phase by phase.
+Status: **built, 2026-08-29.** All three phases implemented (commits `8427cc4`,
+`344aa0f`, plus the two skill files). Supersedes the 2026-08-29 planning sketch
+(git `2338750`). Not yet exercised on a real prose→draft→check cycle — see the last
+section.
 
 ## Motivation
 
@@ -74,7 +75,16 @@ authoritative structure.
 
 ---
 
-## Phase 1 — `draft-design-doc` skill
+## Phase 1 — `draft-design-doc` skill — BUILT
+
+Built as `.claude/skills/draft-design-doc.md`, matching the design below. Drafting is
+inline; the three hard rules (script-verified worked examples with HTML-comment
+citations, gaps to `## Open Questions` never silently filled, Pin bullets for
+load-bearing literals) are stated as requirements the skill satisfies by doing them,
+not by judging necessity. Open Questions handling is the hybrid: the written section
+always persists; interactively the skill also batches them through `AskUserQuestion`
+and folds answers back. The skill runs `checkdesigndoc` itself before handoff and
+chains into `check-design-doc`.
 
 **Input.** Prose describing the project — a file path (`$1`) or, if none given, ask the
 user to paste it or point at a file. Accepts anything from a few paragraphs to a rough
@@ -190,10 +200,11 @@ Per-fixture flag ceilings: checkers 4, kafka-sim 4, exprvm/exprvm-web/goban 1, t
 
 ---
 
-## Phase 3 — `check-design-doc` skill (orchestrator)
+## Phase 3 — `check-design-doc` skill (orchestrator) — BUILT
 
-One skill, run on any design doc (drafted by Phase 1 or hand-written), that executes
-the full sign-off sequence and presents a single consolidated verdict.
+Built as `.claude/skills/check-design-doc.md`, matching the sequence below. Run on any
+design doc (drafted by Phase 1 or hand-written), it executes the full sign-off sequence
+and presents a single consolidated verdict.
 
 **Args.** `$1` — path to the doc (required; ask if missing).
 
@@ -233,27 +244,26 @@ at the end when run interactively; that is convenience wiring, not a merge.
 
 ---
 
-## Implementation sequence
+## Implementation sequence — ALL DONE
 
-| Step | Work | Depends on |
-|------|------|-----------|
-| A | Reconcile `design_doc_template.md` with the guide's 7 sections | — |
-| B | Extend `cmd/checkdesigndoc`: `--checks` flag, 5 ambiguity classes, validate against all 17 real docs, tune | A |
-| C | `draft-design-doc` skill | A, B (runs `checkdesigndoc` itself) |
-| D | `check-design-doc` orchestrator skill | B, C |
-| E | Update `docs/design_doc_ambiguity_checklist.md` ("mechanical checker: built"), `.claude/skills/design-doc-ambiguity-check.md` (drop "no mechanical checker exists"), `docs/proposed-ideas.md` §2 | B, C, D |
+| Step | Work | Status |
+|------|------|--------|
+| A | Reconcile `design_doc_template.md` with the guide's 7 sections | done (commit `8427cc4`) |
+| B | Extend `cmd/checkdesigndoc`: `--checks` flag, 5 ambiguity classes, validate + tune against all 17 real docs | done (commit `344aa0f`) |
+| C | `draft-design-doc` skill | done — `.claude/skills/draft-design-doc.md` |
+| D | `check-design-doc` orchestrator skill | done — `.claude/skills/check-design-doc.md` |
+| E | Update the checklist doc, `design-doc-ambiguity-check` skill notes, `proposed-ideas.md` §2 | done (with B and D) |
 
-Per `feedback_propose_before_apply`, steps B–D each get a quick design confirmation
-before code lands, but this document covers the shape of all three. Steps are small
-enough to land as separate commits on this branch.
+## Decisions taken (were open at sign-off, 2026-08-29)
 
-## Open decisions for the user
+1. **Mechanical scan merged into `cmd/checkdesigndoc`** — not a second binary.
+2. **Two skills** (`draft-design-doc`, `check-design-doc`), check auto-chained from
+   draft — not one merged skill.
+3. **Drifted template fixed** as step A.
+4. **Implemented A→E in one thread** — framework work, no live project running.
 
-1. **Merge vs. separate binary** for the mechanical scan — this design assumes *merge
-   into `cmd/checkdesigndoc`*. (Recommended.)
-2. **One orchestrator vs. two skills** — this design assumes *two skills, check
-   auto-chained from draft*. (Recommended.)
-3. **Fix the drifted template now** (step A) — this design assumes *yes*. (Recommended.)
-4. **After sign-off on this doc**, implement B→C→D→E in this thread, showing each step
-   before moving to the next — or split across threads. (Recommended: one thread, this
-   is framework work with no live project running.)
+## Not yet exercised end-to-end
+
+The skills are written but have not been run on a real prose→draft→check cycle. First
+real use is the validation step — expect to tune the `draft-design-doc` section
+guidance and the `check-design-doc` reconcile step against what actually happens.

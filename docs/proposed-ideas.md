@@ -84,15 +84,13 @@ any design doc, without spending a review-subagent call — but it is a pre-filt
 substitute for the judgment pass (class 17 excepted, where judgment review provably
 cannot help).
 
-Status: checklist + judgment-pass skill + mechanical checker all built and validated.
-Remaining: Phase 1 (`draft-design-doc` skill) and Phase 3 (`check-design-doc`
-orchestrator) from `docs/design-doc-drafting-tool.md`.
-
-**2026-08-29: full design pass** at `docs/design-doc-drafting-tool.md` — Phase 2
-(mechanical checker) built as above; Phase 1 pairs it with a new front-end drafting
-skill that turns user-supplied prose into a draft doc; Phase 3 wires drafting +
-mechanical + judgment + pin-consistency into one sign-off sequence before a doc is
-trusted for `new-project`.
+Status: **all three phases built (2026-08-29)** — see `docs/design-doc-drafting-tool.md`.
+Phase 2 is `cmd/checkdesigndoc`'s `ambiguity` check (above). Phase 1 is
+`.claude/skills/draft-design-doc.md` (prose → draft doc, worked examples script-verified,
+gaps to an Open Questions section). Phase 3 is `.claude/skills/check-design-doc.md`
+(mechanical scan + independent judgment pass + pin consistency + item-by-item sign-off
+before a doc is cleared for `new-project`). Not yet run on a real prose→draft→check
+cycle — first use is the validation step.
 
 **Separately, `docs/stress-test-roadmap.md` Phase D** (non-game
 complexity-axis stress tests: expression-language interpreter, worker-pool
