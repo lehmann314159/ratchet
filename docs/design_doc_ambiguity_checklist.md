@@ -2,9 +2,10 @@
 
 A living list of ways a design doc can state something true while still leaving a gap that a
 model fills confidently and inconsistently across independent passes. Read by both the
-mechanical checker (not yet built) and the `design-doc-ambiguity-check` skill's review
-subagent. Grow this list by adding an entry every time an incident traces back to a class not
-yet here — do not try to enumerate every possible ambiguity up front.
+mechanical checker (`go run ./cmd/checkdesigndoc --checks=ambiguity --doc <path>` — covers
+classes 1, 2, 6, 7, 17 as an over-flagging report) and the `design-doc-ambiguity-check`
+skill's review subagent. Grow this list by adding an entry every time an incident traces
+back to a class not yet here — do not try to enumerate every possible ambiguity up front.
 
 ## The general test
 
@@ -202,6 +203,10 @@ catching it. 2026-07-19, first live test of the "write for zero domain knowledge
 see [[project_implicit_domain_knowledge]] in memory for the full experiment writeup.
 
 ## Detectability summary
+
+The mechanical checker for the first three rows is **built** — `cmd/checkdesigndoc`'s
+`ambiguity` check. It is a tuned, over-flagging report (see `docs/design-doc-drafting-tool.md`
+Phase 2 for the exact trigger/clearing rules and per-fixture flag ceilings), not a gate.
 
 - **Mechanically detectable (first-pass filter):** 1, 2, 6, 7, 17
 - **Judgment required (no substitute for a review pass):** 3, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15, 16

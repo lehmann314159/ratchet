@@ -76,21 +76,23 @@ dispatches one fresh subagent per review). Included here only because it's the
 direct dependency for 1a's "pre-execution, mechanical" tier, and because its
 own unbuilt piece is itself a proposed idea:
 
-**The mechanical checker (classes 1, 2, 6, 7, 17) does not exist yet.**
-Everything validated so far (the chess movement-rules rewrite, the exprvm
-design doc) has gone through the judgment-pass skill only — a fresh subagent
-review, not a pattern-matching pass in the ratchet Go app itself. Building it
-would let these 5 classes be caught before SURVEY_SPEC ever runs, on any design
-doc, without spending a review-subagent call.
+**The mechanical checker (classes 1, 2, 6, 7, 17) is now built** —
+`cmd/checkdesigndoc`'s `ambiguity` check (`--checks=ambiguity`), an over-flagging
+report tuned against all 17 in-repo design docs plus a git-restored pre-fix `chess.md`
+as the regression anchor. It catches these 5 classes before SURVEY_SPEC ever runs, on
+any design doc, without spending a review-subagent call — but it is a pre-filter, not a
+substitute for the judgment pass (class 17 excepted, where judgment review provably
+cannot help).
 
-Status: checklist + skill built and validated live; mechanical checker
-unbuilt, sequencing (checklist-doc-first vs. checker-first) was never decided.
+Status: checklist + judgment-pass skill + mechanical checker all built and validated.
+Remaining: Phase 1 (`draft-design-doc` skill) and Phase 3 (`check-design-doc`
+orchestrator) from `docs/design-doc-drafting-tool.md`.
 
-**2026-08-29: a concrete plan now exists** at `docs/design-doc-drafting-tool.md` —
-finishes the mechanical checker (Phase 2) and pairs it with a new front-end drafting
-skill that turns user-supplied prose into a draft doc (Phase 1), gated by this
-checklist's judgment pass plus the mechanical checker before a doc is ever trusted
-enough for `new-project` (Phase 3). Planning only, nothing implemented.
+**2026-08-29: full design pass** at `docs/design-doc-drafting-tool.md` — Phase 2
+(mechanical checker) built as above; Phase 1 pairs it with a new front-end drafting
+skill that turns user-supplied prose into a draft doc; Phase 3 wires drafting +
+mechanical + judgment + pin-consistency into one sign-off sequence before a doc is
+trusted for `new-project`.
 
 **Separately, `docs/stress-test-roadmap.md` Phase D** (non-game
 complexity-axis stress tests: expression-language interpreter, worker-pool

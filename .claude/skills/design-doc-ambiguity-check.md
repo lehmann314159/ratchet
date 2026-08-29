@@ -4,10 +4,13 @@ Review a ratchet design doc for ambiguous specification language before it's use
 DECOMPOSE — the kind of gap that reads as fine to whoever wrote it but lets a downstream model
 produce two different, individually-defensible implementations.
 
-This is a judgment pass, not a mechanical one (no mechanical checker exists yet — this skill is
-the whole check for now). Its value depends entirely on independence: the review must be done
-by a fresh subagent with no memory of writing the doc, not by re-reading it in the current
-conversation.
+This is the judgment pass. A mechanical pre-filter also exists —
+`go run ./cmd/checkdesigndoc --checks=ambiguity --doc <path>` covers classes 1, 2, 6, 7, 17 as
+an over-flagging report — but it is not a substitute: most catalogued classes need reasoning
+about whether nearby prose resolves the gap, and class 17 in particular a same-fluency judgment
+reviewer will miss. The judgment pass's value depends entirely on independence: the review must
+be done by a fresh subagent with no memory of writing the doc, not by re-reading it in the
+current conversation.
 
 ## Args
 
@@ -64,9 +67,11 @@ conversation.
   (no shared context with whoever authored the doc) is the mechanism that's supposed to work
   where self-review didn't; do not collapse this into reviewing the doc yourself "to save a
   step."
-- A mechanical checker for classes 1, 2, 6, 7 (see the checklist's detectability summary) does
-  not exist yet. Until it does, this skill is the entire check, including for the mechanically-
-  detectable classes.
+- The mechanical checker for classes 1, 2, 6, 7, 17 is `cmd/checkdesigndoc`'s `ambiguity`
+  check. Run it too, but keep it out of the subagent's prompt — feeding it in would anchor the
+  independent pass. Reconcile its hits against the subagent's findings afterward: any
+  mechanically-flagged site the subagent did not address is carried forward as unresolved, and
+  every class-17 hit is carried regardless of what the subagent said.
 - If the subagent's findings seem to miss something you already suspect is wrong, do not
   silently add it yourself — that reintroduces the same-context bias this skill exists to avoid.
   If you think the subagent missed something, say so to the user explicitly as your own
