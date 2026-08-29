@@ -151,8 +151,11 @@ func extractWorkedExamples(section string) []string {
 	for _, m := range numberedRe.FindAllStringSubmatch(section, -1) {
 		out = append(out, collapseWhitespace(m[1]))
 	}
-	requiredRe := regexp.MustCompile(`(?m)^\*\*(Required worked example[^*]+)\*\*`)
-	for _, m := range requiredRe.FindAllStringSubmatch(section, -1) {
+	// Bold paragraph lead-ins used as scenario headers by draft-design-doc and
+	// several hand-written docs: "**Required worked example for ...**",
+	// "**Scenario A — ...:**", "**Worked example: ...**".
+	leadInRe := regexp.MustCompile(`(?mi)^\*\*((?:Required worked example|Scenario [A-Z0-9]|Worked example)[^*]*)\*\*`)
+	for _, m := range leadInRe.FindAllStringSubmatch(section, -1) {
 		out = append(out, collapseWhitespace(m[1]))
 	}
 	return out

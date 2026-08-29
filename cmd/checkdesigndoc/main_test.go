@@ -157,6 +157,22 @@ func TestFixtureDocs_regressionAnchors(t *testing.T) {
 	}
 }
 
+func TestPins_recognizesBoldScenarioLeadIns(t *testing.T) {
+	section := `
+**Scenario A — first tier only (` + "`--usage 500`" + `):**
+
+expected output ...
+
+**Scenario B — tie rounds to even:**
+
+expected output ...
+`
+	got := extractWorkedExamples(section)
+	if len(got) != 2 {
+		t.Fatalf("want 2 worked examples from bold Scenario lead-ins, got %d: %v", len(got), got)
+	}
+}
+
 func TestPins_countsWorkedExamplesAndPins(t *testing.T) {
 	doc := `## Domain-Specific Test Scenarios
 
