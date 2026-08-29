@@ -67,7 +67,13 @@ func decomposeSpecSystemPrompt(lang string) string {
 		goExitCriteriaRule = "\n  For Go beads: when output_files includes a *_test.go file, exit_criteria must use" +
 			"\n  `-run TestFoo` naming the primary test function (e.g. `go test -v -run TestHandleIndex ./...`)." +
 			"\n  A bare `go test ./...` without `-run` will silently exit 0 with \"no tests to run\" if the" +
-			"\n  test function was not written — the named `-run` flag is the only way to detect this."
+			"\n  test function was not written — the named `-run` flag is the only way to detect this." +
+			"\n  Do not wrap a shell-based exit criterion in an external `timeout` command — the harness" +
+			"\n  already enforces its own 60-second timeout per criterion (internal/execcheck/verify.go)," +
+			"\n  independent of the shell, and `timeout` is not guaranteed to be installed: confirmed live" +
+			"\n  (tictactoe-v1 bead \"main-entry\", 2026-08-29) that a `timeout 5s bash -c '...'` criterion" +
+			"\n  failed with \"command not found\" before the actual check inside it ever ran, on every" +
+			"\n  execution attempt, despite the implementation being correct every time."
 	}
 	return fmt.Sprintf(`You decompose a design document into a list of Beads — well-scoped, independently executable units of work, each with a clear done-condition.
 
@@ -282,7 +288,15 @@ func reconcileDecompositionSystemPrompt(lang string, selfResolve bool) string {
 			"test functions to write (e.g. \"Write TestEncode and TestDecode to codec_test.go\"). An\n" +
 			"executor that writes the implementation without the test functions will see " +
 			"`go test -run TestEncode .`" +
-			"\nexit 0 with \"no tests to run\" and may not realize the test functions are still missing.\n\n"
+			"\nexit 0 with \"no tests to run\" and may not realize the test functions are still missing.\n\n" +
+			"Do not wrap a shell-based exit criterion in an external `timeout` command — the harness\n" +
+			"already enforces its own 60-second timeout per criterion (internal/execcheck/verify.go),\n" +
+			"independent of the shell, and `timeout` is not guaranteed to be installed: confirmed live\n" +
+			"(tictactoe-v1 bead \"main-entry\", 2026-08-29) that a `timeout 5s bash -c '...'` criterion\n" +
+			"failed with \"command not found\" before the actual check inside it ever ran, on every\n" +
+			"execution attempt, despite the implementation being correct every time — repeatedly\n" +
+			"rejecting ADJUDICATE_NEXT_EXECUTION's correct declare_success decision and burning the\n" +
+			"bead's entire execution-attempt budget on a criterion that could never pass as written.\n\n"
 	}
 	alreadyAddressedSection := "already_addressed is not available in this project's configuration: every disagreement is\n" +
 		"treated as live regardless of how you set this field, and will either be resolved through\n" +
