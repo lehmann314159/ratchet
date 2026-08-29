@@ -3,14 +3,17 @@ package project
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"ratchet/internal/db"
+	"ratchet/internal/verbs"
 )
 
 // idMap tracks an old row ID -> new row ID remapping for one table, built up
@@ -190,6 +193,16 @@ func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFold
 		return 0, 0, 0, fmt.Errorf("resolve source folder path: %w", err)
 	}
 
+	// Go-formatted (RFC3339), not SQLite's datetime('now') — every reader of
+	// these timestamps elsewhere in the codebase (e.g. queue.go's
+	// activeProject) parses with time.Parse(time.RFC3339, ...) and silently
+	// discards the error, so a datetime('now')-formatted value ("2026-08-29
+	// 04:13:17", no T/Z) parses to the zero time instead of failing loudly.
+	// Confirmed live (2026-08-29): a cloned project's cascade-starting
+	// AUDIT_DECOMPOSITION job had exactly this malformed timestamp, the only
+	// row in the whole table not matching every other insert's format.
+	now := time.Now().UTC().Format(time.RFC3339)
+
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("begin tx: %w", err)
@@ -258,9 +271,9 @@ func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFold
 		       language, pause_after_reconcile, pause_after_verb, pause_after_bead_id,
 		       reconcile_self_resolve, lineage_root_id, ?,
 		       ?,
-		       datetime('now'), datetime('now')
+		       ?, ?
 		FROM projects WHERE id = ?`,
-		newLabel, newFolderAbs, src.DesignDocPath, nextIterationNumber, cascadeBaselineProjectID, fromID)
+		newLabel, newFolderAbs, src.DesignDocPath, nextIterationNumber, cascadeBaselineProjectID, now, now, fromID)
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("insert cloned project: %w", err)
 	}
@@ -273,7 +286,7 @@ func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFold
 		return 0, 0, 0, err
 	}
 
-	beadIDs, err := cloneBeads(ctx, tx, fromID, newID)
+	beadIDs, revivedBeadIDs, err := cloneBeads(ctx, tx, fromID, newID)
 	if err != nil {
 		return 0, 0, 0, err
 	}
@@ -345,6 +358,20 @@ func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFold
 		return 0, 0, 0, err
 	}
 
+	// Any bead revived from full_stopped (see cloneBeads) needs its
+	// pre-stop on-disk/DB state cleared, not just its status column flipped
+	// — otherwise a bead that was mid-flight when the source stopped (not
+	// merely never-started, like the case that surfaced this) would carry
+	// forward a half-written test file or stale test_refinements/
+	// compressed_history narration referencing content that's about to be
+	// treated as if it never existed. Deliberately after cloneTestRefinements/
+	// cloneCompressedHistory above (clear what was just copied, not before
+	// it exists) and after fixupCurrentRevisionIDs (needs each bead's
+	// current output_files to know what to reset).
+	if err = reviveFullStoppedBeads(ctx, tx, newID, revivedBeadIDs, newFolderAbs); err != nil {
+		return 0, 0, 0, err
+	}
+
 	// A design-doc override starts the cascade review immediately: the new
 	// project already has beads (cloned above), so it enters the
 	// AUDIT_DECOMPOSITION/RECONCILE_DECOMPOSITION loop directly against the
@@ -355,8 +382,8 @@ func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFold
 	if designDocOverride != "" {
 		if _, err = tx.ExecContext(ctx, `
 			INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
-			VALUES (?, ?, NULL, 'pending', datetime('now'), datetime('now'))`,
-			newID, db.VerbAuditDecomposition); err != nil {
+			VALUES (?, ?, NULL, 'pending', ?, ?)`,
+			newID, db.VerbAuditDecomposition, now, now); err != nil {
 			return 0, 0, 0, fmt.Errorf("enqueue cascade AUDIT_DECOMPOSITION: %w", err)
 		}
 	}
@@ -380,13 +407,27 @@ func cloneVerbModelAssignments(ctx context.Context, tx *sql.Tx, fromID, newID in
 
 // cloneBeads copies every bead row, leaving current_revision_id NULL for now
 // (bead_revisions don't exist under their new IDs yet — fixupCurrentRevisionIDs
-// fills it in afterward). Returns the old bead ID -> new bead ID map.
-func cloneBeads(ctx context.Context, tx *sql.Tx, fromID, newID int64) (idMap, error) {
+// fills it in afterward). Returns the old bead ID -> new bead ID map, plus the
+// new IDs of any bead whose status was 'full_stopped' in the source.
+//
+// full_stopped is rewritten to 'pending' rather than copied verbatim.
+// full_stopped describes the *source project's* history (something stopped
+// it — full-stop-project, a project-wide cap) — it was never a decision
+// about that specific bead, and a clone is supposed to represent a fresh
+// starting point ready to make progress, not perpetuate whatever administrative
+// state the source happened to be in when it stopped. Confirmed live
+// (2026-08-29, tictactoe-v1-cascade-2): a bead full-stopped mid-project
+// (never actually executed) stayed full_stopped straight through a cascade
+// clone since nothing about its own spec had changed for AUDIT/RECONCILE to
+// react to — and the project-completion check only watches for 'pending'
+// beads, so the project declared itself complete having silently skipped
+// that bead's real work entirely.
+func cloneBeads(ctx context.Context, tx *sql.Tx, fromID, newID int64) (beadIDs idMap, revivedNewIDs []int64, err error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, status, rewound_at, execution_attempts_override
 		FROM beads WHERE project_id = ? ORDER BY id`, fromID)
 	if err != nil {
-		return nil, fmt.Errorf("query beads: %w", err)
+		return nil, nil, fmt.Errorf("query beads: %w", err)
 	}
 
 	type row struct {
@@ -400,31 +441,85 @@ func cloneBeads(ctx context.Context, tx *sql.Tx, fromID, newID int64) (idMap, er
 		var r row
 		if err := rows.Scan(&r.oldID, &r.status, &r.rewoundAt, &r.executionAttemptsOverride); err != nil {
 			rows.Close()
-			return nil, fmt.Errorf("scan beads: %w", err)
+			return nil, nil, fmt.Errorf("scan beads: %w", err)
 		}
 		buf = append(buf, r)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("beads rows: %w", err)
+		return nil, nil, fmt.Errorf("beads rows: %w", err)
 	}
 
 	out := make(idMap, len(buf))
 	for _, r := range buf {
+		status := r.status
+		wasFullStopped := status == "full_stopped"
+		if wasFullStopped {
+			status = "pending"
+		}
 		res, err := tx.ExecContext(ctx, `
 			INSERT INTO beads (project_id, status, current_revision_id, rewound_at, execution_attempts_override)
 			VALUES (?, ?, NULL, ?, ?)`,
-			newID, r.status, r.rewoundAt, r.executionAttemptsOverride)
+			newID, status, r.rewoundAt, r.executionAttemptsOverride)
 		if err != nil {
-			return nil, fmt.Errorf("insert bead: %w", err)
+			return nil, nil, fmt.Errorf("insert bead: %w", err)
 		}
 		newBeadID, err := res.LastInsertId()
 		if err != nil {
-			return nil, fmt.Errorf("new bead id: %w", err)
+			return nil, nil, fmt.Errorf("new bead id: %w", err)
+		}
+		if wasFullStopped {
+			revivedNewIDs = append(revivedNewIDs, newBeadID)
 		}
 		out[r.oldID] = newBeadID
 	}
-	return out, nil
+	return out, revivedNewIDs, nil
+}
+
+// reviveFullStoppedBeads resets the on-disk and DB state of every bead
+// cloneBeads flipped from full_stopped back to pending, so each one starts
+// clean rather than carrying forward whatever partial state it was in when
+// the source project stopped. Mirrors rewind-bead's own reset shape (delete
+// test files, restore impl files to their scaffold stub, clear
+// test_refinements/compressed_history) rather than inventing a new one —
+// same problem, same fix, just triggered by a clone instead of a rewind.
+func reviveFullStoppedBeads(ctx context.Context, tx *sql.Tx, projectID int64, beadIDs []int64, folderPath string) error {
+	for _, beadID := range beadIDs {
+		var outputFilesJSON string
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COALESCE(json_extract(br.full_text, '$.output_files'), '[]')
+			FROM beads b JOIN bead_revisions br ON br.id = b.current_revision_id
+			WHERE b.id = ?`, beadID,
+		).Scan(&outputFilesJSON); err != nil {
+			return fmt.Errorf("load output_files for revived bead %d: %w", beadID, err)
+		}
+		var outputFiles []string
+		if err := json.Unmarshal([]byte(outputFilesJSON), &outputFiles); err != nil {
+			return fmt.Errorf("parse output_files for revived bead %d: %w", beadID, err)
+		}
+
+		for _, f := range outputFiles {
+			if !strings.HasSuffix(f, "_test.go") {
+				continue
+			}
+			path := filepath.Join(folderPath, f)
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				slog.Warn("clone-project: delete test file on revived bead", "bead_id", beadID, "path", path, "error", err)
+			}
+		}
+
+		if _, _, err := verbs.WriteScaffoldStubsTx(ctx, tx, projectID, folderPath, outputFiles); err != nil {
+			return fmt.Errorf("restore scaffold stubs for revived bead %d: %w", beadID, err)
+		}
+
+		if _, err := tx.ExecContext(ctx, `DELETE FROM test_refinements WHERE bead_id = ?`, beadID); err != nil {
+			return fmt.Errorf("clear test_refinements for revived bead %d: %w", beadID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM compressed_history WHERE bead_id = ?`, beadID); err != nil {
+			return fmt.Errorf("clear compressed_history for revived bead %d: %w", beadID, err)
+		}
+	}
+	return nil
 }
 
 func cloneBeadRevisions(ctx context.Context, tx *sql.Tx, fromID, newID int64, beadIDs idMap) (idMap, error) {

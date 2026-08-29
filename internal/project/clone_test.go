@@ -828,3 +828,106 @@ func TestCloneProject_RefusesCascadeWithPendingJob(t *testing.T) {
 		t.Fatalf("plain clone of a project with a pending job should still succeed: %v", err)
 	}
 }
+
+// TestCloneProject_RevivesFullStoppedBead locks in the fix for a real live
+// bug (tictactoe-v1-cascade-2, 2026-08-29): a bead full-stopped mid-project
+// (an administrative stop on the *source* project, never a decision about
+// that specific bead) stayed full_stopped straight through a clone, since
+// nothing about its own spec had changed for AUDIT/RECONCILE to react to —
+// and the project-completion check only watches for 'pending' beads, so the
+// cloned project declared itself complete having silently skipped that
+// bead's real work entirely. A cloned bead must come back as 'pending', with
+// its stale test file deleted and test_refinements/compressed_history
+// cleared, not carry the source's administrative status forward.
+func TestCloneProject_RevivesFullStoppedBead(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	const projectID = int64(80)
+
+	folder := t.TempDir()
+	if err := os.WriteFile(filepath.Join(folder, "design_doc.md"), []byte("# Design\n"), 0o644); err != nil {
+		t.Fatalf("write design doc: %v", err)
+	}
+	mustExecFixture(t, d, `
+		INSERT INTO projects
+		  (id, label, folder_path, design_doc_path, status,
+		   monitor_override_default, execution_budget_default, audit_reconcile_round_cap,
+		   max_execution_attempts, language, pause_after_reconcile, pause_after_verb, pause_after_bead_id,
+		   lineage_root_id, iteration_number,
+		   created_at, updated_at)
+		VALUES (?, 'full-stop-source', ?, 'design_doc.md', 'active',
+		        'honor', 300, 2, 5, 'go', 0, NULL, NULL,
+		        ?, 1,
+		        '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		projectID, folder, projectID)
+
+	res, err := d.ExecContext(ctx,
+		`INSERT INTO beads (project_id, status, current_revision_id) VALUES (?, 'full_stopped', NULL)`, projectID)
+	if err != nil {
+		t.Fatalf("seed bead: %v", err)
+	}
+	beadID, _ := res.LastInsertId()
+
+	// Only a test file in output_files, deliberately — a revived bead whose
+	// output_files has no non-test file must not need a SURVEY_SPEC manifest
+	// to reset (hasNonTestFile's guard in WriteScaffoldStubsTx).
+	revRes, err := d.ExecContext(ctx, `
+		INSERT INTO bead_revisions (project_id, bead_id, revision_number, full_text, execution_budget, monitor_override, created_by_verb, created_at)
+		VALUES (?, ?, 1, '{"title":"integration","output_files":["integration_test.go"]}', 300, 'honor', 'DECOMPOSE_SPEC', '2026-01-01T00:00:00Z')`,
+		projectID, beadID)
+	if err != nil {
+		t.Fatalf("seed bead revision: %v", err)
+	}
+	revID, _ := revRes.LastInsertId()
+	mustExecFixture(t, d, `UPDATE beads SET current_revision_id = ? WHERE id = ?`, revID, beadID)
+
+	// A stray, half-written test file on disk from before the source stopped.
+	if err := os.WriteFile(filepath.Join(folder, "integration_test.go"), []byte("package main // unfinished\n"), 0o644); err != nil {
+		t.Fatalf("write stray test file: %v", err)
+	}
+	mustExecFixture(t, d, `
+		INSERT INTO test_refinements (project_id, bead_id, cycle_id, turn, verb, changed, summary, decision, created_at)
+		VALUES (?, ?, 1, 1, 'REFINE_TESTS_WRITE', 0, 'wrote something', '', '2026-01-01T00:00:00Z')`,
+		projectID, beadID)
+	mustExecFixture(t, d, `
+		INSERT INTO compressed_history (bead_id, project_id, compressed_text, updated_at)
+		VALUES (?, ?, 'stale narration', '2026-01-01T00:00:00Z')`,
+		beadID, projectID)
+
+	newFolder := filepath.Join(t.TempDir(), "clone")
+	newID, _, _, err := cloneProject(ctx, d, projectID, "revived-clone", newFolder, "")
+	if err != nil {
+		t.Fatalf("cloneProject: %v", err)
+	}
+
+	var status string
+	if err := d.QueryRowContext(ctx, `SELECT status FROM beads WHERE project_id = ?`, newID).Scan(&status); err != nil {
+		t.Fatalf("query cloned bead status: %v", err)
+	}
+	if status != "pending" {
+		t.Errorf("cloned bead status = %q, want \"pending\" (not carried forward as full_stopped)", status)
+	}
+
+	if _, err := os.Stat(filepath.Join(newFolder, "integration_test.go")); !os.IsNotExist(err) {
+		t.Errorf("expected the cloned stray test file to be deleted, stat err = %v", err)
+	}
+
+	var newBeadID int64
+	if err := d.QueryRowContext(ctx, `SELECT id FROM beads WHERE project_id = ?`, newID).Scan(&newBeadID); err != nil {
+		t.Fatalf("query cloned bead id: %v", err)
+	}
+	var refinementCount int
+	if err := d.QueryRowContext(ctx, `SELECT COUNT(*) FROM test_refinements WHERE bead_id = ?`, newBeadID).Scan(&refinementCount); err != nil {
+		t.Fatalf("count test_refinements: %v", err)
+	}
+	if refinementCount != 0 {
+		t.Errorf("test_refinements for revived bead = %d rows, want 0 (stale narration must be cleared)", refinementCount)
+	}
+	var historyCount int
+	if err := d.QueryRowContext(ctx, `SELECT COUNT(*) FROM compressed_history WHERE bead_id = ?`, newBeadID).Scan(&historyCount); err != nil {
+		t.Fatalf("count compressed_history: %v", err)
+	}
+	if historyCount != 0 {
+		t.Errorf("compressed_history for revived bead = %d rows, want 0 (stale narration must be cleared)", historyCount)
+	}
+}
