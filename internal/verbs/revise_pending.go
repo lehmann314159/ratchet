@@ -223,7 +223,7 @@ func (h *RevisePending) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJ
 	if err != nil {
 		return fmt.Errorf("find next pending bead: %w", err)
 	}
-	if err := enqueueBeadExecution(ctx, tx, job.ProjectID, nextBeadID, now); err != nil {
+	if err := EnqueueBeadExecution(ctx, tx, job.ProjectID, nextBeadID, now); err != nil {
 		return err
 	}
 	if pause, err := shouldPauseAfterBead(ctx, tx, job.ProjectID, triggerBeadID); err != nil {

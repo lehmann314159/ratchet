@@ -382,10 +382,10 @@ func loadVerbModelOrFallback(ctx context.Context, d *db.DB, projectID int64, ver
 	return loadVerbModel(ctx, d, projectID, fallbackVerb)
 }
 
-// enqueueBeadExecution enqueues REFINE_TESTS_A if the bead has *_test.go output
+// EnqueueBeadExecution enqueues REFINE_TESTS_A if the bead has *_test.go output
 // files (so tests are certified before implementation starts), or EXECUTE_BEAD
 // otherwise. Called from reconcile_decomposition, revise_pending, and resume.
-func enqueueBeadExecution(ctx context.Context, tx *sql.Tx, projectID, beadID int64, now string) error {
+func EnqueueBeadExecution(ctx context.Context, tx *sql.Tx, projectID, beadID int64, now string) error {
 	var fullText string
 	if err := tx.QueryRowContext(ctx, `
 		SELECT br.full_text FROM beads b
@@ -423,7 +423,7 @@ func enqueueFirstBeadForExecution(ctx context.Context, tx *sql.Tx, projectID int
 	).Scan(&beadID); err != nil {
 		return fmt.Errorf("find first bead: %w", err)
 	}
-	return enqueueBeadExecution(ctx, tx, projectID, beadID, now)
+	return EnqueueBeadExecution(ctx, tx, projectID, beadID, now)
 }
 
 // enqueueDecompositionApproved dispatches the beads for execution and then

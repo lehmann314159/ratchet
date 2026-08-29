@@ -930,4 +930,25 @@ func TestCloneProject_RevivesFullStoppedBead(t *testing.T) {
 	if historyCount != 0 {
 		t.Errorf("compressed_history for revived bead = %d rows, want 0 (stale narration must be cleared)", historyCount)
 	}
+
+	// Resetting the bead's status alone doesn't get it dispatched — nothing
+	// enqueues a job for it outside the normal "previous bead just
+	// succeeded" REVISE_PENDING chain. A plain clone with nothing else
+	// queued must dispatch it itself.
+	var jobVerb, jobStatus string
+	if err := d.QueryRowContext(ctx,
+		`SELECT verb, status FROM handoff_jobs WHERE project_id = ? AND bead_id = ?`,
+		newID, newBeadID,
+	).Scan(&jobVerb, &jobStatus); err != nil {
+		t.Fatalf("expected a dispatched job for the revived bead, query failed: %v", err)
+	}
+	if jobStatus != "pending" {
+		t.Errorf("revived bead's job status = %q, want \"pending\"", jobStatus)
+	}
+	// The seeded bead's output_files is test-file-only (integration_test.go),
+	// so EnqueueBeadExecution should route it to REFINE_TESTS_WRITE, not
+	// straight to EXECUTE_BEAD.
+	if jobVerb != "REFINE_TESTS_WRITE" {
+		t.Errorf("revived bead's job verb = %q, want \"REFINE_TESTS_WRITE\" (bead has test-file output_files)", jobVerb)
+	}
 }

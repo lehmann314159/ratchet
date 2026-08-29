@@ -85,7 +85,7 @@ func enqueueCascadeReview(ctx context.Context, tx *sql.Tx, projectID, baselinePr
 	if err != nil {
 		return false, fmt.Errorf("find first changed bead: %w", err)
 	}
-	if err := enqueueBeadExecution(ctx, tx, projectID, firstPendingBeadID, now); err != nil {
+	if err := EnqueueBeadExecution(ctx, tx, projectID, firstPendingBeadID, now); err != nil {
 		return false, err
 	}
 	return true, nil

@@ -386,6 +386,47 @@ func cloneProject(ctx context.Context, d *db.DB, fromID int64, newLabel, newFold
 			newID, db.VerbAuditDecomposition, now, now); err != nil {
 			return 0, 0, 0, fmt.Errorf("enqueue cascade AUDIT_DECOMPOSITION: %w", err)
 		}
+	} else if len(revivedBeadIDs) > 0 {
+		// A plain clone (no cascade) of a project whose only unfinished work
+		// was a full_stopped bead has nothing else to trigger it — reviving
+		// the bead's status alone (above) doesn't get it dispatched, since
+		// the orchestrator only ever acts on handoff_jobs rows, and nothing
+		// enqueues a fresh one for a bead reset outside the normal
+		// "previous bead just succeeded" REVISE_PENDING chain. Confirmed
+		// live (2026-08-29): a plain clone correctly reset a full_stopped
+		// bead to pending, but it then sat forever with zero jobs, and
+		// the daemon never touched it.
+		//
+		// Only fires when the clone has nothing else queued (guarded below)
+		// so it can't create a second, competing dispatch alongside a
+		// clone that already has its own pending work — e.g. a clone of a
+		// project that was mid-flight, or the cascade path above, which
+		// has its own explicit single-job invariant. Dispatches whichever
+		// pending bead has the lowest id, matching every other "what runs
+		// next" decision in the pipeline (revise_pending.go, cascade_review.go).
+		var existingQueuedCount int
+		if err = tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM handoff_jobs WHERE project_id = ? AND status IN ('pending', 'running', 'failed_retry')`,
+			newID,
+		).Scan(&existingQueuedCount); err != nil {
+			return 0, 0, 0, fmt.Errorf("count existing queued jobs: %w", err)
+		}
+		if existingQueuedCount == 0 {
+			var lowestPendingBeadID int64
+			err = tx.QueryRowContext(ctx,
+				`SELECT id FROM beads WHERE project_id = ? AND status = 'pending' ORDER BY id LIMIT 1`,
+				newID,
+			).Scan(&lowestPendingBeadID)
+			if err != nil && err != sql.ErrNoRows {
+				return 0, 0, 0, fmt.Errorf("find lowest pending bead: %w", err)
+			}
+			if err == nil {
+				if err = verbs.EnqueueBeadExecution(ctx, tx, newID, lowestPendingBeadID, now); err != nil {
+					return 0, 0, 0, fmt.Errorf("dispatch revived bead %d: %w", lowestPendingBeadID, err)
+				}
+			}
+			err = nil
+		}
 	}
 
 	if err = tx.Commit(); err != nil {
