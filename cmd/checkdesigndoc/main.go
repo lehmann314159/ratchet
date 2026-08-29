@@ -373,7 +373,9 @@ var (
 	// Class 2 — a formula / numeric constraint stated without a computed value.
 	// Keyword-only: an arithmetic-operator heuristic flagged every Go pointer
 	// type (`g *Game`) and was dropped.
-	class2Trigger = regexp.MustCompile(`(?i)\b(sum of|product of|divided by|modulo|floor\(|ceil\()|\bmod\b|\bFNV\b|\bhash of\b|\bthe formula\b|\bnumber of\b[^.\n]{0,50}\bis\b`)
+	// `\bmod ` (with the trailing space) not `\bmod\b` — the latter matches `go.mod`
+	// in every Architecture section that lists build files.
+	class2Trigger = regexp.MustCompile(`(?i)\b(sum of|product of|divided by|modulo|floor\(|ceil\()|\bmod \S|\bFNV\b|\bhash of\b|\bthe formula\b|\bnumber of\b[^.\n]{0,50}\bis\b`)
 	class2Clear   = regexp.MustCompile(`(?i)=\s*[+-]?\d|\be\.g\.,?\s*[+-]?\d|→\s*[+-]?\d|\bis\s+[+-]?\d+\b|partitions?\s+[+-]?\d|\b[+-]?\d+\s*(bytes?|elements?|cells?|rows?|columns?|pixels?|entries|players|stones?|pieces?|partitions?|slots?)\b`)
 
 	// Class 6 — a value pointed at by name rather than inlined. Clearing is

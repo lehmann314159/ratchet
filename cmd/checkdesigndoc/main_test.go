@@ -57,6 +57,20 @@ func TestClass2_clearedByComputedValue(t *testing.T) {
 	}
 }
 
+func TestClass2_doesNotFlagGoModInArchitecture(t *testing.T) {
+	doc := "## Architecture\n\nAll `.go` files use `package main`. `go.mod` requires modernc.org/sqlite.\n"
+	if got := scanClass2(stripFences(doc), allInScope); len(got) != 0 {
+		t.Fatalf("`go.mod` must not trigger the `mod` keyword, got %+v", got)
+	}
+}
+
+func TestClass2_stillFlagsModuloUsage(t *testing.T) {
+	doc := "## Behavioral Specification\n\nThe partition index is the hash mod the partition count.\n"
+	if got := scanClass2(stripFences(doc), allInScope); len(got) != 1 {
+		t.Fatalf("`mod <word>` should still flag, got %d: %+v", len(got), got)
+	}
+}
+
 func TestClass2_doesNotFlagGoPointerTypes(t *testing.T) {
 	doc := "## Data Types and Function Signatures\n\n**`Compile(prog *Program) (*CompiledProgram, error)`** translates the AST.\n"
 	// Section not in scanSectionTitles, but test the scanner directly with allInScope
