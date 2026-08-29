@@ -68,12 +68,29 @@ func decomposeSpecSystemPrompt(lang string) string {
 			"\n  `-run TestFoo` naming the primary test function (e.g. `go test -v -run TestHandleIndex ./...`)." +
 			"\n  A bare `go test ./...` without `-run` will silently exit 0 with \"no tests to run\" if the" +
 			"\n  test function was not written — the named `-run` flag is the only way to detect this." +
-			"\n  Do not wrap a shell-based exit criterion in an external `timeout` command — the harness" +
+			"\n  A shell-based exit criterion that starts a background process and later stops it must use" +
+			"\n  only portable POSIX/bash builtins — `&` to background it, `$!` to capture its PID, `kill" +
+			"\n  $PID` to stop it. Do not invoke any external process-management utility (`timeout`," +
+			"\n  `fuser`, `pgrep`, `lsof`, `ss`, `netstat`, or similar): their flags, output format, and even" +
+			"\n  installation are not guaranteed across *nix systems, and ratchet must run correctly on any" +
+			"\n  of them, not just the one a given criterion happened to be written against. The harness" +
 			"\n  already enforces its own 60-second timeout per criterion (internal/execcheck/verify.go)," +
-			"\n  independent of the shell, and `timeout` is not guaranteed to be installed: confirmed live" +
-			"\n  (tictactoe-v1 bead \"main-entry\", 2026-08-29) that a `timeout 5s bash -c '...'` criterion" +
-			"\n  failed with \"command not found\" before the actual check inside it ever ran, on every" +
-			"\n  execution attempt, despite the implementation being correct every time."
+			"\n  independent of the shell, so no external timeout mechanism is needed either. Confirmed live" +
+			"\n  (tictactoe-v1 bead \"main-entry\", 2026-08-29) with two separate incidents the same evening:" +
+			"\n  a `timeout 5s bash -c '...'` criterion failed with \"command not found\" (not installed)," +
+			"\n  and after removing that, a `fuser -k 8080/tcp` criterion failed with \"Unknown option: k\"" +
+			"\n  (this system's BSD-flavored `fuser` doesn't support the GNU/Linux `-k` flag or `PORT/tcp`" +
+			"\n  syntax) — different binaries, same root cause: assuming one OS's toolset. Correct pattern:" +
+			"\n  `./binary & PID=$!; sleep 1; curl -f http://localhost:PORT/ || (kill $PID; exit 1); kill $PID`." +
+			"\n  A fixed port must also be verified by response *content* specific to this app, not just a" +
+			"\n  successful connection: pipe curl's output through `grep -q \"<a string unique to this app>\"`" +
+			"\n  before treating the check as passed. A fixed port can and does collide with an unrelated" +
+			"\n  process already listening there — confirmed live (2026-08-29): a stray process from a" +
+			"\n  completely unrelated project had been listening on :8080 for weeks, and a connectivity-only" +
+			"\n  criterion (`curl -f`, no content check) would have silently declared success against it," +
+			"\n  verifying nothing about the actual implementation. Correct pattern: `./binary & PID=$!;" +
+			"\n  sleep 1; curl -s http://localhost:PORT/ | grep -q \"<unique string>\" || (kill $PID; exit 1);" +
+			"\n  kill $PID`."
 	}
 	return fmt.Sprintf(`You decompose a design document into a list of Beads — well-scoped, independently executable units of work, each with a clear done-condition.
 
@@ -204,14 +221,28 @@ func auditDecompositionSystemPrompt(lang string) string {
 			"   Also flag if the exit criterion starts a server on a fixed port (e.g. :8080) rather than\n" +
 			"   using `net/http/httptest.NewServer` — a fixed port may collide with the execution\n" +
 			"   environment and cause the criterion to silently verify the wrong server.\n" +
-			"   Also flag any exit criterion that wraps a shell command in an external `timeout` command\n" +
-			"   (e.g. `timeout 5s bash -c '...'`) — the harness already enforces its own 60-second timeout\n" +
-			"   per criterion (internal/execcheck/verify.go), independent of the shell, and `timeout` is not\n" +
-			"   guaranteed to be installed. Confirmed live (tictactoe-v1 bead \"main-entry\", 2026-08-29): a\n" +
-			"   `timeout`-wrapped criterion failed with \"command not found\" before the actual check inside\n" +
-			"   it ever ran, on every execution attempt, despite the implementation being correct every\n" +
-			"   time — this must be flagged even on a re-audit of an already-existing Bead whose exit\n" +
-			"   criterion previously looked sufficient (has a runtime check) but is actually broken this way.\n" +
+			"   When httptest isn't available (a bare main.go entrypoint Bead with no *_test.go file), a\n" +
+			"   fixed-port criterion is unavoidable — but flag it unless it verifies response *content*\n" +
+			"   specific to this app (e.g. `curl -s ... | grep -q \"<unique string>\"`), not just a successful\n" +
+			"   connection (`curl -f` alone). Confirmed live (2026-08-29): a stray process from a completely\n" +
+			"   unrelated project had been listening on :8080 for weeks, and a connectivity-only criterion\n" +
+			"   would have silently declared success against it, verifying nothing about the actual\n" +
+			"   implementation — this must be flagged even on a re-audit of an already-existing Bead.\n" +
+			"   Also flag any exit criterion that starts a background process and stops it using anything\n" +
+			"   other than portable POSIX/bash builtins (`&` to background, `$!` to capture its PID, `kill\n" +
+			"   $PID` to stop it). Flag any use of an external process-management utility (`timeout`,\n" +
+			"   `fuser`, `pgrep`, `lsof`, `ss`, `netstat`, or similar) — their flags, output format, and even\n" +
+			"   installation are not guaranteed across *nix systems, and ratchet must run correctly on any\n" +
+			"   of them, not just the one a given criterion happened to be written against. The harness\n" +
+			"   already enforces its own 60-second timeout per criterion (internal/execcheck/verify.go),\n" +
+			"   independent of the shell, so no external timeout mechanism is needed either. Confirmed live\n" +
+			"   (tictactoe-v1 bead \"main-entry\", 2026-08-29) with two separate incidents the same evening: a\n" +
+			"   `timeout 5s bash -c '...'` criterion failed with \"command not found\" (not installed), and\n" +
+			"   after removing that, a `fuser -k 8080/tcp` criterion failed with \"Unknown option: k\" (this\n" +
+			"   system's BSD-flavored `fuser` doesn't support the GNU/Linux `-k` flag or `PORT/tcp` syntax)\n" +
+			"   — different binaries, same root cause: assuming one OS's toolset. This must be flagged even\n" +
+			"   on a re-audit of an already-existing Bead whose exit criterion previously looked sufficient\n" +
+			"   (has a runtime check) but relies on a non-portable external utility this way.\n" +
 			"   Integration Bead clobber risk: if an integration Bead's output_files includes a *_test.go\n" +
 			"   file that already appears in a prior Bead's output_files, flag it — integration test files\n" +
 			"   must be new and dedicated; sharing a *_test.go with a prior Bead risks overwriting\n" +
@@ -297,14 +328,31 @@ func reconcileDecompositionSystemPrompt(lang string, selfResolve bool) string {
 			"executor that writes the implementation without the test functions will see " +
 			"`go test -run TestEncode .`" +
 			"\nexit 0 with \"no tests to run\" and may not realize the test functions are still missing.\n\n" +
-			"Do not wrap a shell-based exit criterion in an external `timeout` command — the harness\n" +
+			"A shell-based exit criterion that starts a background process and later stops it must use\n" +
+			"only portable POSIX/bash builtins — `&` to background it, `$!` to capture its PID, `kill\n" +
+			"$PID` to stop it. Do not invoke any external process-management utility (`timeout`, `fuser`,\n" +
+			"`pgrep`, `lsof`, `ss`, `netstat`, or similar): their flags, output format, and even\n" +
+			"installation are not guaranteed across *nix systems, and ratchet must run correctly on any\n" +
+			"of them, not just the one a given criterion happened to be written against. The harness\n" +
 			"already enforces its own 60-second timeout per criterion (internal/execcheck/verify.go),\n" +
-			"independent of the shell, and `timeout` is not guaranteed to be installed: confirmed live\n" +
-			"(tictactoe-v1 bead \"main-entry\", 2026-08-29) that a `timeout 5s bash -c '...'` criterion\n" +
-			"failed with \"command not found\" before the actual check inside it ever ran, on every\n" +
-			"execution attempt, despite the implementation being correct every time — repeatedly\n" +
-			"rejecting ADJUDICATE_NEXT_EXECUTION's correct declare_success decision and burning the\n" +
-			"bead's entire execution-attempt budget on a criterion that could never pass as written.\n\n"
+			"independent of the shell, so no external timeout mechanism is needed either. Confirmed live\n" +
+			"(tictactoe-v1 bead \"main-entry\", 2026-08-29) with two separate incidents the same evening:\n" +
+			"a `timeout 5s bash -c '...'` criterion failed with \"command not found\" (not installed), and\n" +
+			"after removing that, a `fuser -k 8080/tcp` criterion failed with \"Unknown option: k\" (this\n" +
+			"system's BSD-flavored `fuser` doesn't support the GNU/Linux `-k` flag or `PORT/tcp` syntax)\n" +
+			"— different binaries, same root cause: assuming one OS's toolset. Both repeatedly rejected\n" +
+			"ADJUDICATE_NEXT_EXECUTION's correct declare_success decision and burned the bead's entire\n" +
+			"execution-attempt budget on a criterion that could never pass as written. Correct pattern:\n" +
+			"`./binary & PID=$!; sleep 1; curl -f http://localhost:PORT/ || (kill $PID; exit 1); kill $PID`.\n" +
+			"A fixed port must also be verified by response *content* specific to this app, not just a\n" +
+			"successful connection: pipe curl's output through `grep -q \"<a string unique to this app>\"`\n" +
+			"before treating the check as passed. A fixed port can and does collide with an unrelated\n" +
+			"process already listening there — confirmed live (2026-08-29): a stray process from a\n" +
+			"completely unrelated project had been listening on :8080 for weeks, and a connectivity-only\n" +
+			"criterion (`curl -f`, no content check) would have silently declared success against it,\n" +
+			"verifying nothing about the actual implementation. Correct pattern: `./binary & PID=$!;\n" +
+			"sleep 1; curl -s http://localhost:PORT/ | grep -q \"<unique string>\" || (kill $PID; exit 1);\n" +
+			"kill $PID`.\n\n"
 	}
 	alreadyAddressedSection := "already_addressed is not available in this project's configuration: every disagreement is\n" +
 		"treated as live regardless of how you set this field, and will either be resolved through\n" +
