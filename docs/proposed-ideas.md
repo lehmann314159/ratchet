@@ -86,6 +86,12 @@ doc, without spending a review-subagent call.
 Status: checklist + skill built and validated live; mechanical checker
 unbuilt, sequencing (checklist-doc-first vs. checker-first) was never decided.
 
+**2026-08-29: a concrete plan now exists** at `docs/design-doc-drafting-tool.md` —
+finishes the mechanical checker (Phase 2) and pairs it with a new front-end drafting
+skill that turns user-supplied prose into a draft doc (Phase 1), gated by this
+checklist's judgment pass plus the mechanical checker before a doc is ever trusted
+enough for `new-project` (Phase 3). Planning only, nothing implemented.
+
 **Separately, `docs/stress-test-roadmap.md` Phase D** (non-game
 complexity-axis stress tests: expression-language interpreter, worker-pool
 scheduler, mini KV store over TCP, tiered billing calculator) is the
