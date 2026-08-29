@@ -757,7 +757,7 @@ dynamic renders outside it.**
 `HandleIndex` and `POST /eval` → `HandleEval` on an `http.ServeMux`, calls
 `http.ListenAndServe(":8080", mux)`.
 
-## Required Test Scenarios
+## Domain-Specific Test Scenarios
 
 1. **Left-associativity**: submitting `"10-3-2"` → `Output` `"5"`, not `"9"`.
 2. **Precedence**: submitting `"2+3*4"` → `Output` `"14"`, not `"20"`.
@@ -987,6 +987,18 @@ dynamic renders outside it.**
    every other bead.
 7. **cli** (main.go): wires everything together in `main()`. Decomposed
    after bead 6, since it references `HandleIndex`/`HandleEval`.
+
+- **Pin the exact disassembly strings to the `compiler` bead**: for `"x=10"`
+  (fresh `Environment`), `Disassemble` must return exactly
+  `["PUSH_CONST 10", "STORE x"]`; for `"print(x+1)"` (same, now-populated
+  `Environment`), exactly `["LOAD x", "PUSH_CONST 1", "ADD", "PRINT"]` — no
+  trailing operand on `ADD`/`PRINT`. Do not rely on the general
+  opcode-to-mnemonic table alone and leave `REFINE_TESTS_WRITE` to re-derive
+  the operand-omission-on-no-operand-opcodes rule itself.
+- **Pin the exact division sign combinations to the `vm` bead**: `7/2 = 3`,
+  `-7/2 = -3` (NOT `-4`), `7/-2 = -3` (NOT `-4`), `-7/-2 = 3`. Do not rely on
+  the general "truncates toward zero" rule alone and leave
+  `REFINE_TESTS_WRITE` to re-derive the negative-operand cases itself.
 
 **Integration bead scenarios** (bounded — one fixed scenario each):
 - Using `httptest.NewServer`, `POST /eval` with `input=x=5` (assert HTTP 200,
