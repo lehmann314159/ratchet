@@ -25,7 +25,8 @@ any one can be picked up cold.
 
 | Date | Workstream | What landed | Commit |
 |------|-----------|-------------|--------|
-| 2026-08-30 | — | Plan written | (this) |
+| 2026-08-30 | — | Plan written | ab75e12 |
+| 2026-08-30 | Milestone A | W7 (remove-project FK guard), W8 (status CSS), W13 htmx vendored | 72acf47 |
 
 ---
 
@@ -319,7 +320,11 @@ assert both render.
 
 ## W7 — Fix: `handleRemoveProject` FK-violates on lineage / cascade rows
 
-**Status:** NOT STARTED — **this is a real bug, do it early**
+**Status:** DONE (Milestone A, 2026-08-30). Two pre-transaction guards in
+`handleRemoveProject`: refuse with 400 if the project is still another row's
+`lineage_root_id` (excluding its own self-reference) or
+`cascade_baseline_project_id`. No null-out path (Decisions #3). Tests:
+`TestHandleRemoveProject_{LineageRootWithIterationsBlocked,CascadeBaselineBlocked,StandaloneLineageRootSucceeds}`.
 
 **Goal.** Removing a `full_stopped` / `complete` project must not fail (and
 silently roll back) when other rows reference it via the loop-mode FK columns.
@@ -364,7 +369,13 @@ project + its full-stopped baseline; assert removing the baseline works.
 
 ## W8 — Fix: status CSS enum drift
 
-**Status:** NOT STARTED — small, bundle with W7
+**Status:** PARTIALLY DONE (Milestone A, 2026-08-30). Added `.status` classes
+for `fixture`, `no_write`, `test_reject`, `re_refine`, the five
+`audit_reconcile_rounds.outcome` values, and `approve`/`reject`. **Still to do:**
+adjudication sub-field badges (`trend`, `bead_spec_fit` values incl.
+`not_applicable`) — deferred to land with W11d, which is what will actually
+render them. Verbs (`CASCADE_REVIEW` etc.) are rendered as plain text, not
+`.status` badges, so no class needed.
 
 **Goal.** Every status/decision/termination value the pipeline can emit renders
 with an intentional color.
@@ -539,12 +550,15 @@ execution + adjudication; assert all appear on the detail page.
 
 ## W13 — Hygiene
 
-**Status:** NOT STARTED
+**Status:** IN PROGRESS — htmx vendoring DONE (Milestone A, 2026-08-30); the
+rest NOT STARTED.
 
-- **Vendor htmx.** `layout.html` loads `htmx.org@2.0.4` from `unpkg.com`. The
-  daemon runs against a LAN Ollama; a network blip breaks the UI entirely. Drop
-  the ~50KB min.js into `internal/ui/templates/` (or a new `static/` embed) and
-  serve it locally.
+- **Vendor htmx.** ✅ DONE. `internal/ui/static/htmx-2.0.4.min.js` embedded via
+  a new `//go:embed static` FS, served at `/static/` by
+  `http.FileServerFS` + a `cacheForever` (immutable, 1yr) wrapper in
+  `server.go`. `layout.html` now points at `/static/htmx-2.0.4.min.js`.
+  Version is in the filename so the immutable cache is safe across bumps. Test:
+  `TestStaticHTMXServedLocally` (also asserts no `unpkg.com` in the layout).
 - **`verb_model_assignments` surfacing.** `verb_model_assignments(project_id,
   verb, model)`. When a verb keeps failing, "which model is assigned to it"
   is exactly the missing context. Show it as a small table on the project /

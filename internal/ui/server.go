@@ -15,6 +15,13 @@ import (
 //go:embed templates
 var templateFS embed.FS
 
+// staticFS holds vendored front-end assets (htmx) served at /static/. Vendored
+// rather than loaded from a CDN so the dashboard keeps working when the host
+// has no internet route — the daemon commonly runs on a LAN next to Ollama.
+//
+//go:embed static
+var staticFS embed.FS
+
 type server struct {
 	db   *db.DB
 	mux  *http.ServeMux
@@ -81,6 +88,7 @@ func newServer(database *db.DB) (*server, error) {
 }
 
 func (s *server) routes() {
+	s.mux.Handle("GET /static/", cacheForever(http.FileServerFS(staticFS)))
 	s.mux.HandleFunc("GET /{$}", s.handleDashboard)
 	s.mux.HandleFunc("GET /hx/status", s.handleStatusPartial)
 	s.mux.HandleFunc("GET /escalations", s.handleEscalations)
@@ -101,6 +109,16 @@ func (s *server) routes() {
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
+}
+
+// cacheForever marks a response as immutable for a year. The only assets under
+// /static/ are version-pinned vendored libraries (htmx@2.0.4); bumping the
+// version changes the filename, so an aggressive cache is safe.
+func cacheForever(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		h.ServeHTTP(w, r)
+	})
 }
 
 // Run starts the UI web server and blocks until ctx is cancelled.

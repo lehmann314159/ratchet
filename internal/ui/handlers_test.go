@@ -121,6 +121,39 @@ func doPost(t *testing.T, s *server, path string, form url.Values) *httptest.Res
 	return rec
 }
 
+// --- static assets ---
+
+// TestStaticHTMXServedLocally: htmx is vendored and served from /static/, not a
+// CDN, so the dashboard works with no internet route (the daemon runs on a LAN
+// next to Ollama). Also asserts the layout references the local path.
+func TestStaticHTMXServedLocally(t *testing.T) {
+	s, _ := openTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/static/htmx-2.0.4.min.js", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for vendored htmx, got %d", rec.Code)
+	}
+	if !strings.HasPrefix(rec.Body.String(), "var htmx=function()") {
+		t.Errorf("body does not look like htmx: %.40q", rec.Body.String())
+	}
+	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "immutable") {
+		t.Errorf("Cache-Control = %q, want immutable", cc)
+	}
+
+	dash := httptest.NewRequest(http.MethodGet, "/", nil)
+	drec := httptest.NewRecorder()
+	s.ServeHTTP(drec, dash)
+	body := drec.Body.String()
+	if strings.Contains(body, "unpkg.com") {
+		t.Errorf("layout still references a CDN")
+	}
+	if !strings.Contains(body, `/static/htmx-2.0.4.min.js`) {
+		t.Errorf("layout does not reference the vendored htmx path")
+	}
+}
+
 // --- handleRequeue ---
 
 func TestHandleRequeue_EscalatedJobSucceeds(t *testing.T) {
@@ -609,6 +642,112 @@ func TestHandleRemoveProject_WithTestRefinementsSucceeds(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("test_refinements rows still present after remove")
+	}
+}
+
+// seedExtraProject inserts a second project row with an explicit id, so tests
+// can build a lineage / cascade relationship between two projects.
+func seedExtraProject(t *testing.T, d *db.DB, id int64, status string) {
+	t.Helper()
+	if _, err := d.ExecContext(context.Background(), `
+		INSERT INTO projects
+		  (id, label, folder_path, design_doc_path, status,
+		   monitor_override_default, execution_budget_default,
+		   audit_reconcile_round_cap, created_at, updated_at)
+		VALUES (?, ?, '/tmp', 'design.md', ?, 'honor', 300, 2,
+		        '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		id, fmt.Sprintf("p%d", id), status); err != nil {
+		t.Fatalf("seed extra project %d: %v", id, err)
+	}
+}
+
+func projectExists(t *testing.T, d *db.DB, id int64) bool {
+	t.Helper()
+	var n int
+	if err := d.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM projects WHERE id = ?`, id).Scan(&n); err != nil {
+		t.Fatalf("query project %d: %v", id, err)
+	}
+	return n > 0
+}
+
+// TestHandleRemoveProject_LineageRootWithIterationsBlocked: removing a project
+// that is still the lineage_root_id of a later iteration must be refused with a
+// 400, not attempted-and-rolled-back. lineage_root_id REFERENCES projects(id)
+// and foreign_keys is ON, so the DELETE would fail the FK.
+func TestHandleRemoveProject_LineageRootWithIterationsBlocked(t *testing.T) {
+	s, d := openTestServer(t)
+	ctx := context.Background()
+	root := seedProject(t, d) // id 1
+	if _, err := d.ExecContext(ctx,
+		`UPDATE projects SET status = 'full_stopped', lineage_root_id = id WHERE id = ?`, root); err != nil {
+		t.Fatalf("set root: %v", err)
+	}
+	seedExtraProject(t, d, 2, "active")
+	if _, err := d.ExecContext(ctx,
+		`UPDATE projects SET lineage_root_id = ?, iteration_number = 2 WHERE id = 2`, root); err != nil {
+		t.Fatalf("point iteration 2 at root: %v", err)
+	}
+
+	rec := doPost(t, s, "/projects/1/remove", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "later iteration") {
+		t.Errorf("expected a lineage message, got %q", rec.Body.String())
+	}
+	if !projectExists(t, d, 1) {
+		t.Errorf("project 1 was removed despite the guard")
+	}
+}
+
+// TestHandleRemoveProject_CascadeBaselineBlocked: same, for a project still
+// referenced as another project's cascade_baseline_project_id.
+func TestHandleRemoveProject_CascadeBaselineBlocked(t *testing.T) {
+	s, d := openTestServer(t)
+	ctx := context.Background()
+	baseline := seedProject(t, d) // id 1
+	if _, err := d.ExecContext(ctx,
+		`UPDATE projects SET status = 'complete' WHERE id = ?`, baseline); err != nil {
+		t.Fatalf("set baseline complete: %v", err)
+	}
+	seedExtraProject(t, d, 2, "active")
+	if _, err := d.ExecContext(ctx,
+		`UPDATE projects SET cascade_baseline_project_id = ? WHERE id = 2`, baseline); err != nil {
+		t.Fatalf("point cascade child at baseline: %v", err)
+	}
+
+	rec := doPost(t, s, "/projects/1/remove", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "cascade baseline") {
+		t.Errorf("expected a cascade message, got %q", rec.Body.String())
+	}
+	if !projectExists(t, d, 1) {
+		t.Errorf("project 1 was removed despite the guard")
+	}
+}
+
+// TestHandleRemoveProject_StandaloneLineageRootSucceeds: a project that is its
+// own lineage root (the common case — Create backfills lineage_root_id = id)
+// with no later iterations removes cleanly; the self-reference goes away with
+// the row.
+func TestHandleRemoveProject_StandaloneLineageRootSucceeds(t *testing.T) {
+	s, d := openTestServer(t)
+	ctx := context.Background()
+	pid := seedProject(t, d)
+	if _, err := d.ExecContext(ctx,
+		`UPDATE projects SET status = 'full_stopped', lineage_root_id = id WHERE id = ?`, pid); err != nil {
+		t.Fatalf("set project: %v", err)
+	}
+
+	rec := doPost(t, s, "/projects/"+strconv.FormatInt(pid, 10)+"/remove", nil)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if projectExists(t, d, pid) {
+		t.Errorf("project still present after remove")
 	}
 }
 

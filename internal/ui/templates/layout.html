@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{template "title" .}} — Ratchet</title>
-  <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"></script>
+  <script src="/static/htmx-2.0.4.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: ui-monospace, monospace; font-size: 14px; color: #222; background: #fafafa; padding: 0 20px 40px; }
@@ -41,6 +41,21 @@
     .status.execute_revised     { background: #dbeafe; color: #1d4ed8; }
     .status.execute_as_is       { background: #f0f0f0; color: #555; }
     .status.full_stop           { background: #fee2e2; color: #991b1b; }
+    /* project status */
+    .status.fixture             { background: #e0e7ff; color: #3730a3; }
+    /* executions.termination_cause */
+    .status.no_write            { background: #fee2e2; color: #991b1b; }
+    /* adjudications.decision */
+    .status.test_reject         { background: #ffedd5; color: #9a3412; }
+    .status.re_refine           { background: #dbeafe; color: #1d4ed8; }
+    /* audit_reconcile_rounds.outcome */
+    .status.converged           { background: #dcfce7; color: #166534; }
+    .status.disagreed_continuing{ background: #fef9c3; color: #854d0e; }
+    .status.redecompose         { background: #ffedd5; color: #9a3412; }
+    .status.reconcile_rejected  { background: #fee2e2; color: #991b1b; }
+    /* certifications.preliminary_decision / final_decision */
+    .status.approve             { background: #dcfce7; color: #166534; }
+    .status.reject              { background: #fee2e2; color: #991b1b; }
     .over-budget                { color: #dc2626; font-weight: bold; }
     .alert { background: #ffedd5; border: 1px solid #fdba74; padding: 10px 14px; border-radius: 4px; margin-bottom: 20px; }
     .failure-box { background: #fef2f2; border: 1px solid #fca5a5; padding: 10px 14px; border-radius: 4px; margin-bottom: 20px; color: #991b1b; font-size: 0.9em; }

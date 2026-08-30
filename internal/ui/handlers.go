@@ -472,6 +472,40 @@ func (s *server) handleRemoveProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Guard: a project still referenced by another project's loop-mode FK
+	// columns can't be deleted — the final `DELETE FROM projects` would hit a
+	// live foreign-key violation (foreign_keys is ON, db.go) and roll the whole
+	// transaction back. Both columns were added on the loop-mode branch after
+	// this handler was written; the steps list below only ever learned to
+	// null out the older recovered_from_project_id. Rather than orphan the
+	// referencing rows, block the removal and say what's in the way.
+	var laterIterations int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM projects WHERE lineage_root_id = ? AND id != ?`, id, id,
+	).Scan(&laterIterations); err != nil {
+		http.Error(w, fmt.Sprintf("check lineage: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if laterIterations > 0 {
+		http.Error(w, fmt.Sprintf(
+			"project %d is the root of a lineage with %d later iteration(s) — remove those first",
+			id, laterIterations), http.StatusBadRequest)
+		return
+	}
+	var cascadeChildren int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM projects WHERE cascade_baseline_project_id = ?`, id,
+	).Scan(&cascadeChildren); err != nil {
+		http.Error(w, fmt.Sprintf("check cascade baseline: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if cascadeChildren > 0 {
+		http.Error(w, fmt.Sprintf(
+			"project %d is the cascade baseline for %d other project(s) — remove those first",
+			id, cascadeChildren), http.StatusBadRequest)
+		return
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("begin tx: %v", err), http.StatusInternalServerError)
