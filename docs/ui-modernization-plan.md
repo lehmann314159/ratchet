@@ -26,7 +26,7 @@ any one can be picked up cold.
 | Date | Workstream | What landed | Commit |
 |------|-----------|-------------|--------|
 | 2026-08-30 | — | Plan written | ab75e12 |
-| 2026-08-30 | Milestone A | W7 (remove-project FK guard), W8 (status CSS), W13 htmx vendored | 72acf47 |
+| 2026-08-30 | Milestone A | W7 (remove-project FK guard), W8 (status CSS), W13 htmx vendored | 9a9a51a |
 
 ---
 
