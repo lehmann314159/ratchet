@@ -28,7 +28,7 @@ any one can be picked up cold.
 | 2026-08-30 | — | Plan written | ab75e12 |
 | 2026-08-30 | Milestone A | W7 (remove-project FK guard), W8 (status CSS), W13 htmx vendored | 9a9a51a |
 | 2026-08-30 | Milestone B | W3 (guidance-log render + rewind-from-UI), W10 (pause reason) | 2d67153 |
-| 2026-08-30 | Milestone C | new GET /projects/{id} page, W1 (lineages), W9 (active-project), W2 (cascade) | (pending) |
+| 2026-08-30 | Milestone C | new GET /projects/{id} page, W1 (lineages), W9 (active-project), W2 (cascade) | 7937138 |
 
 ---
 
