@@ -10,7 +10,11 @@ Four diagrams, from outermost to innermost:
 3. **Per-bead pipeline** — the loop every bead goes through; this is where most of the complexity lives.
 4. **Generic job status** — the low-level `handoff_jobs.status` FSM that every verb call goes through underneath diagrams 2 and 3.
 
-Render with a Mermaid-capable viewer (VS Code preview, GitHub, mermaid.live).
+Render with a Mermaid-capable viewer (VS Code preview, GitHub, mermaid.live). The
+`diagrams/*.png` images were last regenerated 2026-08-30 from the Mermaid source below
+via `npx @mermaid-js/mermaid-cli@11.16.0 -i X.mmd -o X.png -b white -s 3`. Keep edge
+labels free of `;` and free of `{ }` — mermaid 11.16.0 mis-parses both inside a
+stateDiagram label.
 
 See `docs/fixtures.md` for the `fixture` status, the three pause knobs, and the
 `save-fixture`/`clone-project` workflow. See the **Cascade iterations** section at the
@@ -31,10 +35,10 @@ run the cascade path).
 stateDiagram-v2
     [*] --> active : new-project, or<br/>clone-project (from any status)
     active --> paused : a pause knob matches<br/>(pause_after_reconcile,<br/>pause_after_verb, or<br/>pause_after_bead_id —<br/>see docs/fixtures.md)
-    paused --> active : resume-project CLI<br/>(pure status flip — the next job was<br/>already enqueued before pausing;<br/>resume.go:65)
+    paused --> active : resume-project CLI<br/>(pure status flip — the next job was<br/>already enqueued before pausing,<br/>resume.go:65)
     active --> full_stopped : full_stop decision on any bead (Diagram 3),<br/>or 5 consecutive CERTIFY_MANIFEST rejections,<br/>or DECOMPOSE_SPEC bead-ordering violations past cap,<br/>or full-stop-project CLI
     active --> complete : declare_success on the last<br/>remaining pending bead (Diagram 3),<br/>or a zero-diff cascade iteration<br/>(CASCADE_REVIEW finds nothing changed)
-    active --> fixture : save-fixture CLI<br/>(in-place renumber to a negative id;<br/>never dispatched again — fixture.go:80)
+    active --> fixture : save-fixture CLI<br/>(in-place renumber to a negative id,<br/>never dispatched again — fixture.go:80)
     paused --> fixture : save-fixture CLI<br/>(also allowed — the paused project's<br/>inert pending job moves with it)
     full_stopped --> [*]
     complete --> [*]
@@ -43,7 +47,7 @@ stateDiagram-v2
     note right of active
       Diagrams 2 and 3 both run
       while status = active.
-      Diagram 2 runs once, first;
+      Diagram 2 runs once, first.
       Diagram 3 repeats per bead.
     end note
 
@@ -56,7 +60,7 @@ stateDiagram-v2
     end note
 ```
 
-![Project status diagram](diagrams/1_project_status.png) — **stale**: predates the `fixture` status, the generalized pause knobs, and the cascade path. Regenerate from the Mermaid source above next time the PNGs are refreshed.
+![Project status diagram](diagrams/1_project_status.png)
 
 ## 2. Bootstrap (runs once, before bead 1)
 
@@ -80,23 +84,20 @@ stateDiagram-v2
     CERTIFY_MANIFEST --> BOOTSTRAP_FAILED : final_decision = reject<br/>(reject count >= 5)
 
     DECOMPOSE_SPEC --> AUDIT_DECOMPOSITION : passed the forward<br/>file-reference check
-    DECOMPOSE_SPEC --> DECOMPOSE_SPEC : bead-ordering violation<br/>(mechanical; redecompose round,<br/>attempt < decomposeRedecomposeCap = 3)
-    DECOMPOSE_SPEC --> BOOTSTRAP_FAILED : bead-ordering violation<br/>persists at redecompose cap
+    DECOMPOSE_SPEC --> BOOTSTRAP_FAILED : bead-ordering violation persists<br/>past redecompose cap of 3<br/>(under the cap, DECOMPOSE_SPEC just re-runs<br/>with the violations in its prompt)
 
     AUDIT_DECOMPOSITION --> DECOMPOSITION_APPROVED : overall_verdict = no_issues
     AUDIT_DECOMPOSITION --> RECONCILE_DECOMPOSITION : overall_verdict = issues_found
-    RECONCILE_DECOMPOSITION --> AUDIT_DECOMPOSITION : outcome = disagreed_continuing<br/>(round < audit_reconcile_round_cap, default 2)
-    RECONCILE_DECOMPOSITION --> RECONCILE_ESCALATED : outcome = escalated<br/>(round >= cap)
-    RECONCILE_DECOMPOSITION --> RECONCILE_DECOMPOSITION : its own fix reintroduces a<br/>bead-ordering violation<br/>(reconcile_rejected round,<br/>attempt < reconcileRejectCap = 3)
-    RECONCILE_DECOMPOSITION --> RECONCILE_ESCALATED : reconcile_rejected persists at cap
+    RECONCILE_DECOMPOSITION --> AUDIT_DECOMPOSITION : outcome = disagreed_continuing<br/>(round below audit_reconcile_round_cap, default 2)
+    RECONCILE_DECOMPOSITION --> RECONCILE_ESCALATED : outcome = escalated (round cap hit),<br/>or its own fix keeps reintroducing an<br/>ordering violation past reconcileRejectCap (3)
     RECONCILE_DECOMPOSITION --> DECOMPOSITION_APPROVED : outcome = converged
 
     DECOMPOSITION_APPROVED --> DISPATCH_BEAD_1 : fresh project,<br/>no pause knob
     DECOMPOSITION_APPROVED --> PROJECT_PAUSED : pause_after_reconcile, or<br/>pause_after_verb = RECONCILE_DECOMPOSITION
     DECOMPOSITION_APPROVED --> CASCADE_REVIEW : cascade_baseline_project_id is set
 
-    CASCADE_REVIEW --> DISPATCH_CHANGED_BEAD : >= 1 bead's spec differs from baseline<br/>(each changed bead reset to pending;<br/>lowest-id changed bead dispatched)
-    CASCADE_REVIEW --> PROJECT_COMPLETE : no bead's spec changed<br/>(zero-diff iteration — nothing to run)
+    CASCADE_REVIEW --> DISPATCH_CHANGED_BEAD : one or more bead specs<br/>differ from baseline<br/>(each changed bead reset to pending,<br/>lowest-id changed bead dispatched)
+    CASCADE_REVIEW --> PROJECT_COMPLETE : no bead spec changed<br/>(zero-diff iteration — nothing to run)
     DISPATCH_CHANGED_BEAD --> PROJECT_PAUSED : pause knob set
     DISPATCH_CHANGED_BEAD --> [*] : changed bead enters Diagram 3
 
@@ -107,14 +108,18 @@ stateDiagram-v2
     DISPATCH_BEAD_1 --> [*] : bead 1 enters Diagram 3
 ```
 
-![Bootstrap diagram](diagrams/2_bootstrap.png) — predates the cascade path and the two mechanical redecompose/reconcile-rejected self-loops.
+![Bootstrap diagram](diagrams/2_bootstrap.png)
 
 Notes:
 - `AUDIT_DECOMPOSITION` with `no_issues` skips `RECONCILE_DECOMPOSITION` — reconcile only runs when audit found something to fix.
-- The `redecompose` / `reconcile_rejected` self-loops are mechanical, not model
-  judgment: a forward file-reference / bead-ordering check runs on the proposed
-  decomposition, and a violation bounces the verb with the violations rendered into
-  its next prompt.
+- **`redecompose` / `reconcile_rejected` retry loops** (drawn only as their escalation
+  edges above, to keep the diagram readable): a mechanical forward-file-reference /
+  bead-ordering check runs on the proposed decomposition. `DECOMPOSE_SPEC` failing it
+  records a `redecompose` `audit_reconcile_rounds` row and re-enqueues `DECOMPOSE_SPEC`
+  with the violations in its next prompt; at `decomposeRedecomposeCap` (3) the project
+  is `full_stopped`. `RECONCILE_DECOMPOSITION` failing it on its *own* proposed fix
+  records a `reconcile_rejected` row and re-enqueues `RECONCILE_DECOMPOSITION`; at
+  `reconcileRejectCap` (3) the job is escalated. Neither is a model judgment call.
 
 ## 3. Per-bead pipeline
 
@@ -157,7 +162,7 @@ stateDiagram-v2
     executing --> succeeded : declare_success
     executing --> full_stopped : full_stop
     executing --> pending : rewind-bead CLI<br/>(spec reset to revision 1, test files<br/>deleted, impl files stubbed, fresh<br/>attempt budget, restarts at<br/>REFINE_TESTS_WRITE cycle 1)<br/>callable from ESCALATED too
-    succeeded --> pending : cascade reset (cascade_review.go)<br/>a design-doc-override clone's diff proved<br/>this bead's spec changed vs the baseline —<br/>like rewind but bypasses the "already<br/>succeeded" guard; snapshot under<br/>traces/bead-{id}-cascade-{n}/
+    succeeded --> pending : cascade reset (cascade_review.go) —<br/>a design-doc-override clone's diff proved<br/>this bead's spec changed vs the baseline,<br/>so it is reset like a rewind but without<br/>the already-succeeded guard (pre-reset<br/>files snapshotted first)
 
     succeeded --> [*] : REVISE_PENDING revises other pending<br/>specs, then dispatches the next pending<br/>bead into its own Diagram 3<br/>(or project.status = complete if none left,<br/>or project.status = paused if<br/>pause_after_bead_id matches this bead<br/>— see docs/fixtures.md)
     full_stopped --> [*] : cascades every later pending<br/>bead straight to full_stopped too
