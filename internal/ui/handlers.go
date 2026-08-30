@@ -86,6 +86,8 @@ type projectDetailData struct {
 	NextIter     *ProjectRow      // iteration N+1, or nil
 	Baseline     *ProjectRow      // cascade baseline project, or nil
 	CascadeBeads []CascadeBeadRow // populated only for a cascade project
+	Rounds       []RoundRow       // AUDIT/RECONCILE decomposition debate
+	Bootstrap    *BootstrapState  // SURVEY → VERIFY → CERTIFY → DECOMPOSE
 }
 
 func (s *server) projectDetailData(ctx context.Context, r *http.Request, id int64) (*projectDetailData, error) {
@@ -96,6 +98,10 @@ func (s *server) projectDetailData(ctx context.Context, r *http.Request, id int6
 	d := &projectDetailData{baseData: s.base(r), Project: p}
 	d.Beads, _ = queryBeads(ctx, s.db, id)
 	d.Jobs, _ = queryRecentJobs(ctx, s.db, id)
+	d.Rounds, _ = queryAuditReconcileRounds(ctx, s.db, id)
+	if d.Bootstrap, _ = queryBootstrapState(ctx, s.db, id); d.Bootstrap == nil {
+		d.Bootstrap = &BootstrapState{}
+	}
 
 	root := id
 	if p.LineageRootID.Valid {
@@ -181,7 +187,8 @@ func (s *server) handleEscalations(w http.ResponseWriter, r *http.Request) {
 
 type escalationData struct {
 	baseData
-	Job *EscalatedRow
+	Job    *EscalatedRow
+	Rounds []RoundRow // decomposition debate, when the escalated verb is AUDIT/RECONCILE
 }
 
 func (s *server) handleEscalationDetail(w http.ResponseWriter, r *http.Request) {
@@ -195,7 +202,11 @@ func (s *server) handleEscalationDetail(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, fmt.Sprintf("job not found: %v", err), http.StatusNotFound)
 		return
 	}
-	s.render(w, s.tmpl.escalation, escalationData{baseData: s.base(r), Job: job})
+	data := escalationData{baseData: s.base(r), Job: job}
+	if job.Verb == "AUDIT_DECOMPOSITION" || job.Verb == "RECONCILE_DECOMPOSITION" {
+		data.Rounds, _ = queryAuditReconcileRounds(r.Context(), s.db, job.ProjectID)
+	}
+	s.render(w, s.tmpl.escalation, data)
 }
 
 // --- Requeue ---

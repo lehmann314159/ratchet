@@ -31,6 +31,8 @@ type ProjectRow struct {
 	IterationNumber          int
 	CascadeBaselineProjectID sql.NullInt64
 
+	AuditReconcileRoundCap int
+
 	// NextJobVerb / NextJobBeadID describe the pending handoff_job that was
 	// enqueued right before the project paused — what resuming will dispatch.
 	// Populated only for a paused project (fillPauseNextJob).
@@ -46,7 +48,7 @@ func (p ProjectRow) IsCascade() bool { return p.CascadeBaselineProjectID.Valid }
 // the exact order scanProjectRow expects.
 const projectColumns = `id, label, status, folder_path, design_doc_path, created_at,
 	pause_after_reconcile, pause_after_verb, pause_after_bead_id, reconcile_self_resolve,
-	lineage_root_id, iteration_number, cascade_baseline_project_id`
+	lineage_root_id, iteration_number, cascade_baseline_project_id, audit_reconcile_round_cap`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -54,7 +56,7 @@ func scanProjectRow(sc scanner) (*ProjectRow, error) {
 	p := &ProjectRow{}
 	err := sc.Scan(&p.ID, &p.Label, &p.Status, &p.FolderPath, &p.DesignDoc, &p.CreatedAt,
 		&p.PauseAfterReconcile, &p.PauseAfterVerb, &p.PauseAfterBeadID, &p.ReconcileSelfResolve,
-		&p.LineageRootID, &p.IterationNumber, &p.CascadeBaselineProjectID)
+		&p.LineageRootID, &p.IterationNumber, &p.CascadeBaselineProjectID, &p.AuditReconcileRoundCap)
 	return p, err
 }
 
@@ -313,6 +315,182 @@ func queryLineageMembers(ctx context.Context, d *db.DB, rootID int64) ([]Project
 	return out, rows.Err()
 }
 
+// --- W4: AUDIT/RECONCILE decomposition debate ---
+
+type RoundRow struct {
+	RoundNumber   int
+	Critique      string
+	Reconciliation string
+	Outcome       string
+	CreatedAt     string
+}
+
+func queryAuditReconcileRounds(ctx context.Context, d *db.DB, projectID int64) ([]RoundRow, error) {
+	rows, err := d.QueryContext(ctx, `
+		SELECT round_number, critique_text, reconciliation, outcome, created_at
+		FROM audit_reconcile_rounds WHERE project_id = ? ORDER BY round_number`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("audit/reconcile rounds: %w", err)
+	}
+	defer rows.Close()
+	var out []RoundRow
+	for rows.Next() {
+		var r RoundRow
+		if err := rows.Scan(&r.RoundNumber, &r.Critique, &r.Reconciliation, &r.Outcome, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// --- W5: manifest bootstrap (SURVEY → VERIFY → CERTIFY → DECOMPOSE) ---
+
+type BootstrapStage struct {
+	Verb   string
+	Status string // "complete" | "running" | "pending" | "failed_retry" | "escalated" | "" (not reached)
+}
+
+type VerifyChecks struct {
+	AttemptNumber          int
+	FilePresence           bool
+	NoBehavioralTests      bool
+	Compile                bool
+	APICheck               bool
+	StubPurity             bool
+	Violations             string
+	CreatedAt              string
+}
+
+type CertificationRow struct {
+	Preliminary string
+	Final       string
+	Reasoning   string
+	Feedback    string
+	CreatedAt   string
+}
+
+type BootstrapState struct {
+	Stages       []BootstrapStage
+	LatestVerify *VerifyChecks
+	Certs        []CertificationRow
+	RejectCount  int // final_decision='reject' — 5 full-stops the project
+}
+
+// HasData reports whether any bootstrap forensics exist yet.
+func (b BootstrapState) HasData() bool {
+	return b.LatestVerify != nil || len(b.Certs) > 0
+}
+
+var bootstrapVerbs = []string{"SURVEY_SPEC", "VERIFY_MANIFEST", "CERTIFY_MANIFEST", "DECOMPOSE_SPEC"}
+
+func queryBootstrapState(ctx context.Context, d *db.DB, projectID int64) (*BootstrapState, error) {
+	b := &BootstrapState{}
+
+	for _, verb := range bootstrapVerbs {
+		// The most-advanced status any job for this verb has reached. Rank so a
+		// completed earlier attempt doesn't mask a later pending retry.
+		var status string
+		_ = d.QueryRowContext(ctx, `
+			SELECT status FROM handoff_jobs
+			WHERE project_id = ? AND verb = ?
+			ORDER BY CASE status
+			  WHEN 'running' THEN 0 WHEN 'escalated' THEN 1 WHEN 'failed_retry' THEN 2
+			  WHEN 'pending' THEN 3 WHEN 'complete' THEN 4 ELSE 5 END, id DESC
+			LIMIT 1`, projectID, verb).Scan(&status)
+		b.Stages = append(b.Stages, BootstrapStage{Verb: verb, Status: status})
+	}
+
+	v := &VerifyChecks{}
+	var fp, nbt, cp, apc, sp int
+	var violations sql.NullString
+	err := d.QueryRowContext(ctx, `
+		SELECT attempt_number, file_presence_pass, no_behavioral_tests_pass,
+		       compile_pass, api_check_pass, stub_purity_pass, violations, created_at
+		FROM verify_attempts WHERE project_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`,
+		projectID,
+	).Scan(&v.AttemptNumber, &fp, &nbt, &cp, &apc, &sp, &violations, &v.CreatedAt)
+	if err == nil {
+		v.FilePresence, v.NoBehavioralTests, v.Compile, v.APICheck, v.StubPurity = fp == 1, nbt == 1, cp == 1, apc == 1, sp == 1
+		v.Violations = violations.String
+		b.LatestVerify = v
+	} else if err != sql.ErrNoRows {
+		return nil, fmt.Errorf("latest verify attempt: %w", err)
+	}
+
+	rows, err := d.QueryContext(ctx, `
+		SELECT preliminary_decision, final_decision,
+		       COALESCE(model_reasoning, ''), COALESCE(feedback, ''), created_at
+		FROM certifications WHERE project_id = ? ORDER BY created_at, id`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("certifications: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var c CertificationRow
+		if err := rows.Scan(&c.Preliminary, &c.Final, &c.Reasoning, &c.Feedback, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		if c.Final == "reject" {
+			b.RejectCount++
+		}
+		b.Certs = append(b.Certs, c)
+	}
+	return b, rows.Err()
+}
+
+// --- W6: REFINE_TESTS write→critique→judge cycles ---
+
+type RefinementTurn struct {
+	Turn      int
+	Verb      string
+	Changed   bool
+	Summary   string
+	Decision  string // JUDGE only: "approved" | "revise"
+	CreatedAt string
+}
+
+type RefinementCycle struct {
+	CycleID int64
+	Turns   []RefinementTurn
+	Verdict string // the cycle's JUDGE decision, if it has one yet
+}
+
+const refinementCycleCap = 5
+
+func queryTestRefinements(ctx context.Context, d *db.DB, beadID int64) ([]RefinementCycle, error) {
+	rows, err := d.QueryContext(ctx, `
+		SELECT cycle_id, turn, verb, changed, COALESCE(summary, ''), decision, created_at
+		FROM test_refinements WHERE bead_id = ? ORDER BY cycle_id, turn`, beadID)
+	if err != nil {
+		return nil, fmt.Errorf("test refinements: %w", err)
+	}
+	defer rows.Close()
+
+	var cycles []RefinementCycle
+	idx := make(map[int64]int)
+	for rows.Next() {
+		var t RefinementTurn
+		var cid int64
+		var changed int
+		if err := rows.Scan(&cid, &t.Turn, &t.Verb, &changed, &t.Summary, &t.Decision, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		t.Changed = changed == 1
+		ci, ok := idx[cid]
+		if !ok {
+			idx[cid] = len(cycles)
+			cycles = append(cycles, RefinementCycle{CycleID: cid})
+			ci = len(cycles) - 1
+		}
+		cycles[ci].Turns = append(cycles[ci].Turns, t)
+		if t.Verb == "REFINE_TESTS_JUDGE" && t.Decision != "" {
+			cycles[ci].Verdict = t.Decision
+		}
+	}
+	return cycles, rows.Err()
+}
+
 func queryBeads(ctx context.Context, d *db.DB, projectID int64) ([]BeadRow, error) {
 	rows, err := d.QueryContext(ctx, `
 		SELECT b.id, b.status, COALESCE(br.full_text, '{}'),
@@ -534,14 +712,16 @@ type RevisionRow struct {
 
 type beadDetailData struct {
 	baseData
-	BeadID          int64
-	BeadTitle       string
-	BeadStatus      string
-	HasEscalatedJob bool
-	Executions      []ExecutionRow
-	Revisions       []RevisionRow
-	RewindSnapshots []int
-	GuidanceNotes   []project.GuidanceNote
+	BeadID             int64
+	BeadTitle          string
+	BeadStatus         string
+	HasEscalatedJob    bool
+	Executions         []ExecutionRow
+	Revisions          []RevisionRow
+	RewindSnapshots    []int
+	GuidanceNotes      []project.GuidanceNote
+	RefinementCycles   []RefinementCycle
+	RefinementCycleCap int
 }
 
 func queryBeadDetail(ctx context.Context, d *db.DB, beadID int64) (*beadDetailData, error) {
@@ -572,6 +752,9 @@ func queryBeadDetail(ctx context.Context, d *db.DB, beadID int64) (*beadDetailDa
 		`SELECT COUNT(*) FROM handoff_jobs WHERE bead_id = ? AND status = 'escalated'`,
 		beadID).Scan(&escalated)
 	out.HasEscalatedJob = escalated > 0
+
+	out.RefinementCycleCap = refinementCycleCap
+	out.RefinementCycles, _ = queryTestRefinements(ctx, d, beadID)
 
 	// Execution history.
 	rows, err := d.QueryContext(ctx, `

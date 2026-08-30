@@ -41,6 +41,35 @@
   {{end}}
 </div>
 
+{{if .RefinementCycles}}
+<div class="section">
+  <h2>Test Refinement</h2>
+  <p class="meta">REFINE_TESTS_WRITE → REFINE_TESTS_CRITIQUE → REFINE_TESTS_JUDGE, capped at {{.RefinementCycleCap}} cycles.</p>
+  {{range .RefinementCycles}}
+  <div class="refine-cycle">
+    <div>
+      <strong>Cycle {{.CycleID}}</strong>
+      {{if .Verdict}}<span class="status {{if eq .Verdict "approved"}}succeeded{{else}}execute_revised{{end}}">JUDGE: {{.Verdict}}</span>{{else}}<span class="meta">in progress</span>{{end}}
+    </div>
+    <table>
+      <thead><tr><th>Turn</th><th>Verb</th><th>Changed</th><th>Summary / instructions</th><th>When</th></tr></thead>
+      <tbody>
+      {{range .Turns}}
+      <tr>
+        <td class="meta">{{.Turn}}</td>
+        <td>{{.Verb}}{{if .Decision}} <span class="meta">({{.Decision}})</span>{{end}}</td>
+        <td class="meta">{{if .Changed}}yes{{else}}—{{end}}</td>
+        <td class="meta" style="white-space:pre-wrap;max-width:38rem">{{.Summary}}</td>
+        <td class="meta">{{.CreatedAt}}</td>
+      </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{end}}
+</div>
+{{end}}
+
 {{if .GuidanceNotes}}
 <div class="section">
   <h2>Human Guidance Log</h2>

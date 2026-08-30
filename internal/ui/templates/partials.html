@@ -53,6 +53,36 @@
 {{end}}
 {{end}}
 
+{{define "roundsTable"}}
+{{if .}}
+<table>
+  <thead><tr><th>Round</th><th>Outcome</th><th>Detail</th><th>When</th></tr></thead>
+  <tbody>
+  {{range .}}
+  <tr>
+    <td class="meta">{{.RoundNumber}}</td>
+    <td><span class="status {{.Outcome}}">{{.Outcome}}</span></td>
+    <td>
+      <details>
+        <summary class="meta">critique &amp; reconciliation</summary>
+        <div class="round-detail">
+          <strong>AUDIT critique</strong>
+          <pre>{{.Critique}}</pre>
+          <strong>RECONCILE response</strong>
+          <pre>{{.Reconciliation}}</pre>
+        </div>
+      </details>
+    </td>
+    <td class="meta">{{.CreatedAt}}</td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="empty">No decomposition-review rounds — AUDIT approved with no findings, or the loop hasn't run.</p>
+{{end}}
+{{end}}
+
 {{define "jobsTable"}}
 {{if .}}
 <div style="max-height:290px;overflow-y:auto;border:1px solid #e5e5e5;border-radius:3px">

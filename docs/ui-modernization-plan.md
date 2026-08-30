@@ -29,6 +29,7 @@ any one can be picked up cold.
 | 2026-08-30 | Milestone A | W7 (remove-project FK guard), W8 (status CSS), W13 htmx vendored | 9a9a51a |
 | 2026-08-30 | Milestone B | W3 (guidance-log render + rewind-from-UI), W10 (pause reason) | 2d67153 |
 | 2026-08-30 | Milestone C | new GET /projects/{id} page, W1 (lineages), W9 (active-project), W2 (cascade) | 7937138 |
+| 2026-08-30 | Milestone D | W4 (decomposition debate), W5 (manifest bootstrap), W6 (REFINE_TESTS cycle) | PENDING |
 
 ---
 
@@ -242,7 +243,14 @@ bead is a 409.
 
 ## W4 — Decomposition debate (AUDIT ↔ RECONCILE rounds)
 
-**Status:** NOT STARTED
+**Status:** DONE (Milestone D, 2026-08-30). `queryAuditReconcileRounds` →
+`[]RoundRow`; `AuditReconcileRoundCap` added to `ProjectRow`. New "Decomposition
+Review" section on the project page: "round K of cap N · reconcile self-resolve:
+cautious/permissive" header + a `roundsTable` partial (outcome badge, collapsible
+`<details>` critique/reconciliation, timestamp). Same table embedded on the
+escalation detail page when the escalated verb is
+AUDIT_DECOMPOSITION/RECONCILE_DECOMPOSITION (`escalationData.Rounds`). Tests:
+`TestProjectDetail_DecompositionReview`, `TestEscalationDetail_EmbedsRoundsForReconcile`.
 
 **Goal.** Surface the pre-execution decomposition-review loop: each round's
 critique, reconciliation, and outcome, plus round-cap progress.
@@ -280,7 +288,15 @@ gives no debate context.
 
 ## W5 — Manifest bootstrap (SURVEY / VERIFY / CERTIFY)
 
-**Status:** NOT STARTED
+**Status:** DONE (Milestone D, 2026-08-30). `queryBootstrapState` → per-stage
+status for SURVEY_SPEC/VERIFY_MANIFEST/CERTIFY_MANIFEST/DECOMPOSE_SPEC (ranked
+so a later pending retry isn't masked by an earlier complete), the latest
+`verify_attempts` row's five pass/fail checks + violations, and every
+`certifications` row with a running `reject` count. "Manifest Bootstrap" section
+on the project page (shown while there are no beads yet, or whenever any
+bootstrap forensics exist): stage strip, VERIFY check row, and
+"CERTIFY rejections: N / 5" with each reject's feedback. Test:
+`TestProjectDetail_ManifestBootstrap`.
 
 **Goal.** A view of the once-per-project bootstrap phase and, critically, the
 CERTIFY_MANIFEST rejection history that can full-stop a project.
@@ -315,7 +331,14 @@ and reason render.
 
 ## W6 — REFINE_TESTS cycle
 
-**Status:** NOT STARTED
+**Status:** DONE (Milestone D, 2026-08-30). `queryTestRefinements` groups
+`test_refinements` rows by `cycle_id` into `[]RefinementCycle` (turns +
+JUDGE verdict). New "Test Refinement" section on the bead page: per cycle, the
+WRITE→CRITIQUE→JUDGE turns (verb, changed flag, summary/instructions,
+timestamp) with the JUDGE verdict badge (approved/revise), "capped at 5
+cycles". `re_refine` is already visible via the executions table's decision
+column + its W8 badge; not separately tagged. Test:
+`TestBeadDetail_ShowsRefinementCycles`.
 
 **Goal.** Show the test-first WRITE → CRITIQUE → JUDGE cycles on the bead page,
 and distinguish `re_refine` executions from ordinary retries.
@@ -643,10 +666,10 @@ Milestone-based; each milestone is a sensible stopping point.
 - **W9** (correct active-project selection) — done
 - **W2** (cascade view) — done
 
-### Milestone D — dark pipeline phases (2 sessions)
-- **W4** (decomposition debate)
-- **W5** (manifest bootstrap)
-- **W6** (REFINE_TESTS cycle)
+### Milestone D — dark pipeline phases — DONE (2026-08-30)
+- **W4** (decomposition debate) — done
+- **W5** (manifest bootstrap) — done
+- **W6** (REFINE_TESTS cycle) — done
 
 ### Milestone E — forensics depth (1–2 sessions)
 - **W11a** (markdown rendering) — do first, unblocks the rest

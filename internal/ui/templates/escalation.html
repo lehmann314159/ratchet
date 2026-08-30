@@ -23,6 +23,12 @@
 <p class="empty">No output recorded.</p>
 {{end}}
 
+{{if .Rounds}}
+<h2>Decomposition Review</h2>
+<p class="meta">Every AUDIT_DECOMPOSITION ↔ RECONCILE_DECOMPOSITION round for this project — round {{len .Rounds}} reached the cap here.</p>
+{{template "roundsTable" .Rounds}}
+{{end}}
+
 <div class="actions">
   <form method="POST" action="/escalations/{{.Job.ID}}/requeue">
     <button type="submit">Requeue (reset strikes, retry)</button>

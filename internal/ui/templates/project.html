@@ -51,6 +51,53 @@
 
 {{template "pauseBox" .Project}}
 
+{{if or .Bootstrap.HasData (not .Beads)}}
+<div class="section">
+  <h2>Manifest Bootstrap</h2>
+  <div class="stage-strip">
+    {{range .Bootstrap.Stages}}
+    <span class="stage">{{.Verb}} <span class="status {{if .Status}}{{.Status}}{{else}}pending{{end}}">{{if .Status}}{{.Status}}{{else}}—{{end}}</span></span>
+    {{end}}
+  </div>
+  {{with .Bootstrap.LatestVerify}}
+  <p class="meta" style="margin-top:10px">Latest VERIFY_MANIFEST (attempt {{.AttemptNumber}}, {{.CreatedAt}}):</p>
+  <div class="check-row">
+    <span class="check {{if .FilePresence}}ok{{else}}bad{{end}}">file presence</span>
+    <span class="check {{if .NoBehavioralTests}}ok{{else}}bad{{end}}">no behavioral tests</span>
+    <span class="check {{if .Compile}}ok{{else}}bad{{end}}">compile</span>
+    <span class="check {{if .APICheck}}ok{{else}}bad{{end}}">api check</span>
+    <span class="check {{if .StubPurity}}ok{{else}}bad{{end}}">stub purity</span>
+  </div>
+  {{if .Violations}}<pre>{{.Violations}}</pre>{{end}}
+  {{end}}
+  {{if .Bootstrap.Certs}}
+  <p class="meta" style="margin-top:10px">
+    CERTIFY_MANIFEST rejections: <strong>{{.Bootstrap.RejectCount}} / 5</strong>
+    <span class="meta">(5 full-stops the project)</span>
+  </p>
+  {{range .Bootstrap.Certs}}
+  {{if eq .Final "reject"}}
+  <div class="failure-box">
+    <span class="meta">{{.CreatedAt}} · preliminary {{.Preliminary}} → final reject</span>
+    {{if .Feedback}}<div style="white-space:pre-wrap;margin-top:4px">{{.Feedback}}</div>{{end}}
+  </div>
+  {{end}}
+  {{end}}
+  {{end}}
+</div>
+{{end}}
+
+{{if .Rounds}}
+<div class="section">
+  <h2>Decomposition Review</h2>
+  <p class="meta">
+    AUDIT_DECOMPOSITION ↔ RECONCILE_DECOMPOSITION · round {{len .Rounds}} of cap {{.Project.AuditReconcileRoundCap}}
+    · reconcile self-resolve: {{if .Project.ReconcileSelfResolve}}permissive{{else}}cautious{{end}}
+  </p>
+  {{template "roundsTable" .Rounds}}
+</div>
+{{end}}
+
 {{if .Project.IsCascade}}
 <div class="section">
   <h2>Cascade Review</h2>

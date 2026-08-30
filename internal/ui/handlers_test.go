@@ -902,6 +902,129 @@ func TestProjectDetail_CascadeReview(t *testing.T) {
 	}
 }
 
+// --- Milestone D: decomposition debate, manifest bootstrap, REFINE_TESTS cycle ---
+
+func seedRound(t *testing.T, d *db.DB, projectID int64, n int, critique, reconciliation, outcome string) {
+	t.Helper()
+	if _, err := d.ExecContext(context.Background(), `
+		INSERT INTO audit_reconcile_rounds (project_id, round_number, critique_text, reconciliation, outcome, created_at)
+		VALUES (?, ?, ?, ?, ?, '2026-01-01T00:00:00Z')`,
+		projectID, n, critique, reconciliation, outcome); err != nil {
+		t.Fatalf("seed round: %v", err)
+	}
+}
+
+func TestProjectDetail_DecompositionReview(t *testing.T) {
+	s, d := openTestServer(t)
+	pid := seedProject(t, d)
+	seedRound(t, d, pid, 1, "bead 3 forward-references parser.go", "agreed, reordered", "converged")
+	seedRound(t, d, pid, 2, "bead 5 precedence still ambiguous", "disagree: spec is clear", "disagreed_continuing")
+
+	body := getBody(t, s, "/projects/"+strconv.FormatInt(pid, 10))
+	for _, want := range []string{"Decomposition Review", "round 2 of cap 2", "disagreed_continuing",
+		"bead 5 precedence still ambiguous", "agreed, reordered"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("project detail missing %q", want)
+		}
+	}
+}
+
+func TestProjectDetail_ManifestBootstrap(t *testing.T) {
+	s, d := openTestServer(t)
+	ctx := context.Background()
+	pid := seedProject(t, d)
+	jobID := seedJob(t, d, pid, 0, "VERIFY_MANIFEST", "complete")
+	if _, err := d.ExecContext(ctx, `
+		INSERT INTO verify_attempts
+		  (project_id, job_id, attempt_number, file_presence_pass, no_behavioral_tests_pass,
+		   compile_pass, api_check_pass, stub_purity_pass, violations, created_at)
+		VALUES (?, ?, 2, 1, 0, 1, 1, 1, 'foo.go: behavioral test in stub', '2026-01-02T00:00:00Z')`,
+		pid, jobID); err != nil {
+		t.Fatalf("seed verify_attempt: %v", err)
+	}
+	for i, fb := range []string{"Manifest omits the parser package.", "Still missing error-path files."} {
+		if _, err := d.ExecContext(ctx, `
+			INSERT INTO certifications
+			  (project_id, verify_attempt_id, preliminary_decision, final_decision, feedback, created_at)
+			VALUES (?, (SELECT id FROM verify_attempts WHERE project_id = ?), 'reject', 'reject', ?, ?)`,
+			pid, pid, fb, fmt.Sprintf("2026-01-0%dT00:00:00Z", 3+i)); err != nil {
+			t.Fatalf("seed certification: %v", err)
+		}
+	}
+
+	body := getBody(t, s, "/projects/"+strconv.FormatInt(pid, 10))
+	for _, want := range []string{"Manifest Bootstrap", "SURVEY_SPEC", "2 / 5",
+		"Manifest omits the parser package.", "no behavioral tests"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("project detail missing %q", want)
+		}
+	}
+}
+
+func TestEscalationDetail_EmbedsRoundsForReconcile(t *testing.T) {
+	s, d := openTestServer(t)
+	pid := seedProject(t, d)
+	jobID := seedJob(t, d, pid, 0, "RECONCILE_DECOMPOSITION", "escalated")
+	seedRound(t, d, pid, 1, "ordering violation persists", "cannot fix without redecompose", "escalated")
+
+	body := getBody(t, s, "/escalations/"+strconv.FormatInt(jobID, 10))
+	if !strings.Contains(body, "Decomposition Review") || !strings.Contains(body, "ordering violation persists") {
+		t.Errorf("escalation detail missing embedded rounds:\n%s", body)
+	}
+
+	// A non-decomposition escalated job gets no rounds section.
+	jobID2 := seedJob(t, d, pid, 0, "SURVEY_SPEC", "escalated")
+	body2 := getBody(t, s, "/escalations/"+strconv.FormatInt(jobID2, 10))
+	if strings.Contains(body2, "Decomposition Review") {
+		t.Errorf("non-decomposition escalation should not show rounds")
+	}
+}
+
+func TestBeadDetail_ShowsRefinementCycles(t *testing.T) {
+	s, d := openTestServer(t)
+	ctx := context.Background()
+	pid := seedProject(t, d)
+	beadID := seedBead(t, d, pid, 300)
+	turns := []struct {
+		cyc, turn      int
+		verb, dec, sum string
+	}{
+		{1, 1, "REFINE_TESTS_WRITE", "", "wrote 4 tests"},
+		{1, 2, "REFINE_TESTS_CRITIQUE", "", "2 tests assert impl details"},
+		{1, 3, "REFINE_TESTS_JUDGE", "revise", "rewrite TestParsePrecedence"},
+		{2, 1, "REFINE_TESTS_WRITE", "", "rewrote per instructions"},
+		{2, 2, "REFINE_TESTS_JUDGE", "approved", "looks good"},
+	}
+	for _, tn := range turns {
+		if _, err := d.ExecContext(ctx, `
+			INSERT INTO test_refinements (project_id, bead_id, cycle_id, turn, verb, changed, summary, decision, created_at)
+			VALUES (?, ?, ?, ?, ?, 0, ?, ?, '2026-01-06T00:00:00Z')`,
+			pid, beadID, tn.cyc, tn.turn, tn.verb, tn.sum, tn.dec); err != nil {
+			t.Fatalf("seed test_refinement: %v", err)
+		}
+	}
+
+	body := getBody(t, s, "/beads/"+strconv.FormatInt(beadID, 10))
+	for _, want := range []string{"Test Refinement", "Cycle 1", "Cycle 2",
+		"JUDGE: revise", "JUDGE: approved", "rewrite TestParsePrecedence"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("bead detail missing %q", want)
+		}
+	}
+}
+
+// getBody issues a GET and returns the response body, failing on non-200.
+func getBody(t *testing.T, s *server, path string) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s: expected 200, got %d: %s", path, rec.Code, rec.Body.String())
+	}
+	return rec.Body.String()
+}
+
 // --- W3: guidance log + rewind ---
 
 // seedBeadWithProse inserts a bead whose current revision's full_text JSON
