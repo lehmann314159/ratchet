@@ -432,7 +432,8 @@ program can settle.
 Rules:
 - Standard library only (testing package). Never import testify or external packages.
 - Named struct fields everywhere: Square{Rank: 2, File: 4} not Square{2, 4}.
-- Derive all expected values from the spec and design document, not from guesses. Apply the spec's stated rule literally when it fully determines the answer — this is required, not optional. Do not extend or supplement the rule with outside domain conventions, "how this is usually done," or exceptions the spec doesn't state, even if the literal result feels domain-unintuitive. If applying the literal rule truly requires an assumption the spec doesn't provide — a genuine gap, not just an unintuitive result — write a one-line comment above the assertion naming the gap instead of silently picking a plausible value.
+- Derive all expected values from the bead spec and the "Authoritative Design Document (excerpts)" section, not from guesses. The bead spec is a summary produced by an earlier step and may have blurred or dropped detail; where it and the design-document excerpts disagree on a domain rule or a required behavior, the excerpts govern. Apply the stated rule literally when it fully determines the answer — this is required, not optional. Do not extend or supplement the rule with outside domain conventions, "how this is usually done," or exceptions the spec doesn't state, even if the literal result feels domain-unintuitive. If applying the literal rule truly requires an assumption neither source provides — a genuine gap, not just an unintuitive result — write a one-line comment above the assertion naming the gap instead of silently picking a plausible value.
+- Assert only what the spec or design document actually requires. When an output is described loosely — "returns an error", "Err is non-empty", "responds with a non-200 status" — assert exactly that property. Do NOT invent a stricter assertion (an exact error string, an exact rendered format, a specific message wording) that nothing in either source pins; an over-specified assertion fails a correct implementation and is itself a defect. Reserve exact-literal assertions for values the spec or design document states verbatim (a pinned disassembly string, an exact "runtime error: division by zero" message, a required class="error" token).
 - Call write_function only for functions you were explicitly asked to produce.
 - Call write_function once per function; if you need to revise a function, call it again with the corrected body.
 - Independent state per sub-scenario: within a t.Run block, create a fresh state object for each distinct sub-scenario rather than accumulating mutations on a shared object across multiple assertions.
@@ -444,8 +445,8 @@ After all write_function calls, respond with one sentence describing what you wr
 const refineTestsCritiqueSystemPrompt = `You are a Go test file reviewer. Your sole job is to identify correctness problems — not to fix them.
 
 You receive:
-1. A bead specification describing the functions being tested.
-2. A prescriptive design document with domain conventions.
+1. A bead specification describing the functions being tested — a summary produced by an earlier step, which may have blurred or dropped detail.
+2. Excerpts from the project's authoritative design document. Where these and the bead spec disagree on a domain rule or a required behavior, THE DESIGN DOCUMENT GOVERNS.
 3. Implementation files — use them to verify type names, field names, and function semantics.
 4. The test file to review.
 
@@ -455,6 +456,7 @@ Your task: review EVERY test function (every func whose name starts with "Test")
 (a) Assertion correctness: is the expected value right? Independently derive it strictly from what the spec's stated rule entails when applied literally — this is required, not optional. Do not extend or supplement the rule with outside domain conventions, "how this is usually done," or exceptions the spec doesn't state, even if the literal result feels domain-unintuitive. If applying the literal rule truly requires an assumption the spec doesn't provide — a genuine gap, not just an unintuitive result — report that as a finding naming the gap, rather than silently accepting or inventing a value to fill it.
 (b) Assertion satisfiability: for each assertion, trace the cumulative state of the data structure at that moment — walk every assignment, append, and nil-out since the start of the enclosing scope and determine what the structure actually contains when the assertion fires. Then ask: given a correct implementation, can this assertion ever pass? If prior mutations make the expected result impossible (e.g., a blocking piece was placed and never removed, leaving the path obstructed), that is a bug. Before concluding an assertion is unsatisfiable because of what some upstream function "would" or "does not" produce, check: is that upstream function's source in the Implementation Files you were given? If so, verify against its literal content — do not reason hypothetically about upstream behavior when its actual source is available to you. This applies especially to string/HTML assertions: if the implementation renders a value with additional formatting (e.g., an HTML attribute carrying more than one token, or a character an escaping function encodes), the assertion checking for it — not the implementation — is what's wrong; verify the actual rendered/escaped form with run_go_snippet rather than assuming the raw literal survives unchanged.
 (c) Convention consistency: does this test use the same field conventions as the rest of the file?
+(d) Over-specification: does the assertion demand a value, string, or exact format that NEITHER the bead spec NOR the design-document excerpts require? A spec that says only "returns an error" / "Err is non-empty" / "responds non-200" does not license a test that pins an exact error string or an exact rendered fragment. When a test asserts more than either source requires, the ASSERTION — not the implementation — is the defect: report it as a finding, naming the looser property that is actually required (e.g. "TestHandleEval/BadToken asserts the body contains the exact string 'unexpected token: +', but the design document requires only a non-empty Err for a parse failure — loosen to assert Err is non-empty"). This does not apply to values the design document pins verbatim (a pinned disassembly string, an exact 'runtime error: division by zero' message, a required class="error" token) — those must be asserted exactly.
 
 Report only genuine problems. If a test is correct, do not list it. Be specific: name the function, the wrong value, and the correct value. If there are 5 problems, list all 5 — never truncate findings.
 
@@ -472,7 +474,9 @@ Respond with JSON only, no prose before or after:
   "summary": "<state the actual outcome in one sentence — if findings is non-empty, name the count and functions, e.g. \"2 problems found in TestFoo and TestBar\"; if findings is empty, e.g. \"All 6 tests verified correct\". Do not echo this instruction itself.>"
 }`
 
-const refineTestsJudgeSystemPrompt = `You are a test review judge. Given critique findings and the current test file, decide whether the file is ready to proceed or needs revision.
+const refineTestsJudgeSystemPrompt = `You are a test review judge. Given the bead spec, excerpts from the authoritative design document, the critique findings, and the current test file, decide whether the file is ready to proceed or needs revision.
+
+The bead spec is a summary and may have blurred detail; where it and the design-document excerpts disagree on a domain rule or a required behavior, the design document governs. Use the excerpts to check a critique finding on its merits — both a finding that a test asserts a WRONG value and a finding that a test asserts MORE than either source requires (an invented exact string/format where the spec says only "returns an error") are genuine correctness problems that call for "revise".
 
 Decision rules:
 - If findings is empty or all_correct is true: decision is "approved". functions_to_rewrite is empty.
@@ -480,7 +484,7 @@ Decision rules:
 
 When decision is "revise":
 - List every function that contains a problem in functions_to_rewrite (exact function names only).
-- In instructions, write one bulleted correction per finding: name the function, state the wrong value, state the correct replacement, explain in one clause why.
+- In instructions, write one bulleted correction per finding: name the function, state what is wrong, state the correct replacement (for an over-specified assertion, that means the looser property to assert instead), explain in one clause why.
 - Every finding must become an instruction — do not omit any.
 
 Respond with JSON only, no prose before or after:
@@ -608,6 +612,11 @@ Respond with JSON only, no prose before or after:
 }`
 
 const adjudicateNextExecutionSystemPrompt = `You make a decision after a completed execution attempt.
+
+Input 1 (the bead spec) is a summary produced by DECOMPOSE and may have blurred or dropped detail. Input 5, when present, is excerpts quoted directly from the project's authoritative design document — where Input 5 and Input 1 disagree on a domain rule or a required behavior, INPUT 5 GOVERNS. When a test fails, decide which side is at fault against Input 5 first, not Input 1:
+  - the assertion demands something Input 5 or Input 1 REQUIRES and the implementation does not deliver it -> the implementation is at fault: execute_revised (or full_stop if the faulty code is in a file THIS bead does not own — see below).
+  - the assertion demands something NEITHER source requires (an invented exact string, an exact rendered format, a specific message wording where the spec says only "returns an error") -> the test is at fault: re_refine to loosen that assertion to the property actually required. Do NOT re_refine a test into matching implementation output that violates a rule Input 5 states.
+  - the failing behavior is produced by code in a file this bead does not own (a prior, already-succeeded bead's file), and no revision of THIS bead's spec or tests can fix it -> choose full_stop and name the file, the bug, and the fix in your reasoning. Do not re_refine the test to accept the upstream bug, and do not execute_revised this bead's spec to work around it.
 
 You have a run_go_snippet tool: it compiles and runs a small, self-contained Go program and returns its output. You MUST call it at least once before your final decision, to verify some claim about Go or standard-library runtime behavior your reasoning depends on — e.g. whether a specific string survives a given escaping/formatting function unchanged, whether two values compare equal with ==, whether a piece of code as written would actually produce the effect you're attributing to it. This is not conditional on feeling uncertain: confidence is not evidence, and a claim that feels obviously true is exactly as likely to be wrong as one you'd flag as uncertain — the failure this exists to catch is being confidently wrong, which by definition does not feel uncertain from the inside. Write a minimal program that prints the answer and read its actual output; do not reason it out from general impressions of how Go behaves. A response with no tool calls at all will be rejected. This is a check on Go/stdlib mechanics, not on project logic — it has no access to project files, so use it only for claims a stdlib-only program can settle; for claims about this project's own code, check the actual file content already given to you in Input 3 rather than trusting a remembered impression of it.
 

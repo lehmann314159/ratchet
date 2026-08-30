@@ -833,7 +833,8 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 			}
 		}
 	}
-	userMsg := buildAdjudicateUserMsg(currentBead, revLog, findings, compressedHistory, diffSignal)
+	docExcerpt := loadDesignDocExcerptForBead(ctx, d, job.ProjectID, currentBead)
+	userMsg := buildAdjudicateUserMsg(currentBead, revLog, findings, compressedHistory, diffSignal, docExcerpt)
 	messages := []ollama.Message{
 		{Role: "system", Content: guidance.InjectForVerbPath(adjudicateNextExecutionSystemPrompt, project.FolderPath, db.VerbAdjudicateNextExecution, "")},
 		{Role: "user", Content: userMsg},
@@ -901,7 +902,7 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 	return lastContent, nil
 }
 
-func buildAdjudicateUserMsg(bead *beadState, revLog []revisionEntry, mechanicalFindings, compressedHistory, diffSignal string) string {
+func buildAdjudicateUserMsg(bead *beadState, revLog []revisionEntry, mechanicalFindings, compressedHistory, diffSignal, docExcerpt string) string {
 	var sb strings.Builder
 
 	fmt.Fprintf(&sb, "## Input 1: Current Bead State\n\nBead ID: %d\nActual execution budget: %ds\n\n%s\n\n", bead.BeadID, bead.ExecutionBudget, bead.FullText)
@@ -923,6 +924,11 @@ func buildAdjudicateUserMsg(bead *beadState, revLog []revisionEntry, mechanicalF
 		sb.WriteString(compressedHistory)
 	} else {
 		sb.WriteString("(none — this is the first attempt)")
+	}
+
+	if docExcerpt != "" {
+		sb.WriteString("\n\n## Input 5: Authoritative Design Document (excerpts)\n\n")
+		sb.WriteString(docExcerpt)
 	}
 
 	return sb.String()

@@ -134,31 +134,6 @@ func loadRefineContext(ctx context.Context, d *db.DB, job *db.HandoffJob) (
 	return
 }
 
-func buildBaseUserMsg(bead *beadState, folderPath string, implContext string,
-	currentTestContent string, testFilePaths []string) string {
-	msg := "## Bead Specification\n\n" + bead.FullText
-
-	if prescriptive, rerr := os.ReadFile(filepath.Join(folderPath, "design_doc_prescriptive.md")); rerr == nil {
-		msg += "\n\n## Prescriptive Design Document\n\n" + string(prescriptive)
-	}
-
-	if implContext != "" {
-		msg += "\n\n## Implementation Files (prior beads — types and conventions)\n\n" +
-			strings.TrimSpace(implContext)
-	}
-
-	if currentTestContent != "" {
-		msg += "\n\n## Current Test File\n\n" + strings.TrimSpace(currentTestContent)
-	} else {
-		msg += "\n\n## Current Test File\n\n(No test file exists yet — write from scratch.)"
-	}
-
-	if len(testFilePaths) > 0 {
-		msg += "\n\n## Test Files to Produce\n\n" + strings.Join(testFilePaths, "\n")
-	}
-	return msg
-}
-
 func runCompile(ctx context.Context, folderPath string) (ok bool, output string) {
 	cmd := exec.CommandContext(ctx, "go", "test", "-c", "-o", os.DevNull, ".")
 	cmd.Dir = folderPath
@@ -299,8 +274,10 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	var allowedFuncs map[string]bool // nil = unrestricted (cycle 1)
 	var userMsg string
 
+	docExcerpt := loadDesignDocExcerptForBead(ctx, d, job.ProjectID, bead)
+
 	if cid == 1 {
-		userMsg = buildFirstWriteMsg(bead, folderPath, implContext)
+		userMsg = buildFirstWriteMsg(bead, folderPath, implContext, docExcerpt)
 	} else {
 		judgeOut, jErr := loadPriorJudgeOutput(ctx, d, beadID, cid-1)
 		if jErr != nil {
@@ -320,7 +297,7 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 				}
 			}
 		}
-		userMsg = buildRevisionWriteMsg(bead, folderPath, implContext, brokenBodies, string(judgeOut.Instructions))
+		userMsg = buildRevisionWriteMsg(bead, folderPath, implContext, brokenBodies, string(judgeOut.Instructions), docExcerpt)
 	}
 
 	messages := []ollama.Message{
@@ -551,10 +528,10 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 }
 
 // buildFirstWriteMsg builds the user message for WRITE on cycle 1 (no existing file).
-func buildFirstWriteMsg(bead *beadState, folderPath, implContext string) string {
+func buildFirstWriteMsg(bead *beadState, folderPath, implContext, docExcerpt string) string {
 	msg := "## Bead Specification\n\n" + bead.FullText
-	if prescriptive, rerr := os.ReadFile(filepath.Join(folderPath, "design_doc_prescriptive.md")); rerr == nil {
-		msg += "\n\n## Prescriptive Design Document\n\n" + string(prescriptive)
+	if docExcerpt != "" {
+		msg += "\n\n## Authoritative Design Document (excerpts)\n\n" + docExcerpt
 	}
 	if implContext != "" {
 		msg += "\n\n## Implementation Files (prior beads — types and conventions)\n\n" + strings.TrimSpace(implContext)
@@ -572,14 +549,14 @@ func buildFirstWriteMsg(bead *beadState, folderPath, implContext string) string 
 }
 
 // buildRevisionWriteMsg builds the user message for WRITE on cycle 2+ (rewriting broken functions).
-func buildRevisionWriteMsg(bead *beadState, folderPath, implContext string, brokenBodies map[string]string, instructions string) string {
+func buildRevisionWriteMsg(bead *beadState, folderPath, implContext string, brokenBodies map[string]string, instructions, docExcerpt string) string {
 	msg := "## Functions to Rewrite\n\n"
 	for name, body := range brokenBodies {
 		msg += fmt.Sprintf("### %s (current body)\n\n```go\n%s\n```\n\n", name, body)
 	}
 	msg += "## Fix Instructions\n\n" + instructions
-	if prescriptive, rerr := os.ReadFile(filepath.Join(folderPath, "design_doc_prescriptive.md")); rerr == nil {
-		msg += "\n\n## Reference: Prescriptive Design Document\n\n" + string(prescriptive)
+	if docExcerpt != "" {
+		msg += "\n\n## Reference: Authoritative Design Document (excerpts)\n\n" + docExcerpt
 	}
 	if implContext != "" {
 		msg += "\n\n## Reference: Implementation Files\n\n" + strings.TrimSpace(implContext)
@@ -837,6 +814,9 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 	}
 
 	userMsg := "## Bead Specification\n\n" + bead.FullText
+	if excerpt := loadDesignDocExcerptForBead(ctx, d, job.ProjectID, bead); excerpt != "" {
+		userMsg += "\n\n## Authoritative Design Document (excerpts)\n\n" + excerpt
+	}
 	if implContext != "" {
 		userMsg += "\n\n## Implementation Files (prior beads — types and conventions)\n\n" +
 			strings.TrimSpace(implContext)
@@ -1033,7 +1013,7 @@ type RefineTestsJudge struct {
 func (h *RefineTestsJudge) Verb() string { return db.VerbRefineTestsJudge }
 
 func (h *RefineTestsJudge) Run(ctx context.Context, d *db.DB, oc *ollama.Client, job *db.HandoffJob) (string, error) {
-	_, _, _, _, _, currentTestContent, err := loadRefineContext(ctx, d, job)
+	bead, _, _, _, _, currentTestContent, err := loadRefineContext(ctx, d, job)
 	if err != nil {
 		return "", err
 	}
@@ -1081,7 +1061,11 @@ func (h *RefineTestsJudge) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	}
 	h.adjudicateGuidance = critiqueRaw
 
-	userMsg := "## Test File\n\n" + strings.TrimSpace(currentTestContent)
+	userMsg := "## Bead Specification\n\n" + bead.FullText
+	if excerpt := loadDesignDocExcerptForBead(ctx, d, job.ProjectID, bead); excerpt != "" {
+		userMsg += "\n\n## Authoritative Design Document (excerpts)\n\n" + excerpt
+	}
+	userMsg += "\n\n## Test File\n\n" + strings.TrimSpace(currentTestContent)
 	userMsg += "\n\n## Critique Findings\n\n" + critiqueRaw
 
 	messages := []ollama.Message{

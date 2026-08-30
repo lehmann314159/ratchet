@@ -23,8 +23,17 @@ const DefaultTemperature = 0.3
 // tight, frequent polling loop (a short trace snippet in, a FIRE/NO_FIRE
 // decision out) and never touches a design doc or bead history, so it never
 // needs — and shouldn't pay the KV-cache cost of — the full default.
+//
+// 40960 is qwen3:32b's native trained context — the fleet's tightest window
+// (gemma4:31b is 262144, mistral-small3.2:24b 131072). Setting num_ctx to
+// exactly the native max avoids rope-scaling degradation while giving the
+// downstream verbs room for the design-doc excerpts now fed to
+// REFINE_TESTS_{WRITE,CRITIQUE,JUDGE} and ADJUDICATE_NEXT_EXECUTION alongside
+// the bead spec, impl context, and current test file. RAM is not the
+// constraint here — one model is resident at a time and the host has 119 GiB
+// unified memory.
 const (
-	defaultNumCtx = 32768
+	defaultNumCtx = 40960
 	MonitorNumCtx = 16384
 )
 
