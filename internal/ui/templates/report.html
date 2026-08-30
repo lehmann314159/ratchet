@@ -3,7 +3,11 @@
 <h1>{{.Title}}</h1>
 <p class="meta" style="margin-bottom:12px;">{{.Path}}</p>
 {{if .Content}}
-<pre>{{.Content}}</pre>
+<div class="md">{{.Body}}</div>
+<details style="margin-top:20px">
+  <summary class="meta">raw markdown source</summary>
+  <pre>{{.Content}}</pre>
+</details>
 {{else}}
 <p class="empty">Report not yet generated — this bead or project hasn't reached a terminal state.</p>
 {{end}}

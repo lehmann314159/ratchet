@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"ratchet/internal/project"
+	"ratchet/internal/trace"
 )
 
 // baseData is included in every page render so the layout can show the
@@ -49,6 +50,8 @@ type dashboardData struct {
 	Jobs          []JobRow
 	OtherProjects []ProjectRow   // active/paused projects other than the featured one
 	Lineages      []LineageGroup // every project, grouped by iteration lineage
+	Position      string         // pipeline-position breadcrumb
+	Live          bool           // featured project is active — poll for updates
 }
 
 func (s *server) dashboardData(r *http.Request) dashboardData {
@@ -60,6 +63,8 @@ func (s *server) dashboardData(r *http.Request) dashboardData {
 		d.Beads, _ = queryBeads(ctx, s.db, project.ID)
 		d.Jobs, _ = queryRecentJobs(ctx, s.db, project.ID)
 		d.OtherProjects, _ = queryOtherNonTerminalProjects(ctx, s.db, project.ID)
+		d.Position = queryPipelinePosition(ctx, s.db, project)
+		d.Live = project.Status == "active"
 	}
 	all, _ := queryAllProjects(ctx, s.db)
 	d.Lineages = groupByLineage(all)
@@ -88,6 +93,9 @@ type projectDetailData struct {
 	CascadeBeads []CascadeBeadRow // populated only for a cascade project
 	Rounds       []RoundRow       // AUDIT/RECONCILE decomposition debate
 	Bootstrap    *BootstrapState  // SURVEY → VERIFY → CERTIFY → DECOMPOSE
+	VerbModels   []VerbModel      // per-verb model assignments
+	Position     string           // pipeline-position breadcrumb
+	Live         bool             // project is active — poll for updates
 }
 
 func (s *server) projectDetailData(ctx context.Context, r *http.Request, id int64) (*projectDetailData, error) {
@@ -102,6 +110,9 @@ func (s *server) projectDetailData(ctx context.Context, r *http.Request, id int6
 	if d.Bootstrap, _ = queryBootstrapState(ctx, s.db, id); d.Bootstrap == nil {
 		d.Bootstrap = &BootstrapState{}
 	}
+	d.VerbModels, _ = queryVerbModels(ctx, s.db, id)
+	d.Position = queryPipelinePosition(ctx, s.db, p)
+	d.Live = p.Status == "active"
 
 	root := id
 	if p.LineageRootID.Valid {
@@ -187,8 +198,11 @@ func (s *server) handleEscalations(w http.ResponseWriter, r *http.Request) {
 
 type escalationData struct {
 	baseData
-	Job    *EscalatedRow
-	Rounds []RoundRow // decomposition debate, when the escalated verb is AUDIT/RECONCILE
+	Job                   *EscalatedRow
+	Rounds                []RoundRow // decomposition debate, when the escalated verb is AUDIT/RECONCILE
+	Attempts              []AttemptRow
+	CompressedHistoryHTML template.HTML
+	CompressedHistoryAt   string
 }
 
 func (s *server) handleEscalationDetail(w http.ResponseWriter, r *http.Request) {
@@ -197,14 +211,22 @@ func (s *server) handleEscalationDetail(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid job id", http.StatusBadRequest)
 		return
 	}
-	job, err := queryEscalatedJobByID(r.Context(), s.db, id)
+	ctx := r.Context()
+	job, err := queryEscalatedJobByID(ctx, s.db, id)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("job not found: %v", err), http.StatusNotFound)
 		return
 	}
 	data := escalationData{baseData: s.base(r), Job: job}
+	data.Attempts, _ = queryJobAttempts(ctx, s.db, id)
 	if job.Verb == "AUDIT_DECOMPOSITION" || job.Verb == "RECONCILE_DECOMPOSITION" {
-		data.Rounds, _ = queryAuditReconcileRounds(r.Context(), s.db, job.ProjectID)
+		data.Rounds, _ = queryAuditReconcileRounds(ctx, s.db, job.ProjectID)
+	}
+	if job.BeadID.Valid {
+		if text, at := queryCompressedHistory(ctx, s.db, job.BeadID.Int64); text != "" {
+			data.CompressedHistoryHTML = renderMarkdown(text)
+			data.CompressedHistoryAt = at
+		}
 	}
 	s.render(w, s.tmpl.escalation, data)
 }
@@ -767,8 +789,20 @@ func (s *server) rewindBead(w http.ResponseWriter, r *http.Request, beadID int64
 
 type traceData struct {
 	baseData
-	Path    string
-	Content string
+	Path     string
+	Content  string
+	Parsed   trace.ParsedTrace
+	Commands []traceCommand
+}
+
+// traceCommand is one CommandResult flattened for the template, with a
+// combined output string ready to display.
+type traceCommand struct {
+	Turn     int
+	Command  string
+	ExitRaw  string
+	ExitCode int
+	Output   string
 }
 
 // handleTrace serves a trace file by execution ID, never a client-supplied
@@ -791,11 +825,23 @@ func (s *server) handleTrace(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		content = string(b)
 	}
-	s.render(w, s.tmpl.trace, traceData{
-		baseData: s.base(r),
-		Path:     path,
-		Content:  content,
-	})
+	d := traceData{baseData: s.base(r), Path: path, Content: content}
+	if content != "" {
+		d.Parsed = trace.Parse(b)
+		for _, c := range d.Parsed.Commands {
+			out := c.Stdout
+			if c.Stderr != "" {
+				if out != "" {
+					out += "\n"
+				}
+				out += "stderr: " + c.Stderr
+			}
+			d.Commands = append(d.Commands, traceCommand{
+				Turn: c.Turn, Command: c.Command, ExitRaw: c.ExitRaw, ExitCode: c.ExitCode, Output: out,
+			})
+		}
+	}
+	s.render(w, s.tmpl.trace, d)
 }
 
 // --- Reports ---
@@ -809,7 +855,24 @@ type reportData struct {
 	baseData
 	Title   string
 	Path    string
-	Content string
+	Content string        // raw source; "" means "not generated yet"
+	Body    template.HTML // Content rendered from Markdown
+}
+
+// renderReport reads a server-resolved markdown file and renders it. content
+// is passed through renderMarkdown; an empty file shows the "not generated"
+// message in the template.
+func (s *server) renderReport(w http.ResponseWriter, r *http.Request, title, path string) {
+	b, err := os.ReadFile(path)
+	content := ""
+	if err == nil {
+		content = string(b)
+	}
+	rd := reportData{baseData: s.base(r), Title: title, Path: path, Content: content}
+	if content != "" {
+		rd.Body = renderMarkdown(content)
+	}
+	s.render(w, s.tmpl.report, rd)
 }
 
 // handleBeadReport serves traces/bead-{id}-report.md for a bead. The path is
@@ -827,17 +890,7 @@ func (s *server) handleBeadReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := filepath.Join(folder, "traces", fmt.Sprintf("bead-%d-report.md", id))
-	b, err := os.ReadFile(path)
-	content := ""
-	if err == nil {
-		content = string(b)
-	}
-	s.render(w, s.tmpl.report, reportData{
-		baseData: s.base(r),
-		Title:    fmt.Sprintf("Bead %d Report", id),
-		Path:     path,
-		Content:  content,
-	})
+	s.renderReport(w, r, fmt.Sprintf("Bead %d Report", id), path)
 }
 
 // handleProjectReport serves traces/project-report.md for a project.
@@ -853,17 +906,7 @@ func (s *server) handleProjectReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := filepath.Join(folder, "traces", "project-report.md")
-	b, err := os.ReadFile(path)
-	content := ""
-	if err == nil {
-		content = string(b)
-	}
-	s.render(w, s.tmpl.report, reportData{
-		baseData: s.base(r),
-		Title:    "Project Report",
-		Path:     path,
-		Content:  content,
-	})
+	s.renderReport(w, r, "Project Report", path)
 }
 
 // --- Rewind snapshots ---
@@ -956,10 +999,14 @@ func (s *server) handleBeadSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	dir := filepath.Join(folder, "traces", fmt.Sprintf("_bead-%d-rewind-%d", id, n))
 	content, _ := renderSnapshotDir(dir)
-	s.render(w, s.tmpl.report, reportData{
+	rd := reportData{
 		baseData: s.base(r),
 		Title:    fmt.Sprintf("Bead %d Rewind Snapshot %d", id, n),
 		Path:     dir,
 		Content:  content,
-	})
+	}
+	if content != "" {
+		rd.Body = renderMarkdown(content)
+	}
+	s.render(w, s.tmpl.report, rd)
 }

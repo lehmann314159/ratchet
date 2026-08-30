@@ -16,11 +16,38 @@
 </div>
 {{end}}
 
+{{if .Job.BeadID.Valid}}
+<p><a href="/beads/{{.Job.BeadID.Int64}}">bead {{.Job.BeadID.Int64}} detail →</a></p>
+{{end}}
+
+{{if .Attempts}}
+<h2>Attempts</h2>
+<table style="width:auto">
+  <thead><tr><th>#</th><th>Result</th><th>Output</th><th>When</th></tr></thead>
+  <tbody>
+  {{range .Attempts}}
+  <tr>
+    <td class="meta">{{.AttemptNumber}}</td>
+    <td>{{if eq .ValidationResult "valid"}}<span class="status success">valid</span>{{else}}<span class="status full_stop">{{.ValidationResult}}</span>{{end}}</td>
+    <td class="meta">{{if .HasOutput}}recorded{{else}}—{{end}}</td>
+    <td class="meta">{{.CreatedAt}}</td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}
+
 <h2>Last Raw Output</h2>
 {{if .Job.RawOutput.Valid}}
 <pre>{{.Job.RawOutput.String}}</pre>
 {{else}}
 <p class="empty">No output recorded.</p>
+{{end}}
+
+{{if .CompressedHistoryHTML}}
+<h2>Compressed Analysis History</h2>
+<p class="meta">The narrative ADJUDICATE read for this bead. Updated {{.CompressedHistoryAt}}.</p>
+<div class="md">{{.CompressedHistoryHTML}}</div>
 {{end}}
 
 {{if .Rounds}}

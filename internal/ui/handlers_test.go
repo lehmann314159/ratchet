@@ -751,6 +751,145 @@ func TestHandleRemoveProject_StandaloneLineageRootSucceeds(t *testing.T) {
 	}
 }
 
+// --- Milestone E: forensics depth ---
+
+func TestRenderMarkdown_BasicAndSafe(t *testing.T) {
+	out := string(renderMarkdown("# Title\n\n**bold** and `code`\n\n<script>alert(1)</script>"))
+	if !strings.Contains(out, "<h1") || !strings.Contains(out, "<strong>bold</strong>") {
+		t.Errorf("markdown not rendered: %s", out)
+	}
+	if strings.Contains(out, "<script>") {
+		t.Errorf("raw HTML passed through — goldmark unsafe mode is on: %s", out)
+	}
+}
+
+func TestTraceView_StructuredCommands(t *testing.T) {
+	s, d := openTestServer(t)
+	ctx := context.Background()
+	pid := seedProject(t, d)
+	folder := projectFolderTempDir(t, d, pid)
+	beadID := seedBead(t, d, pid, 300)
+	tracePath := filepath.Join(folder, "t.log")
+	if err := os.WriteFile(tracePath, []byte(
+		"[TURN 1]\n[tool: run_command map[command:go test ./...]]\n[result]\nstdout:\n--- FAIL\nstderr:\nFAIL\nexit: exit status 1\n[terminated: timeout]\n"), 0o644); err != nil {
+		t.Fatalf("write trace: %v", err)
+	}
+	var execID int64
+	if err := d.QueryRowContext(ctx, `
+		INSERT INTO executions (project_id, bead_id, bead_revision_id, trace_path, termination_cause, monitor_honored, started_at, infra_failure, test_first_attempt)
+		VALUES (?, ?, (SELECT current_revision_id FROM beads WHERE id = ?), ?, 'timeout', 1, '2026-01-01T00:00:00Z', 0, 0)
+		RETURNING id`, pid, beadID, beadID, tracePath).Scan(&execID); err != nil {
+		t.Fatalf("insert execution: %v", err)
+	}
+
+	body := getBody(t, s, fmt.Sprintf("/trace/%d", execID))
+	for _, want := range []string{"Commands", "<code>go test ./...</code>", "exit status 1", "raw trace"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("trace view missing %q", want)
+		}
+	}
+}
+
+func TestBeadDetail_CompressedHistoryAndAdjudicationPanel(t *testing.T) {
+	s, d := openTestServer(t)
+	ctx := context.Background()
+	pid := seedProject(t, d)
+	beadID := seedBead(t, d, pid, 300)
+	if _, err := d.ExecContext(ctx,
+		`INSERT INTO compressed_history (bead_id, project_id, compressed_text, updated_at)
+		 VALUES (?, ?, '## history\n\n- attempt 1 FAIL', '2026-01-02T00:00:00Z')`, beadID, pid); err != nil {
+		t.Fatalf("seed compressed_history: %v", err)
+	}
+	var execID int64
+	if err := d.QueryRowContext(ctx, `
+		INSERT INTO executions (project_id, bead_id, bead_revision_id, trace_path, termination_cause, monitor_honored, started_at, infra_failure, test_first_attempt)
+		VALUES (?, ?, (SELECT current_revision_id FROM beads WHERE id = ?), '/tmp/t', 'timeout', 1, '2026-01-01T00:00:00Z', 0, 0)
+		RETURNING id`, pid, beadID, beadID).Scan(&execID); err != nil {
+		t.Fatalf("insert execution: %v", err)
+	}
+	if _, err := d.ExecContext(ctx, `
+		INSERT INTO adjudications (project_id, bead_id, execution_id, trend, bead_spec_fit, reasoning_text, attempt_budget_cost, monitor_escalation_status, decision, created_at)
+		VALUES (?, ?, ?, 'narrower', 'execution_capability_problem', 'grant another attempt', 1.5, 0, 'execute_revised', '2026-01-02T00:00:00Z')`,
+		pid, beadID, execID); err != nil {
+		t.Fatalf("seed adjudication: %v", err)
+	}
+
+	body := getBody(t, s, "/beads/"+strconv.FormatInt(beadID, 10))
+	for _, want := range []string{"Compressed Analysis History", "attempt 1 FAIL",
+		"adjudication detail", "narrower", "execution_capability_problem", "grant another attempt", "1.50"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("bead detail missing %q", want)
+		}
+	}
+}
+
+func TestEscalationDetail_ChainAndCompressedHistory(t *testing.T) {
+	s, d := openTestServer(t)
+	ctx := context.Background()
+	pid := seedProject(t, d)
+	beadID := seedBead(t, d, pid, 300)
+	jobID := seedJob(t, d, pid, beadID, "ADJUDICATE_NEXT_EXECUTION", "escalated")
+	for i := 1; i <= 2; i++ {
+		if _, err := d.ExecContext(ctx, `
+			INSERT INTO handoff_attempts (job_id, attempt_number, raw_output, validation_result, created_at, ended_at)
+			VALUES (?, ?, '{bad', 'malformed: JSON parse error', '2026-01-02T00:00:00Z', '2026-01-02T00:00:01Z')`,
+			jobID, i); err != nil {
+			t.Fatalf("seed attempt: %v", err)
+		}
+	}
+	if _, err := d.ExecContext(ctx,
+		`INSERT INTO compressed_history (bead_id, project_id, compressed_text, updated_at)
+		 VALUES (?, ?, 'the narrative', '2026-01-02T00:00:00Z')`, beadID, pid); err != nil {
+		t.Fatalf("seed compressed_history: %v", err)
+	}
+
+	body := getBody(t, s, "/escalations/"+strconv.FormatInt(jobID, 10))
+	for _, want := range []string{"Attempts", "malformed: JSON parse error",
+		"bead " + strconv.FormatInt(beadID, 10) + " detail", "Compressed Analysis History", "the narrative"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("escalation detail missing %q", want)
+		}
+	}
+}
+
+func TestProjectDetail_VerbModelsAndPosition(t *testing.T) {
+	s, d := openTestServer(t)
+	ctx := context.Background()
+	pid := seedProject(t, d)
+	if _, err := d.ExecContext(ctx,
+		`INSERT INTO verb_model_assignments (project_id, verb, model) VALUES (?, 'EXECUTE_BEAD', 'qwen2.5-coder:32b')`, pid); err != nil {
+		t.Fatalf("seed verb model: %v", err)
+	}
+	b1 := seedBead(t, d, pid, 300)
+	_ = seedBead(t, d, pid, 300)
+	if _, err := d.ExecContext(ctx, `UPDATE beads SET status = 'executing' WHERE id = ?`, b1); err != nil {
+		t.Fatalf("set bead executing: %v", err)
+	}
+
+	body := getBody(t, s, "/projects/"+strconv.FormatInt(pid, 10))
+	for _, want := range []string{"Model Assignments", "qwen2.5-coder:32b", "▸ bead 1 of 2 · executing"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("project detail missing %q", want)
+		}
+	}
+}
+
+func TestDashboard_PollingGatedOnActive(t *testing.T) {
+	s, d := openTestServer(t)
+	ctx := context.Background()
+	pid := seedProject(t, d) // active by default
+
+	if !strings.Contains(getBody(t, s, "/"), "hx-trigger") {
+		t.Errorf("active project dashboard should poll")
+	}
+	if _, err := d.ExecContext(ctx, `UPDATE projects SET status = 'complete' WHERE id = ?`, pid); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if strings.Contains(getBody(t, s, "/"), "hx-trigger") {
+		t.Errorf("completed project dashboard should not poll")
+	}
+}
+
 // --- Milestone C: project detail page, lineages, cascade, active-project selection ---
 
 // seedIteration inserts a project that is iteration `iter` of the lineage

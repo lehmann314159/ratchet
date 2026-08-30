@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"sort"
 
 	"ratchet/internal/db"
@@ -293,6 +294,75 @@ func queryCascadeBeads(ctx context.Context, d *db.DB, projectID int64) ([]Cascad
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// --- W13: verb→model assignments + pipeline position ---
+
+type VerbModel struct {
+	Verb  string
+	Model string
+}
+
+func queryVerbModels(ctx context.Context, d *db.DB, projectID int64) ([]VerbModel, error) {
+	rows, err := d.QueryContext(ctx,
+		`SELECT verb, model FROM verb_model_assignments WHERE project_id = ? ORDER BY verb`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("verb models: %w", err)
+	}
+	defer rows.Close()
+	var out []VerbModel
+	for rows.Next() {
+		var v VerbModel
+		if err := rows.Scan(&v.Verb, &v.Model); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// queryPipelinePosition returns a one-line "where is this project" string for
+// the header breadcrumb — computed from beads, rounds, and bootstrap jobs.
+func queryPipelinePosition(ctx context.Context, d *db.DB, p *ProjectRow) string {
+	switch p.Status {
+	case "complete":
+		return "complete"
+	case "full_stopped":
+		return "full-stopped"
+	case "fixture":
+		return "fixture"
+	}
+
+	var beadTotal, beadDone int
+	_ = d.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(status='succeeded'),0) FROM beads WHERE project_id = ?`, p.ID).
+		Scan(&beadTotal, &beadDone)
+
+	if beadTotal == 0 {
+		var rounds int
+		_ = d.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_reconcile_rounds WHERE project_id = ?`, p.ID).Scan(&rounds)
+		if rounds > 0 {
+			return fmt.Sprintf("decomposition review · round %d of cap %d", rounds, p.AuditReconcileRoundCap)
+		}
+		var verb, status string
+		_ = d.QueryRowContext(ctx, `
+			SELECT verb, status FROM handoff_jobs
+			WHERE project_id = ? AND verb IN ('SURVEY_SPEC','VERIFY_MANIFEST','CERTIFY_MANIFEST','DECOMPOSE_SPEC')
+			ORDER BY id DESC LIMIT 1`, p.ID).Scan(&verb, &status)
+		if verb != "" {
+			return fmt.Sprintf("bootstrap · %s (%s)", verb, status)
+		}
+		return "bootstrap · starting"
+	}
+
+	if beadDone >= beadTotal {
+		return fmt.Sprintf("all %d beads done · wrapping up", beadTotal)
+	}
+	var curID int64
+	var curStatus string
+	_ = d.QueryRowContext(ctx, `
+		SELECT id, status FROM beads WHERE project_id = ? AND status != 'succeeded' ORDER BY id LIMIT 1`, p.ID).
+		Scan(&curID, &curStatus)
+	return fmt.Sprintf("bead %d of %d · %s", beadDone+1, beadTotal, curStatus)
 }
 
 // queryLineageMembers returns every project in the lineage rooted at rootID,
@@ -662,6 +732,45 @@ func queryEscalatedJobs(ctx context.Context, d *db.DB) ([]EscalatedRow, error) {
 	return out, rows.Err()
 }
 
+type AttemptRow struct {
+	AttemptNumber    int
+	ValidationResult string
+	HasOutput        bool
+	CreatedAt        string
+}
+
+// queryJobAttempts returns every handoff_attempts row for a job, oldest first —
+// the strike-by-strike history behind an escalation.
+func queryJobAttempts(ctx context.Context, d *db.DB, jobID int64) ([]AttemptRow, error) {
+	rows, err := d.QueryContext(ctx, `
+		SELECT attempt_number, validation_result, raw_output IS NOT NULL, created_at
+		FROM handoff_attempts WHERE job_id = ? ORDER BY attempt_number`, jobID)
+	if err != nil {
+		return nil, fmt.Errorf("job attempts: %w", err)
+	}
+	defer rows.Close()
+	var out []AttemptRow
+	for rows.Next() {
+		var a AttemptRow
+		var hasOut int
+		if err := rows.Scan(&a.AttemptNumber, &a.ValidationResult, &hasOut, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		a.HasOutput = hasOut == 1
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// queryCompressedHistory returns the rolling COMPRESS_ANALYSIS narrative for a
+// bead (raw text + timestamp), or empty strings if none.
+func queryCompressedHistory(ctx context.Context, d *db.DB, beadID int64) (text, updatedAt string) {
+	_ = d.QueryRowContext(ctx,
+		`SELECT compressed_text, updated_at FROM compressed_history WHERE bead_id = ?`, beadID,
+	).Scan(&text, &updatedAt)
+	return text, updatedAt
+}
+
 func queryEscalatedJobByID(ctx context.Context, d *db.DB, id int64) (*EscalatedRow, error) {
 	r := &EscalatedRow{}
 	err := d.QueryRowContext(ctx, `
@@ -690,17 +799,24 @@ func queryEscalatedJobByID(ctx context.Context, d *db.DB, id int64) (*EscalatedR
 }
 
 type ExecutionRow struct {
-	ID               int64
-	AttemptNum       int
-	TerminationCause string
-	BudgetSeconds    int
-	ElapsedSeconds   int
-	MonitorFired     bool
-	StartedAt        string
-	Decision         string // adjudication decision, empty if none yet
+	ID                int64
+	AttemptNum        int
+	TerminationCause  string
+	BudgetSeconds     int
+	ElapsedSeconds    int
+	MonitorFired      bool
+	StartedAt         string
+	Decision          string // adjudication decision, empty if none yet
 	DecisionReasoning string
-	TracePath        string
+	Trend             string
+	BeadSpecFit       string
+	AttemptBudgetCost float64
+	MonitorEscalation bool
+	TracePath         string
 }
+
+// HasAdjudication reports whether this execution was adjudicated yet.
+func (e ExecutionRow) HasAdjudication() bool { return e.Decision != "" }
 
 type RevisionRow struct {
 	RevisionNumber  int
@@ -722,6 +838,9 @@ type beadDetailData struct {
 	GuidanceNotes      []project.GuidanceNote
 	RefinementCycles   []RefinementCycle
 	RefinementCycleCap int
+	CompressedHistory  string        // rolling COMPRESS_ANALYSIS narrative
+	CompressedHistoryHTML template.HTML
+	CompressedHistoryAt string
 }
 
 func queryBeadDetail(ctx context.Context, d *db.DB, beadID int64) (*beadDetailData, error) {
@@ -756,6 +875,14 @@ func queryBeadDetail(ctx context.Context, d *db.DB, beadID int64) (*beadDetailDa
 	out.RefinementCycleCap = refinementCycleCap
 	out.RefinementCycles, _ = queryTestRefinements(ctx, d, beadID)
 
+	// Rolling COMPRESS_ANALYSIS narrative — the single most useful "why is this
+	// bead stuck" artifact; ADJUDICATE reads exactly this.
+	if err := d.QueryRowContext(ctx,
+		`SELECT compressed_text, updated_at FROM compressed_history WHERE bead_id = ?`, beadID,
+	).Scan(&out.CompressedHistory, &out.CompressedHistoryAt); err == nil && out.CompressedHistory != "" {
+		out.CompressedHistoryHTML = renderMarkdown(out.CompressedHistory)
+	}
+
 	// Execution history.
 	rows, err := d.QueryContext(ctx, `
 		SELECT e.id,
@@ -767,6 +894,10 @@ func queryBeadDetail(ctx context.Context, d *db.DB, beadID int64) (*beadDetailDa
 		       e.started_at,
 		       COALESCE(adj.decision, ''),
 		       COALESCE(adj.reasoning_text, ''),
+		       COALESCE(adj.trend, ''),
+		       COALESCE(adj.bead_spec_fit, ''),
+		       COALESCE(adj.attempt_budget_cost, 0),
+		       COALESCE(adj.monitor_escalation_status, 0),
 		       e.trace_path,
 		       e.infra_failure
 		FROM executions e
@@ -785,14 +916,17 @@ func queryBeadDetail(ctx context.Context, d *db.DB, beadID int64) (*beadDetailDa
 	var attemptNum int
 	for rows.Next() {
 		var r ExecutionRow
-		var monitorFired, infraFailure int
+		var monitorFired, infraFailure, monitorEsc int
 		if err := rows.Scan(&r.ID, &attemptNum, &r.TerminationCause,
 			&r.BudgetSeconds, &r.ElapsedSeconds, &monitorFired,
-			&r.StartedAt, &r.Decision, &r.DecisionReasoning, &r.TracePath, &infraFailure); err != nil {
+			&r.StartedAt, &r.Decision, &r.DecisionReasoning,
+			&r.Trend, &r.BeadSpecFit, &r.AttemptBudgetCost, &monitorEsc,
+			&r.TracePath, &infraFailure); err != nil {
 			return nil, err
 		}
 		r.AttemptNum = attemptNum
 		r.MonitorFired = monitorFired == 1
+		r.MonitorEscalation = monitorEsc == 1
 		// infra_failure executions are recorded with termination_cause='success'
 		// as a placeholder (the schema's CHECK constraint has no dedicated
 		// "crashed" value) — override the displayed cause so a crash-recovered

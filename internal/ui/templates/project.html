@@ -1,12 +1,12 @@
 {{define "title"}}{{.Project.Label}}{{end}}
 {{define "content"}}
-<div hx-get="/projects/{{.Project.ID}}/body" hx-trigger="every 5s" hx-swap="outerHTML">
+<div {{if .Live}}hx-get="/projects/{{.Project.ID}}/body" hx-trigger="every 5s" hx-swap="outerHTML"{{end}}>
   {{template "projectbody" .}}
 </div>
 {{end}}
 
 {{define "projectbody"}}
-<div hx-get="/projects/{{.Project.ID}}/body" hx-trigger="every 5s" hx-swap="outerHTML">
+<div {{if .Live}}hx-get="/projects/{{.Project.ID}}/body" hx-trigger="every 5s" hx-swap="outerHTML"{{end}}>
 
 <h1>
   {{.Project.Label}}
@@ -17,6 +17,7 @@
   <a href="/" style="font-size:0.6em;font-weight:normal;margin-left:0.5rem">← dashboard</a>
 </h1>
 <p class="meta">{{.Project.FolderPath}}/{{.Project.DesignDoc}}</p>
+{{if .Position}}<p class="meta">▸ {{.Position}}</p>{{end}}
 
 {{if gt (len .Lineage) 1}}
 <div class="section">
@@ -132,6 +133,20 @@
   <h2>Jobs</h2>
   {{template "jobsTable" .Jobs}}
 </div>
+
+{{if .VerbModels}}
+<div class="section">
+  <h2>Model Assignments</h2>
+  <table style="width:auto">
+    <thead><tr><th>Verb</th><th>Model</th></tr></thead>
+    <tbody>
+    {{range .VerbModels}}
+    <tr><td>{{.Verb}}</td><td class="meta">{{.Model}}</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}
 
 </div>
 {{end}}

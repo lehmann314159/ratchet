@@ -29,10 +29,27 @@
       <td class="meta">{{.BudgetSeconds}}s</td>
       <td class="meta {{if and (eq .TerminationCause "timeout") (ge .ElapsedSeconds .BudgetSeconds)}}over-budget{{end}}">{{.ElapsedSeconds}}s</td>
       <td class="meta">{{if .MonitorFired}}fired{{else}}—{{end}}</td>
-      <td>{{if .Decision}}<span class="status {{.Decision}}" title="{{.DecisionReasoning}}">{{.Decision}}</span>{{else}}<span class="meta">—</span>{{end}}</td>
+      <td>{{if .HasAdjudication}}<span class="status {{.Decision}}">{{.Decision}}</span>{{else}}<span class="meta">—</span>{{end}}</td>
       <td class="meta">{{.StartedAt}}</td>
       <td>{{if .TracePath}}<a href="/trace/{{.ID}}">trace</a>{{else}}—{{end}}</td>
     </tr>
+    {{if .HasAdjudication}}
+    <tr class="adj-row">
+      <td></td>
+      <td colspan="7">
+        <details>
+          <summary class="meta">adjudication detail</summary>
+          <div class="adj-panel">
+            <span class="meta">trend</span> <strong>{{.Trend}}</strong>
+            &nbsp;·&nbsp; <span class="meta">spec fit</span> <strong>{{.BeadSpecFit}}</strong>
+            &nbsp;·&nbsp; <span class="meta">budget cost</span> <strong>{{printf "%.2f" .AttemptBudgetCost}}</strong>
+            {{if .MonitorEscalation}}&nbsp;·&nbsp; <span class="status monitor_terminated">monitor escalation</span>{{end}}
+            <p style="white-space:pre-wrap;margin-top:6px">{{.DecisionReasoning}}</p>
+          </div>
+        </details>
+      </td>
+    </tr>
+    {{end}}
     {{end}}
     </tbody>
   </table>
@@ -40,6 +57,14 @@
   <p class="empty">No executions yet.</p>
   {{end}}
 </div>
+
+{{if .CompressedHistory}}
+<div class="section">
+  <h2>Compressed Analysis History</h2>
+  <p class="meta">The rolling per-bead narrative COMPRESS_ANALYSIS maintains and ADJUDICATE reads. Updated {{.CompressedHistoryAt}}.</p>
+  <div class="md">{{.CompressedHistoryHTML}}</div>
+</div>
+{{end}}
 
 {{if .RefinementCycles}}
 <div class="section">

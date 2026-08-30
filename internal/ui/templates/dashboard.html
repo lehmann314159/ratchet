@@ -1,12 +1,12 @@
 {{define "title"}}Dashboard{{end}}
 {{define "content"}}
-<div hx-get="/hx/status" hx-trigger="every 5s" hx-swap="outerHTML">
+<div {{if .Live}}hx-get="/hx/status" hx-trigger="every 5s" hx-swap="outerHTML"{{end}}>
   {{template "status" .}}
 </div>
 {{end}}
 
 {{define "status"}}
-<div hx-get="/hx/status" hx-trigger="every 5s" hx-swap="outerHTML">
+<div {{if .Live}}hx-get="/hx/status" hx-trigger="every 5s" hx-swap="outerHTML"{{end}}>
 {{if .Project}}
 <h1><a href="/projects/{{.Project.ID}}">{{.Project.Label}}</a> <span class="status {{.Project.Status}}">{{.Project.Status}}</span>
 {{if eq .Project.Status "paused"}}
@@ -26,6 +26,7 @@
 {{if gt .Project.IterationNumber 1}} · <span>iteration {{.Project.IterationNumber}}</span>{{end}}
 {{if .Project.IsCascade}} · <span>cascade iteration</span>{{end}}
 </p>
+{{if .Position}}<p class="meta">▸ {{.Position}}</p>{{end}}
 
 {{if .OtherProjects}}
 <p class="meta">Other non-terminal projects:

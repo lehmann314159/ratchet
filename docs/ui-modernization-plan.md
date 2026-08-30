@@ -30,6 +30,7 @@ any one can be picked up cold.
 | 2026-08-30 | Milestone B | W3 (guidance-log render + rewind-from-UI), W10 (pause reason) | 2d67153 |
 | 2026-08-30 | Milestone C | new GET /projects/{id} page, W1 (lineages), W9 (active-project), W2 (cascade) | 7937138 |
 | 2026-08-30 | Milestone D | W4 (decomposition debate), W5 (manifest bootstrap), W6 (REFINE_TESTS cycle) | 268c57f |
+| 2026-08-30 | Milestone E | W11 (markdown/trace/compressed-history/adjudication), W12 (escalation chain), W13 (model assignments, poll-gating, breadcrumb) | PENDING |
 
 ---
 
@@ -540,10 +541,29 @@ columns), `dashboard.html`.
 
 ## W11 — Forensics rendering pass
 
-**Status:** NOT STARTED
+**Status:** DONE (Milestone E, 2026-08-30).
+- **W11a** — `internal/ui/markdown.go`: `renderMarkdown` via goldmark + GFM,
+  raw-HTML-unsafe passthrough left OFF (trace excerpts can contain arbitrary
+  model output). `github.com/yuin/goldmark v1.8.5` is now a direct dependency
+  (Decisions #1). `report.html` renders `.Body` with a `<details>` raw source;
+  `.md` CSS in `layout.html`. `s.renderReport` helper dedups the three report
+  handlers.
+- **W11b** — `handleTrace` runs `trace.Parse`; `trace.html` shows the
+  termination marker, a Commands table (turn / command / exit / collapsible
+  output), a File Writes table, and the raw dump behind `<details>`.
+- **W11c** — `queryBeadDetail` loads `compressed_history`; "Compressed Analysis
+  History" section on the bead page (markdown-rendered). Also embedded on the
+  escalation detail page for a bead-scoped job.
+- **W11d** — the executions query pulls `trend` / `bead_spec_fit` /
+  `attempt_budget_cost` / `monitor_escalation_status`; each adjudicated
+  execution gets a second `adj-row` with a `<details>` "adjudication detail"
+  panel (was a title-tooltip).
+- Not done: displaying a *cascade* snapshot's contents (rewind ones already do
+  via `handleBeadSnapshot`) — small, left for a follow-up.
+- Tests: `TestRenderMarkdown_BasicAndSafe`, `TestTraceView_StructuredCommands`,
+  `TestBeadDetail_CompressedHistoryAndAdjudicationPanel`.
 
-Four related sub-items. Do W11a first (unblocks the value of the reports that
-already exist).
+Four sub-items (below, as originally planned).
 
 ### W11a — Render report/trace markdown instead of `<pre>`
 
@@ -598,7 +618,14 @@ page. W11d: seed an adjudication with all fields, assert the panel shows them.
 
 ## W12 — Escalation detail: the full chain
 
-**Status:** NOT STARTED — largely falls out of W4 + W11
+**Status:** DONE (Milestone E, 2026-08-30). `queryJobAttempts` → an "Attempts"
+strike table (attempt #, validation_result, whether output was recorded,
+timestamp). For a bead-scoped job: a "bead N detail →" link and the embedded
+compressed-analysis history (`queryCompressedHistory` + `renderMarkdown`). The
+decomposition-round history (W4) already embeds for AUDIT/RECONCILE verbs. Test:
+`TestEscalationDetail_ChainAndCompressedHistory`. Not folded in: inline
+per-attempt trace links (attempts don't carry an execution/trace FK) and a full
+executions+adjudications replay — the "bead N detail →" link covers that.
 
 **Goal.** The escalation detail page shows enough to resolve the escalation
 without dropping to the CLI or reading raw files.
@@ -621,26 +648,23 @@ execution + adjudication; assert all appear on the detail page.
 
 ## W13 — Hygiene
 
-**Status:** IN PROGRESS — htmx vendoring DONE (Milestone A, 2026-08-30); the
-rest NOT STARTED.
+**Status:** DONE (htmx: Milestone A; the rest: Milestone E, 2026-08-30).
 
-- **Vendor htmx.** ✅ DONE. `internal/ui/static/htmx-2.0.4.min.js` embedded via
-  a new `//go:embed static` FS, served at `/static/` by
-  `http.FileServerFS` + a `cacheForever` (immutable, 1yr) wrapper in
-  `server.go`. `layout.html` now points at `/static/htmx-2.0.4.min.js`.
-  Version is in the filename so the immutable cache is safe across bumps. Test:
-  `TestStaticHTMXServedLocally` (also asserts no `unpkg.com` in the layout).
-- **`verb_model_assignments` surfacing.** `verb_model_assignments(project_id,
-  verb, model)`. When a verb keeps failing, "which model is assigned to it"
-  is exactly the missing context. Show it as a small table on the project /
-  bead pages, or inline next to a verb in the jobs list.
-- **Poll only when live.** `dashboard.html` polls `/hx/status` every 5s
-  unconditionally. Stop polling (or back off) when the shown project is
-  `complete` / `full_stopped` and no job is `running`/`pending`.
-- **FSM-position breadcrumb.** A one-line "where is this project" indicator:
-  `bootstrap: CERTIFY 2/5` / `decomposition: round 3/5` / `bead 4/9: EXECUTE
-  attempt 2/6` / `complete`. Cheap orientation; compute from `handoff_jobs` +
-  the caps.
+- **Vendor htmx.** ✅ DONE (Milestone A). `internal/ui/static/htmx-2.0.4.min.js`
+  embedded via `//go:embed static`, served at `/static/` with a `cacheForever`
+  wrapper. Test: `TestStaticHTMXServedLocally`.
+- **`verb_model_assignments` surfacing.** ✅ DONE. `queryVerbModels` →
+  "Model Assignments" table on the project detail page.
+- **Poll only when live.** ✅ DONE. `dashboardData.Live` / `projectDetailData.Live`
+  = `project.Status == "active"`. The `hx-get`/`hx-trigger` attributes are only
+  emitted when `.Live`, so the last poll of a project that just went
+  paused/complete/full_stopped returns markup with no polling attributes and
+  htmx stops. Test: `TestDashboard_PollingGatedOnActive`.
+- **FSM-position breadcrumb.** ✅ DONE. `queryPipelinePosition` → a "▸ …" line
+  on the dashboard and project headers: `complete` / `full-stopped` /
+  `decomposition review · round N of cap M` / `bootstrap · VERB (status)` /
+  `bead X of Y · status` / `all N beads done · wrapping up`. Test:
+  `TestProjectDetail_VerbModelsAndPosition`.
 
 ---
 
@@ -671,11 +695,18 @@ Milestone-based; each milestone is a sensible stopping point.
 - **W5** (manifest bootstrap) — done
 - **W6** (REFINE_TESTS cycle) — done
 
-### Milestone E — forensics depth (1–2 sessions)
-- **W11a** (markdown rendering) — do first, unblocks the rest
-- **W11b/c/d** (structured trace, compressed history, adjudication panels)
-- **W12** (escalation chain — mostly assembly of B/D/E pieces)
-- **W13** remainder (model assignments, poll-when-live, FSM breadcrumb)
+### Milestone E — forensics depth — DONE (2026-08-30)
+- **W11a/b/c/d** — markdown rendering (goldmark), structured trace, compressed
+  history, adjudication panels — done
+- **W12** (escalation chain) — done
+- **W13** remainder (model assignments, poll-when-live, FSM breadcrumb) — done
+
+---
+
+**All milestones (A–E) complete.** Remaining small follow-ups noted in the
+workstream Status lines: display cascade snapshot *contents* (W2/W11), and
+adjudication sub-field badge CSS for `trend`/`bead_spec_fit` (W8, superseded by
+W11d's panel — the values now render as plain text in a panel, not badges).
 
 ---
 

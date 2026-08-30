@@ -2,8 +2,55 @@
 {{define "content"}}
 <h1>Execution Trace</h1>
 <p class="meta" style="margin-bottom:12px;">{{.Path}}</p>
+
 {{if .Content}}
-<pre>{{.Content}}</pre>
+<p>
+  Termination:
+  {{if .Parsed.TerminationMarker}}<span class="status {{.Parsed.TerminationMarker}}">{{.Parsed.TerminationMarker}}</span>{{else}}<span class="status timeout">truncated / killed</span>{{end}}
+  <span class="meta"> · {{len .Commands}} command(s) · {{len .Parsed.WriteFiles}} file write(s)</span>
+</p>
+
+{{if .Commands}}
+<div class="section">
+  <h2>Commands</h2>
+  <table>
+    <thead><tr><th>Turn</th><th>Command</th><th>Exit</th><th>Output</th></tr></thead>
+    <tbody>
+    {{range .Commands}}
+    <tr>
+      <td class="meta">{{.Turn}}</td>
+      <td><code>{{.Command}}</code></td>
+      <td class="meta {{if ne .ExitCode 0}}over-budget{{end}}">{{.ExitRaw}}</td>
+      <td>{{if .Output}}<details><summary class="meta">output</summary><pre>{{.Output}}</pre></details>{{else}}<span class="meta">—</span>{{end}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}
+
+{{if .Parsed.WriteFiles}}
+<div class="section">
+  <h2>File Writes</h2>
+  <table>
+    <thead><tr><th>Turn</th><th>Path</th><th>Result</th></tr></thead>
+    <tbody>
+    {{range .Parsed.WriteFiles}}
+    <tr>
+      <td class="meta">{{.Turn}}</td>
+      <td><code>{{if .Path}}{{.Path}}{{else}}(no path){{end}}</code></td>
+      <td>{{if .Succeeded}}<span class="status success">ok</span>{{else}}<span class="status full_stop">failed</span>{{end}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}
+
+<details style="margin-top:20px">
+  <summary class="meta">raw trace</summary>
+  <pre>{{.Content}}</pre>
+</details>
 {{else}}
 <p class="empty">Trace file is empty.</p>
 {{end}}
