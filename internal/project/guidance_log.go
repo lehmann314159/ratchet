@@ -26,6 +26,31 @@ type guidanceNote struct {
 	Text      string
 }
 
+// GuidanceNote is one Human Guidance Log entry, exported for the web UI. Fields
+// mirror the unexported guidanceNote exactly so the two convert directly.
+type GuidanceNote struct {
+	Number    int
+	CreatedAt string
+	Status    string // "active", "retracted", or "superseded by Note N"
+	Text      string
+}
+
+// ParseGuidanceLog splits a bead revision's prose (the ParsedBead.FullText
+// field, not the whole bead_revisions.full_text JSON blob) into its base text
+// and any Human Guidance Log entries. notes is nil when no log section is
+// present — the common case for a bead that has never been rewound with a note.
+func ParseGuidanceLog(prose string) (base string, notes []GuidanceNote) {
+	b, ns := parseGuidanceLog(prose)
+	if len(ns) == 0 {
+		return b, nil
+	}
+	out := make([]GuidanceNote, len(ns))
+	for i, n := range ns {
+		out[i] = GuidanceNote(n)
+	}
+	return b, out
+}
+
 var noteHeadingRE = regexp.MustCompile(`(?m)^### Note (\d+) — (.+)$`)
 
 // parseGuidanceLog splits fullText into its base prose and any existing

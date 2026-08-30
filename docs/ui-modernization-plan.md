@@ -27,6 +27,7 @@ any one can be picked up cold.
 |------|-----------|-------------|--------|
 | 2026-08-30 | — | Plan written | ab75e12 |
 | 2026-08-30 | Milestone A | W7 (remove-project FK guard), W8 (status CSS), W13 htmx vendored | 9a9a51a |
+| 2026-08-30 | Milestone B | W3 (guidance-log render + rewind-from-UI), W10 (pause reason) | (pending) |
 
 ---
 
@@ -142,7 +143,22 @@ assert the section classifies each bead correctly.
 
 ## W3 — Human guidance log + rewind-from-UI
 
-**Status:** NOT STARTED
+**Status:** DONE (Milestone B, 2026-08-30).
+- Part A: `project.ParseGuidanceLog` exported wrapper + `project.GuidanceNote`;
+  `queryBeadDetail` parses the current revision's inner prose and fills
+  `GuidanceNotes`; new "Human Guidance Log" section on `bead_detail.html` with
+  per-note status styling (`.guidance-note` / `.guidance-inactive`).
+- Part B: `project.RewindBead` (exported wrapper over `rewindBead`;
+  `rewindResult` → `RewindResult`). Routes `POST /beads/{id}/rewind` and
+  `POST /escalations/{id}/rewind` (resolves bead id from the job). Shared
+  `s.rewindBead`: 409 on a `succeeded` bead; a bead with no escalated job
+  needs `confirm=rewind` (checkbox rendered only when `!HasEscalatedJob`); an
+  unknown `--supersedes` maps to 400. "Rewind Bead" form on both the bead
+  detail and escalation detail pages. Escalation-page rewind redirects to
+  `/escalations`.
+- Tests: `TestBeadDetail_RendersGuidanceLog`,
+  `TestHandleRewindBead_{EscalatedNoConfirmNeeded,NonEscalatedRequiresConfirm,SucceededRefused}`,
+  `TestHandleRewindFromEscalation_{ResolvesBeadID,ProjectScopedJobRejected}`.
 
 **Goal.** (a) Render the guidance log properly on the bead page. (b) Let a
 human rewind a bead **with a note** from the browser — the missing half of the
@@ -433,7 +449,15 @@ job; assert it is the one shown.
 
 ## W10 — Pause reason + `reconcile_self_resolve`
 
-**Status:** NOT STARTED
+**Status:** DONE (Milestone B, 2026-08-30). `ProjectRow` carries the four pause
+columns + the computed `NextJobVerb`/`NextJobBeadID`; `queryActiveProject`
+selects them and, when paused, looks up the already-enqueued pending job.
+`dashboard.html` renders a pause box under the project header: which knob fired,
+what resuming dispatches, and `reconcile self-resolve: cautious/permissive`.
+`queryAllProjects` unchanged (the All Projects table doesn't need it). Test:
+`TestActiveProject_PausedShowsReasonAndNextJob`. Mirroring these onto the
+`GET /projects/{id}` detail page is deferred to Milestone C when that page is
+built.
 
 **Goal.** On a paused project, show *why* it paused and what Resume will do.
 

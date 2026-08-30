@@ -45,4 +45,27 @@
     <button type="submit" class="danger">Close (mark complete, skip)</button>
   </form>
 </div>
+
+{{if .Job.BeadID.Valid}}
+<div class="section" style="margin-top:24px">
+  <h2>Rewind Bead</h2>
+  <p class="meta">
+    Discards the current implementation: rolls prose back to the last
+    pre-ADJUDICATE revision, deletes test files, stubs impl files, grants a
+    fresh attempt budget, restarts at REFINE_TESTS_WRITE. Pre-rewind files are
+    snapshotted first. Use when the tests or spec — not just the attempt count —
+    need re-examining.
+  </p>
+  <form method="POST" action="/escalations/{{.Job.ID}}/rewind" class="rewind-form"
+        onsubmit="return confirm('Rewind bead {{.Job.BeadID.Int64}}? Test/impl files will be reset.')">
+    <label>Guidance note for the next attempt (optional)
+      <textarea name="note" rows="3" placeholder="what to do differently this time"></textarea>
+    </label>
+    <label>Supersedes / retracts note number (optional)
+      <input type="number" name="supersedes" min="1" style="width:80px">
+    </label>
+    <button type="submit" class="danger">Rewind bead</button>
+  </form>
+</div>
+{{end}}
 {{end}}

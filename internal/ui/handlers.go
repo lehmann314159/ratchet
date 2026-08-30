@@ -568,6 +568,98 @@ func (s *server) handleBeadDetail(w http.ResponseWriter, r *http.Request) {
 	s.render(w, s.tmpl.beadDetail, d)
 }
 
+// --- Rewind bead ---
+
+// handleRewindBead resets a bead to a clean, re-runnable state via
+// project.RewindBead — the same path as `ratchet rewind-bead` — optionally
+// attaching a human guidance note for the next attempt. The {id} here is a
+// bead id (the bead detail page posts to this route directly).
+func (s *server) handleRewindBead(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid bead id", http.StatusBadRequest)
+		return
+	}
+	s.rewindBead(w, r, id, fmt.Sprintf("/beads/%d", id))
+}
+
+// handleRewindFromEscalation is the escalation-detail-page entry point: {id} is
+// a handoff_jobs id, whose bead_id is resolved server-side before delegating to
+// the same rewind logic. Redirects back to the escalations list, since the
+// escalated job is resolved by the rewind (its jobs are cancelled).
+func (s *server) handleRewindFromEscalation(w http.ResponseWriter, r *http.Request) {
+	jobID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid job id", http.StatusBadRequest)
+		return
+	}
+	var beadID sql.NullInt64
+	if err := s.db.QueryRowContext(r.Context(),
+		`SELECT bead_id FROM handoff_jobs WHERE id = ?`, jobID).Scan(&beadID); err != nil {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	}
+	if !beadID.Valid {
+		http.Error(w, "job is project-scoped — rewind only applies to a bead", http.StatusBadRequest)
+		return
+	}
+	s.rewindBead(w, r, beadID.Int64, "/escalations")
+}
+
+// rewindBead is the shared body for both rewind entry points.
+//
+// Guard (Decisions #2 in docs/ui-modernization-plan.md): a bead with no
+// escalated job requires an explicit confirm=rewind form value. The CLI happily
+// rewinds a merely "stuck" bead, but from a browser that should be deliberate,
+// not a stray click on an actively-executing one. A bead that has already
+// succeeded is refused by RewindBead itself; surfaced here as 409.
+func (s *server) rewindBead(w http.ResponseWriter, r *http.Request, beadID int64, redirectTo string) {
+	ctx := r.Context()
+
+	var beadStatus string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT status FROM beads WHERE id = ?`, beadID).Scan(&beadStatus); err != nil {
+		http.Error(w, "bead not found", http.StatusNotFound)
+		return
+	}
+	if beadStatus == "succeeded" {
+		http.Error(w, "bead has already succeeded — rewind refused", http.StatusConflict)
+		return
+	}
+
+	var escalatedJobs int
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM handoff_jobs WHERE bead_id = ? AND status = 'escalated'`,
+		beadID).Scan(&escalatedJobs)
+	if escalatedJobs == 0 && r.FormValue("confirm") != "rewind" {
+		http.Error(w, "this bead has no escalated job — resubmit with confirm=rewind to rewind it anyway", http.StatusBadRequest)
+		return
+	}
+
+	note := strings.TrimSpace(r.FormValue("note"))
+	supersedes := 0
+	if v := strings.TrimSpace(r.FormValue("supersedes")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			http.Error(w, "supersedes must be a positive guidance-note number", http.StatusBadRequest)
+			return
+		}
+		supersedes = n
+	}
+
+	if _, err := project.RewindBead(ctx, s.db, beadID, project.RewindOptions{Note: note, Supersedes: supersedes}); err != nil {
+		// applyGuidance rejects an unknown --supersedes before touching
+		// anything — that's user input, not a server fault.
+		if strings.Contains(err.Error(), "does not match any existing guidance note") {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, fmt.Sprintf("rewind: %v", err), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, redirectTo, http.StatusSeeOther)
+}
+
 // --- Trace viewer ---
 
 type traceData struct {

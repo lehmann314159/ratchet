@@ -751,6 +751,192 @@ func TestHandleRemoveProject_StandaloneLineageRootSucceeds(t *testing.T) {
 	}
 }
 
+// --- W3: guidance log + rewind ---
+
+// seedBeadWithProse inserts a bead whose current revision's full_text JSON
+// carries the given prose in its inner "full_text" field (where the Human
+// Guidance Log lives), returning the bead id.
+func seedBeadWithProse(t *testing.T, d *db.DB, projectID int64, prose string) int64 {
+	t.Helper()
+	ctx := context.Background()
+	res, err := d.ExecContext(ctx,
+		`INSERT INTO beads (project_id, status, current_revision_id) VALUES (?, 'executing', NULL)`, projectID)
+	if err != nil {
+		t.Fatalf("seed bead: %v", err)
+	}
+	beadID, _ := res.LastInsertId()
+	full, _ := json.Marshal(map[string]any{
+		"title": "t", "full_text": prose, "output_files": []string{}, "exit_criteria": []string{},
+	})
+	revRes, err := d.ExecContext(ctx, `
+		INSERT INTO bead_revisions
+		  (project_id, bead_id, revision_number, full_text, execution_budget, monitor_override, created_by_verb, created_at)
+		VALUES (?, ?, 1, ?, 300, 'honor', 'DECOMPOSE_SPEC', '2026-01-01T00:00:00Z')`,
+		projectID, beadID, string(full))
+	if err != nil {
+		t.Fatalf("seed bead_revisions: %v", err)
+	}
+	revID, _ := revRes.LastInsertId()
+	if _, err := d.ExecContext(ctx, `UPDATE beads SET current_revision_id = ? WHERE id = ?`, revID, beadID); err != nil {
+		t.Fatalf("set current_revision_id: %v", err)
+	}
+	return beadID
+}
+
+// projectFolderTempDir points the seeded project (id 1) at a writable temp dir
+// so project.RewindBead's filesystem work (snapshot, stub) has somewhere real
+// to run.
+func projectFolderTempDir(t *testing.T, d *db.DB, projectID int64) string {
+	t.Helper()
+	dir := t.TempDir()
+	if _, err := d.ExecContext(context.Background(),
+		`UPDATE projects SET folder_path = ? WHERE id = ?`, dir, projectID); err != nil {
+		t.Fatalf("set folder_path: %v", err)
+	}
+	return dir
+}
+
+func TestBeadDetail_RendersGuidanceLog(t *testing.T) {
+	s, d := openTestServer(t)
+	pid := seedProject(t, d)
+	prose := "Base prose.\n\n## Human Guidance Log\n### Note 1 — 2026-01-02T00:00:00Z\nStatus: active\n\nUse Square{Row,Col} field order.\n\n### Note 2 — 2026-01-03T00:00:00Z\nStatus: retracted\n\nOld advice."
+	beadID := seedBeadWithProse(t, d, pid, prose)
+
+	req := httptest.NewRequest(http.MethodGet, "/beads/"+strconv.FormatInt(beadID, 10), nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, body)
+	}
+	for _, want := range []string{"Human Guidance Log", "Note 1", "Use Square{Row,Col} field order.", "retracted"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("bead detail missing %q", want)
+		}
+	}
+}
+
+func TestHandleRewindBead_EscalatedNoConfirmNeeded(t *testing.T) {
+	s, d := openTestServer(t)
+	pid := seedProject(t, d)
+	projectFolderTempDir(t, d, pid)
+	beadID := seedBeadWithProse(t, d, pid, "Base prose.")
+	seedJob(t, d, pid, beadID, "ADJUDICATE_NEXT_EXECUTION", "escalated")
+
+	form := url.Values{"note": {"try the recursive form"}}
+	rec := doPost(t, s, "/beads/"+strconv.FormatInt(beadID, 10)+"/rewind", form)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var verb, prose string
+	if err := d.QueryRowContext(context.Background(), `
+		SELECT br.created_by_verb, json_extract(br.full_text, '$.full_text')
+		FROM beads b JOIN bead_revisions br ON br.id = b.current_revision_id
+		WHERE b.id = ?`, beadID).Scan(&verb, &prose); err != nil {
+		t.Fatalf("query new revision: %v", err)
+	}
+	if verb != "REWIND_BEAD" {
+		t.Errorf("current revision created_by_verb = %q, want REWIND_BEAD", verb)
+	}
+	if !strings.Contains(prose, "try the recursive form") {
+		t.Errorf("guidance note not in new prose: %q", prose)
+	}
+	var escalated int
+	_ = d.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM handoff_jobs WHERE bead_id = ? AND status = 'escalated'`, beadID).Scan(&escalated)
+	if escalated != 0 {
+		t.Errorf("escalated job still open after rewind")
+	}
+}
+
+func TestHandleRewindBead_NonEscalatedRequiresConfirm(t *testing.T) {
+	s, d := openTestServer(t)
+	pid := seedProject(t, d)
+	projectFolderTempDir(t, d, pid)
+	beadID := seedBeadWithProse(t, d, pid, "Base prose.")
+
+	rec := doPost(t, s, "/beads/"+strconv.FormatInt(beadID, 10)+"/rewind", url.Values{})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 without confirm, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doPost(t, s, "/beads/"+strconv.FormatInt(beadID, 10)+"/rewind", url.Values{"confirm": {"rewind"}})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 with confirm=rewind, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleRewindBead_SucceededRefused(t *testing.T) {
+	s, d := openTestServer(t)
+	pid := seedProject(t, d)
+	projectFolderTempDir(t, d, pid)
+	beadID := seedBeadWithProse(t, d, pid, "Base prose.")
+	if _, err := d.ExecContext(context.Background(),
+		`UPDATE beads SET status = 'succeeded' WHERE id = ?`, beadID); err != nil {
+		t.Fatalf("set succeeded: %v", err)
+	}
+
+	rec := doPost(t, s, "/beads/"+strconv.FormatInt(beadID, 10)+"/rewind", url.Values{"confirm": {"rewind"}})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for a succeeded bead, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleRewindFromEscalation_ResolvesBeadID(t *testing.T) {
+	s, d := openTestServer(t)
+	pid := seedProject(t, d)
+	projectFolderTempDir(t, d, pid)
+	beadID := seedBeadWithProse(t, d, pid, "Base prose.")
+	jobID := seedJob(t, d, pid, beadID, "ADJUDICATE_NEXT_EXECUTION", "escalated")
+
+	rec := doPost(t, s, "/escalations/"+strconv.FormatInt(jobID, 10)+"/rewind", url.Values{})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "/escalations" {
+		t.Errorf("redirect = %q, want /escalations", loc)
+	}
+	var beadStatus string
+	_ = d.QueryRowContext(context.Background(), `SELECT status FROM beads WHERE id = ?`, beadID).Scan(&beadStatus)
+	if beadStatus != "pending" {
+		t.Errorf("bead status = %q after rewind, want pending", beadStatus)
+	}
+}
+
+func TestHandleRewindFromEscalation_ProjectScopedJobRejected(t *testing.T) {
+	s, d := openTestServer(t)
+	pid := seedProject(t, d)
+	jobID := seedJob(t, d, pid, 0, "RECONCILE_DECOMPOSITION", "escalated")
+
+	rec := doPost(t, s, "/escalations/"+strconv.FormatInt(jobID, 10)+"/rewind", url.Values{})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a project-scoped job, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- W10: pause reason ---
+
+func TestActiveProject_PausedShowsReasonAndNextJob(t *testing.T) {
+	s, d := openTestServer(t)
+	pid := seedProject(t, d)
+	if _, err := d.ExecContext(context.Background(),
+		`UPDATE projects SET status = 'paused', pause_after_reconcile = 1 WHERE id = ?`, pid); err != nil {
+		t.Fatalf("set paused: %v", err)
+	}
+	seedJob(t, d, pid, 0, "DECOMPOSE_SPEC", "pending")
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	for _, want := range []string{"Paused", "pause_after_reconcile", "Resuming dispatches", "DECOMPOSE_SPEC", "cautious"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard missing %q", want)
+		}
+	}
+}
+
 // --- handleResumeProject ---
 
 // TestHandleResumeProject_PreDecompositionPauseSucceeds reproduces the

@@ -111,8 +111,9 @@ type RewindOptions struct {
 	Supersedes int
 }
 
-// rewindResult reports what rewindBead actually did, for RunRewindBeadMain to print.
-type rewindResult struct {
+// RewindResult reports what rewindBead actually did, for RunRewindBeadMain to
+// print and for the web UI's rewind action to summarize.
+type RewindResult struct {
 	ProjectID     int64
 	BudgetFrom    int
 	BudgetTo      int
@@ -123,11 +124,19 @@ type rewindResult struct {
 	DeletedFiles  []string
 }
 
+// RewindBead resets an escalated or stuck bead to a clean, re-runnable state —
+// see RunRewindBeadMain's doc comment for the full behavior. Exported for the
+// web UI's "Rewind bead" action; the CLI entry point calls the same underlying
+// rewindBead. Refuses a bead that has already succeeded.
+func RewindBead(ctx context.Context, d *db.DB, beadID int64, opts RewindOptions) (*RewindResult, error) {
+	return rewindBead(ctx, d, beadID, opts)
+}
+
 // rewindBead resets bead beadID to a clean, re-runnable state. See
 // RunRewindBeadMain's doc comment for the full behavior; factored out as its
 // own function (mirroring fullStopProject) so it can be exercised directly by
 // tests instead of only through the os.Exit-based CLI entry point.
-func rewindBead(ctx context.Context, d *db.DB, beadID int64, opts RewindOptions) (*rewindResult, error) {
+func rewindBead(ctx context.Context, d *db.DB, beadID int64, opts RewindOptions) (*RewindResult, error) {
 	var projectID int64
 	var beadStatus string
 	var currentRevisionID int64
@@ -408,14 +417,14 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64, opts RewindOptions)
 	// (guidance given, what each file's fate was) is actually known — writing
 	// it here rather than up front at snapshotBeadFiles time means one
 	// complete record instead of a partial one a reader has to reconcile
-	// against rewindResult by hand. Purely documentation at this point (the
+	// against RewindResult by hand. Purely documentation at this point (the
 	// destructive steps above already happened), so a write failure is a
 	// warning, not an error that unwinds an already-committed rewind.
 	if err := writeRewindManifest(snapshotDir, beadID, opts, preservedFiles, deletedTests, stubbedFiles, deletedFiles); err != nil {
 		slog.Warn("rewind-bead: write snapshot manifest", "dir", snapshotDir, "error", err)
 	}
 
-	return &rewindResult{
+	return &RewindResult{
 		ProjectID:     projectID,
 		BudgetFrom:    existingExecutions,
 		BudgetTo:      newAttemptCap,

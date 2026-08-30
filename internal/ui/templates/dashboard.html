@@ -23,6 +23,19 @@
 </h1>
 <p class="meta">{{.Project.FolderPath}}/{{.Project.DesignDoc}}</p>
 
+{{if eq .Project.Status "paused"}}
+<div class="alert">
+  <strong>Paused</strong>
+  {{if .Project.PauseAfterReconcile}} · after decomposition review <span class="meta">(pause_after_reconcile)</span>{{end}}
+  {{if .Project.PauseAfterVerb.Valid}} · after verb <code>{{.Project.PauseAfterVerb.String}}</code>{{end}}
+  {{if .Project.PauseAfterBeadID.Valid}} · after bead {{.Project.PauseAfterBeadID.Int64}}{{end}}
+  <br>
+  Resuming dispatches:
+  {{if .Project.NextJobVerb}}<code>{{.Project.NextJobVerb}}</code>{{if .Project.NextJobBeadID.Valid}} <span class="meta">(bead {{.Project.NextJobBeadID.Int64}})</span>{{end}}{{else}}<span class="meta">nothing pending — check handoff_jobs</span>{{end}}
+  <span class="meta"> · reconcile self-resolve: {{if .Project.ReconcileSelfResolve}}permissive{{else}}cautious{{end}}</span>
+</div>
+{{end}}
+
 <div class="section">
   <h2>Beads</h2>
   {{if .Beads}}

@@ -1,6 +1,9 @@
 {{define "title"}}Bead {{.BeadID}} — {{.BeadTitle}}{{end}}
 {{define "content"}}
-<h1>Bead {{.BeadID}}: {{.BeadTitle}} <a href="/beads/{{.BeadID}}/report" style="font-size:0.6em;font-weight:normal">full report →</a></h1>
+<h1>Bead {{.BeadID}}: {{.BeadTitle}}
+  <span class="status {{.BeadStatus}}">{{.BeadStatus}}</span>
+  <a href="/beads/{{.BeadID}}/report" style="font-size:0.6em;font-weight:normal">full report →</a>
+</h1>
 
 <div class="section">
   <h2>Execution History</h2>
@@ -38,6 +41,19 @@
   {{end}}
 </div>
 
+{{if .GuidanceNotes}}
+<div class="section">
+  <h2>Human Guidance Log</h2>
+  <p class="meta">Notes attached at rewind time and carried into the next attempt. Appended, never edited — a later note can supersede or retract an earlier one.</p>
+  {{range .GuidanceNotes}}
+  <div class="guidance-note{{if ne .Status "active"}} guidance-inactive{{end}}">
+    <div class="meta">Note {{.Number}} · {{.CreatedAt}} · <strong>{{.Status}}</strong></div>
+    <div>{{.Text}}</div>
+  </div>
+  {{end}}
+</div>
+{{end}}
+
 <div class="section">
   <h2>Revision Log</h2>
   {{if .Revisions}}
@@ -64,6 +80,33 @@
     <li><a href="/beads/{{$.BeadID}}/snapshot/{{.}}">snapshot {{.}}</a></li>
   {{end}}
   </ul>
+</div>
+{{end}}
+
+{{if ne .BeadStatus "succeeded"}}
+<div class="section">
+  <h2>Rewind Bead</h2>
+  <p class="meta">
+    Rolls prose back to the last pre-ADJUDICATE revision, deletes test files,
+    stubs impl files, grants a fresh attempt budget, and restarts at
+    REFINE_TESTS_WRITE. Pre-rewind files are snapshotted first.
+  </p>
+  <form method="POST" action="/beads/{{.BeadID}}/rewind" class="rewind-form"
+        onsubmit="return confirm('Rewind bead {{.BeadID}}? Test/impl files will be reset.')">
+    <label>Guidance note for the next attempt (optional)
+      <textarea name="note" rows="3" placeholder="e.g. use Square{Row,Col} field order to match game-state"></textarea>
+    </label>
+    <label>Supersedes / retracts note number (optional)
+      <input type="number" name="supersedes" min="1" style="width:80px">
+    </label>
+    {{if not .HasEscalatedJob}}
+    <label class="rewind-confirm">
+      <input type="checkbox" name="confirm" value="rewind" required>
+      This bead has no escalated job — confirm you want to rewind it anyway.
+    </label>
+    {{end}}
+    <button type="submit" class="danger">Rewind bead</button>
+  </form>
 </div>
 {{end}}
 {{end}}

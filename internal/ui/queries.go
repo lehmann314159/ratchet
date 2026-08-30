@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"ratchet/internal/db"
+	"ratchet/internal/project"
 )
 
 type ProjectRow struct {
@@ -16,6 +17,19 @@ type ProjectRow struct {
 	FolderPath string
 	DesignDoc  string
 	CreatedAt  string
+
+	// Pause configuration — only meaningful for the active-project view when
+	// Status == "paused". See project.Project for the semantics.
+	PauseAfterReconcile  bool
+	PauseAfterVerb       sql.NullString
+	PauseAfterBeadID     sql.NullInt64
+	ReconcileSelfResolve bool
+
+	// NextJobVerb / NextJobBeadID describe the pending handoff_job that was
+	// enqueued right before the project paused — what resuming will dispatch.
+	// Populated only for the paused active-project view.
+	NextJobVerb   string
+	NextJobBeadID sql.NullInt64
 }
 
 type BeadRow struct {
@@ -54,15 +68,28 @@ type EscalatedRow struct {
 
 func queryActiveProject(ctx context.Context, d *db.DB) (*ProjectRow, error) {
 	row := d.QueryRowContext(ctx, `
-		SELECT id, label, status, folder_path, design_doc_path, created_at
+		SELECT id, label, status, folder_path, design_doc_path, created_at,
+		       pause_after_reconcile, pause_after_verb, pause_after_bead_id,
+		       reconcile_self_resolve
 		FROM projects WHERE status IN ('active', 'paused')
 		ORDER BY id LIMIT 1`)
 	p := &ProjectRow{}
-	if err := row.Scan(&p.ID, &p.Label, &p.Status, &p.FolderPath, &p.DesignDoc, &p.CreatedAt); err != nil {
+	if err := row.Scan(&p.ID, &p.Label, &p.Status, &p.FolderPath, &p.DesignDoc, &p.CreatedAt,
+		&p.PauseAfterReconcile, &p.PauseAfterVerb, &p.PauseAfterBeadID, &p.ReconcileSelfResolve); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("active project: %w", err)
+	}
+	if p.Status == "paused" {
+		err := d.QueryRowContext(ctx, `
+			SELECT verb, bead_id FROM handoff_jobs
+			WHERE project_id = ? AND status = 'pending'
+			ORDER BY created_at LIMIT 1`, p.ID,
+		).Scan(&p.NextJobVerb, &p.NextJobBeadID)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, fmt.Errorf("paused project next job: %w", err)
+		}
 	}
 	return p, nil
 }
@@ -309,26 +336,42 @@ type beadDetailData struct {
 	baseData
 	BeadID          int64
 	BeadTitle       string
+	BeadStatus      string
+	HasEscalatedJob bool
 	Executions      []ExecutionRow
 	Revisions       []RevisionRow
 	RewindSnapshots []int
+	GuidanceNotes   []project.GuidanceNote
 }
 
 func queryBeadDetail(ctx context.Context, d *db.DB, beadID int64) (*beadDetailData, error) {
 	out := &beadDetailData{BeadID: beadID}
 
-	// Title from current revision.
+	// Title, status, and the Human Guidance Log from the current revision.
+	// bead_revisions.full_text is a JSON blob; the guidance log lives inside
+	// its "full_text" prose field (see project.ParseGuidanceLog), not at the
+	// top level.
 	var fullText string
 	_ = d.QueryRowContext(ctx, `
-		SELECT COALESCE(br.full_text, '{}') FROM beads b
+		SELECT COALESCE(br.full_text, '{}'), b.status FROM beads b
 		LEFT JOIN bead_revisions br ON br.id = b.current_revision_id
-		WHERE b.id = ?`, beadID).Scan(&fullText)
-	var parsed struct{ Title string `json:"title"` }
+		WHERE b.id = ?`, beadID).Scan(&fullText, &out.BeadStatus)
+	var parsed struct {
+		Title string `json:"title"`
+		Prose string `json:"full_text"`
+	}
 	if json.Unmarshal([]byte(fullText), &parsed) == nil && parsed.Title != "" {
 		out.BeadTitle = parsed.Title
 	} else {
 		out.BeadTitle = fmt.Sprintf("bead-%d", beadID)
 	}
+	_, out.GuidanceNotes = project.ParseGuidanceLog(parsed.Prose)
+
+	var escalated int
+	_ = d.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM handoff_jobs WHERE bead_id = ? AND status = 'escalated'`,
+		beadID).Scan(&escalated)
+	out.HasEscalatedJob = escalated > 0
 
 	// Execution history.
 	rows, err := d.QueryContext(ctx, `
