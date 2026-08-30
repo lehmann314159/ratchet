@@ -29,7 +29,7 @@ any one can be picked up cold.
 | 2026-08-30 | Milestone A | W7 (remove-project FK guard), W8 (status CSS), W13 htmx vendored | 9a9a51a |
 | 2026-08-30 | Milestone B | W3 (guidance-log render + rewind-from-UI), W10 (pause reason) | 2d67153 |
 | 2026-08-30 | Milestone C | new GET /projects/{id} page, W1 (lineages), W9 (active-project), W2 (cascade) | 7937138 |
-| 2026-08-30 | Milestone D | W4 (decomposition debate), W5 (manifest bootstrap), W6 (REFINE_TESTS cycle) | PENDING |
+| 2026-08-30 | Milestone D | W4 (decomposition debate), W5 (manifest bootstrap), W6 (REFINE_TESTS cycle) | 268c57f |
 
 ---
 
