@@ -414,6 +414,112 @@ func TestExtractRunTestName(t *testing.T) {
 	}
 }
 
+func TestFixRunFlagSeparator(t *testing.T) {
+	cases := []struct {
+		name      string
+		in        string
+		want      string
+		wantFixed bool
+	}{
+		{
+			name:      "bead 135: space-separated names in quoted -run value",
+			in:        "grep -q 'func TestHandleIndex' handlers_test.go && grep -q 'func TestHandleEval' handlers_test.go && go test -v -run 'TestHandleIndex TestHandleEval' ./...",
+			want:      "grep -q 'func TestHandleIndex' handlers_test.go && grep -q 'func TestHandleEval' handlers_test.go && go test -v -run 'TestHandleIndex|TestHandleEval' ./...",
+			wantFixed: true,
+		},
+		{
+			name:      "three names, double quotes",
+			in:        `go test -run "TestA TestB TestC" ./...`,
+			want:      `go test -run "TestA|TestB|TestC" ./...`,
+			wantFixed: true,
+		},
+		{
+			name:      "equals form",
+			in:        "go test -run='TestFoo TestBar' .",
+			want:      "go test -run='TestFoo|TestBar' .",
+			wantFixed: true,
+		},
+		{
+			name:      "already correct alternation — untouched",
+			in:        "go test -run 'TestHandleIndex|TestHandleEval' ./...",
+			want:      "go test -run 'TestHandleIndex|TestHandleEval' ./...",
+			wantFixed: false,
+		},
+		{
+			name:      "single quoted name — untouched",
+			in:        "go test -run 'TestFoo' ./...",
+			want:      "go test -run 'TestFoo' ./...",
+			wantFixed: false,
+		},
+		{
+			name:      "unquoted single name — untouched",
+			in:        "go test -v . -run TestFoo",
+			want:      "go test -v . -run TestFoo",
+			wantFixed: false,
+		},
+		{
+			name:      "intentional space in a subtest regexp — untouched (not all tokens are TestXxx)",
+			in:        "go test -run 'TestParse/two words' .",
+			want:      "go test -run 'TestParse/two words' .",
+			wantFixed: false,
+		},
+		{
+			name:      "not a go test criterion — untouched",
+			in:        "grep -q 'func Foo bar' foo.go",
+			want:      "grep -q 'func Foo bar' foo.go",
+			wantFixed: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, fixed := fixRunFlagSeparator(tc.in)
+			if fixed != tc.wantFixed {
+				t.Errorf("fixed = %v, want %v", fixed, tc.wantFixed)
+			}
+			if got != tc.want {
+				t.Errorf("got  %q\nwant %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGoFixBeadSpec_Bead135RunFlag reproduces the exprvm-web-v4 bead 135
+// criterion end-to-end through goFixBeadSpec: the criterion already carries
+// both grep guards (so addGrepGuard skips it), but its -run value is
+// space-separated and would vacuously pass. The full fix pipeline must still
+// repair the separator.
+func TestGoFixBeadSpec_Bead135RunFlag(t *testing.T) {
+	b := &ParsedBead{
+		OutputFiles: []string{"handlers.go", "templates.go", "handlers_test.go"},
+		ExitCriteria: []string{
+			"grep -q 'func TestHandleIndex' handlers_test.go && grep -q 'func TestHandleEval' handlers_test.go && go test -v -run 'TestHandleIndex TestHandleEval' ./...",
+			"grep -q 'func TestHandlerRuntime' handlers_test.go && go test -v -run TestHandlerRuntime ./...",
+		},
+	}
+	if !goFixBeadSpec(b) {
+		t.Fatal("expected a fix")
+	}
+	want := "grep -q 'func TestHandleIndex' handlers_test.go && grep -q 'func TestHandleEval' handlers_test.go && go test -v -run 'TestHandleIndex|TestHandleEval' ./..."
+	if b.ExitCriteria[0] != want {
+		t.Errorf("criterion[0] = %q\nwant %q", b.ExitCriteria[0], want)
+	}
+	if b.ExitCriteria[1] != "grep -q 'func TestHandlerRuntime' handlers_test.go && go test -v -run TestHandlerRuntime ./..." {
+		t.Errorf("criterion[1] should be unchanged, got %q", b.ExitCriteria[1])
+	}
+	// Idempotent in effect: a second pass must not alter the (already-fixed)
+	// criteria text. (goFixBeadSpec's return bool is not a reliable "changed"
+	// signal for grep-guarded criteria — fixFileBasedGoTest strips the grep
+	// guard's .go arg and fixBareGrepFile re-adds it, a benign round-trip that
+	// predates this fix — so assert on the text, not the bool.)
+	before := append([]string(nil), b.ExitCriteria...)
+	goFixBeadSpec(b)
+	for i := range before {
+		if b.ExitCriteria[i] != before[i] {
+			t.Errorf("second pass changed criterion[%d]:\n before %q\n after  %q", i, before[i], b.ExitCriteria[i])
+		}
+	}
+}
+
 // TestBead684CriterionSatisfiability actually runs the bead-684 exit
 // criteria against real files on disk via execcheck.VerifyExitCriteria — the
 // same mechanical gate ADJUDICATE's declare_success path uses — rather than

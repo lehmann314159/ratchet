@@ -813,14 +813,23 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 		findings += "\n\n" + note
 	}
 	if beadHasRefinements(ctx, d, beadID) {
-		findings += "\n\n[REFINE_TESTS bead] This bead's tests were written by REFINE_TESTS. " +
-			"If the same test functions fail identically across multiple attempts and the " +
-			"implementation logic appears correct, use re_refine after 2 or more identical " +
-			"failures — the tests themselves may contain logically impossible assertions. " +
-			"Before issuing execute_revised, ask: can any spec change cause the failing " +
-			"assertion to pass with a correct implementation? If not, use re_refine. " +
-			"re_refine_guidance should identify each broken assertion, why it cannot be " +
-			"satisfied by a correct implementation, and which function contains it."
+		findings += "\n\n[REFINE_TESTS bead] This bead's tests were written by REFINE_TESTS and " +
+			"are LOCKED during EXECUTE_BEAD: the execution agent cannot create, modify, or add " +
+			"setup to any *_test.go file, and an execute_revised spec cannot direct it to. " +
+			"Route the fix by where it actually lives:\n" +
+			"  - The fix needs a TEST-FILE change — a wrong expected value, missing or " +
+			"inconsistent setup (e.g. one test initializes a package-level variable the code " +
+			"under test dereferences and a sibling test in the same file does not, so the " +
+			"handler panics before any assertion runs), a wrong fixture: use re_refine. Put the " +
+			"exact required change, per function, in re_refine_guidance. Do NOT describe a " +
+			"test-file change in an execute_revised spec — the agent will not act on it.\n" +
+			"  - A change to an IMPLEMENTATION (non-test) file makes the current test pass as " +
+			"written — a defensive nil check, lazy initialization of package state, a corrected " +
+			"algorithm: use execute_revised with that implementation change.\n" +
+			"If the same test functions fail identically across 2+ attempts that each genuinely " +
+			"revised the implementation, prefer re_refine — the assertion is likely " +
+			"unsatisfiable. re_refine_guidance should name each function to fix, the specific " +
+			"defect, and the exact correction."
 		if note, identicalNames, identicalText := recurringTestFailureNote(ctx, d, beadID); note != "" {
 			findings += "\n\n" + note
 			if len(identicalNames) > 0 {

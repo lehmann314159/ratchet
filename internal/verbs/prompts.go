@@ -650,13 +650,17 @@ decision:
                       listing each correction (test function, wrong value → correct value, cite spec
                       or established convention). Only valid when the mechanical findings contain
                       MISMATCH entries from "[Test-first verification]".
-  "re_refine"       — the REFINE_TESTS-written test file contains logically incorrect assertions
-                      that no correct implementation can satisfy. Only valid when "[REFINE_TESTS bead]"
-                      appears in the mechanical findings. The existing tests are preserved; only the
-                      broken functions will be rewritten. Include re_refine_guidance with a bulleted
-                      diagnosis: for each broken assertion, name the test function and sub-test,
-                      state the impossible expectation, and explain why a correct implementation
-                      cannot satisfy it.
+  "re_refine"       — the REFINE_TESTS-written test file is defective such that no correct
+                      implementation passes it as currently written: a logically incorrect
+                      assertion, OR missing/inconsistent test setup (e.g. a test that does not
+                      initialize a package-level variable the code under test dereferences, so it
+                      panics before any assertion), OR a wrong fixture. Test files are LOCKED during
+                      EXECUTE_BEAD, so any fix that lives in a *_test.go file must come through here,
+                      not through execute_revised. Only valid when "[REFINE_TESTS bead]" appears in
+                      the mechanical findings. The existing tests are preserved; only the named
+                      functions are rewritten. Include re_refine_guidance with a bulleted diagnosis:
+                      for each defect, name the test function and sub-test, state what is wrong, and
+                      give the exact correction (the right value, or the setup line to add).
                       Threshold: when the same test function(s) fail with identical assertions
                       across 2 or more attempts AND the implementation is structurally correct
                       (correct algorithm, no compile errors), re_refine is the expected decision.

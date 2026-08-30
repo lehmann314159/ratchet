@@ -267,6 +267,23 @@ func goFixBeadSpec(bead *ParsedBead) bool {
 		}
 	}
 
+	// Fix a `go test -run` flag whose quoted value lists several test functions
+	// separated by spaces instead of the regex alternation `|`. `go test -run`
+	// takes a Go regexp: `-run 'TestA TestB'` matches neither (there is no space
+	// in any test name and the space is not an operator), so the criterion
+	// silently runs zero tests and exits 0 — a vacuous pass that the grep guards
+	// on the same line do not catch. Confirmed live: exprvm-web-v4 bead 135's
+	// RECONCILE_DECOMPOSITION consolidated two single-function criteria into one
+	// `-run 'TestHandleIndex TestHandleEval'`, which vacuously passed for three
+	// execution attempts. Runs regardless of a leading `grep -q` (addGrepGuard
+	// skips guarded criteria, so it would never reach this otherwise).
+	for i, c := range bead.ExitCriteria {
+		if result, ok := fixRunFlagSeparator(c); ok {
+			bead.ExitCriteria[i] = result
+			fixed = true
+		}
+	}
+
 	// Rewrite file-based go test forms to package form.
 	for i, c := range bead.ExitCriteria {
 		if converted, ok := fixFileBasedGoTest(c); ok {
@@ -518,6 +535,40 @@ func deriveTestFileName(exitCriteria, goFiles []string) string {
 	first := goFiles[0]
 	base := strings.TrimSuffix(filepath.Base(first), ".go")
 	return filepath.Join(filepath.Dir(first), base+"_test.go")
+}
+
+// runFlagQuotedValueRe captures a `-run` flag with a quoted value. Group 1 is
+// the inner value between the quotes. Go's regexp (RE2) has no backreferences,
+// so the closing quote is matched as "any quote char" rather than "the same
+// one"; a mismatched pair is malformed input and harmless here. Both `-run 'x'`
+// and `-run='x'` forms.
+var runFlagQuotedValueRe = regexp.MustCompile(`-run=?\s*['"]([^'"]*)['"]`)
+
+// allPlainTestNamesRe matches a string that is two or more plain top-level Go
+// test-function names ("TestFoo") separated by single spaces — the exact shape
+// a model produces when it means an alternation but writes spaces.
+var allPlainTestNamesRe = regexp.MustCompile(`^Test\w+( Test\w+)+$`)
+
+// fixRunFlagSeparator rewrites `go test -run 'TestA TestB'` to
+// `go test -run 'TestA|TestB'`. It only touches a quoted value whose every
+// space-separated token is a plain `TestXxx` name, so a legitimate regexp with
+// an intentional space (`-run 'TestParse/two words'`) is left alone. Returns
+// the rewritten criterion and true if a rewrite occurred.
+func fixRunFlagSeparator(criterion string) (string, bool) {
+	if !strings.Contains(criterion, "go test") {
+		return criterion, false
+	}
+	m := runFlagQuotedValueRe.FindStringSubmatchIndex(criterion)
+	if m == nil {
+		return criterion, false
+	}
+	valStart, valEnd := m[2], m[3] // group 1 = inner value
+	value := criterion[valStart:valEnd]
+	if !strings.Contains(value, " ") || !allPlainTestNamesRe.MatchString(value) {
+		return criterion, false
+	}
+	fixedValue := strings.ReplaceAll(value, " ", "|")
+	return criterion[:valStart] + fixedValue + criterion[valEnd:], true
 }
 
 // extractRunTestName returns the value of the -run flag in a go test command,
@@ -898,4 +949,3 @@ func injectDecompositionNotesPin(bead *ParsedBead, pins map[string]string) bool 
 	bead.FullText = canonical
 	return true
 }
-
