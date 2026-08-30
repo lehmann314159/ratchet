@@ -999,6 +999,17 @@ dynamic renders outside it.**
   `-7/2 = -3` (NOT `-4`), `7/-2 = -3` (NOT `-4`), `-7/-2 = 3`. Do not rely on
   the general "truncates toward zero" rule alone and leave
   `REFINE_TESTS_WRITE` to re-derive the negative-operand cases itself.
+- **Pin the exact Bytecode-by-error-type rule to the `handlers-templates`
+  bead**: on a `Compile` error, `HistoryEntry.Bytecode` is exactly `""` —
+  nothing was compiled, so `Disassemble` never ran; there is no "partial
+  instructions" value to report. On a `Run` (runtime) error or on success,
+  `Bytecode` is always the joined `Disassemble` output (`bytecodeText`),
+  because `Disassemble` runs immediately after a successful `Compile` and
+  before `Run` is ever called — so a runtime failure still has full,
+  already-computed bytecode to show. Do not let this bead's test conflate
+  "an error occurred" with "nothing was compiled" — only a `Compile` error
+  means that; a `Run` error means compilation succeeded and `Bytecode` must
+  be non-empty.
 
 **Integration bead scenarios** (bounded — one fixed scenario each):
 - Using `httptest.NewServer`, `POST /eval` with `input=x=5` (assert HTTP 200,
