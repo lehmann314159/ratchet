@@ -751,6 +751,157 @@ func TestHandleRemoveProject_StandaloneLineageRootSucceeds(t *testing.T) {
 	}
 }
 
+// --- Milestone C: project detail page, lineages, cascade, active-project selection ---
+
+// seedIteration inserts a project that is iteration `iter` of the lineage
+// rooted at `root` (pass root==id for iteration 1).
+func seedIteration(t *testing.T, d *db.DB, id, root int64, iter int, status string) {
+	t.Helper()
+	if _, err := d.ExecContext(context.Background(), `
+		INSERT INTO projects
+		  (id, label, folder_path, design_doc_path, status,
+		   monitor_override_default, execution_budget_default, audit_reconcile_round_cap,
+		   lineage_root_id, iteration_number, created_at, updated_at)
+		VALUES (?, 'lin', '/tmp', 'd.md', ?, 'honor', 300, 2, ?, ?,
+		        '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		id, status, root, iter); err != nil {
+		t.Fatalf("seed iteration %d: %v", id, err)
+	}
+}
+
+func TestQueryActiveProject_PrefersActiveOverLowerIDPaused(t *testing.T) {
+	_, d := openTestServer(t)
+	ctx := context.Background()
+	pid := seedProject(t, d) // id 1
+	if _, err := d.ExecContext(ctx, `UPDATE projects SET status = 'paused' WHERE id = ?`, pid); err != nil {
+		t.Fatalf("pause project 1: %v", err)
+	}
+	seedExtraProject(t, d, 2, "active")
+
+	p, err := queryActiveProject(ctx, d)
+	if err != nil {
+		t.Fatalf("queryActiveProject: %v", err)
+	}
+	if p == nil || p.ID != 2 {
+		t.Fatalf("featured project = %v, want id 2 (the active one, not the lower-id paused one)", p)
+	}
+
+	others, err := queryOtherNonTerminalProjects(ctx, d, 2)
+	if err != nil {
+		t.Fatalf("queryOtherNonTerminalProjects: %v", err)
+	}
+	if len(others) != 1 || others[0].ID != 1 {
+		t.Errorf("other non-terminal = %v, want [project 1]", others)
+	}
+}
+
+func TestQueryActiveProject_FallsBackToPausedWhenNoneActive(t *testing.T) {
+	_, d := openTestServer(t)
+	ctx := context.Background()
+	pid := seedProject(t, d)
+	if _, err := d.ExecContext(ctx, `UPDATE projects SET status = 'paused' WHERE id = ?`, pid); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	p, err := queryActiveProject(ctx, d)
+	if err != nil {
+		t.Fatalf("queryActiveProject: %v", err)
+	}
+	if p == nil || p.ID != pid {
+		t.Fatalf("featured = %v, want the paused project", p)
+	}
+}
+
+func TestDashboard_GroupsLineage(t *testing.T) {
+	s, d := openTestServer(t)
+	seedIteration(t, d, 1, 1, 1, "complete")
+	seedIteration(t, d, 2, 1, 2, "full_stopped")
+	seedIteration(t, d, 3, 1, 3, "active")
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "lineage · lin · 3 iterations") {
+		t.Errorf("dashboard missing lineage group header:\n%s", body)
+	}
+	if !strings.Contains(body, "iter 2") || !strings.Contains(body, "iter 3") {
+		t.Errorf("dashboard missing iteration markers")
+	}
+}
+
+func TestProjectDetail_ShowsIterationNav(t *testing.T) {
+	s, d := openTestServer(t)
+	seedIteration(t, d, 1, 1, 1, "complete")
+	seedIteration(t, d, 2, 1, 2, "full_stopped")
+	seedIteration(t, d, 3, 1, 3, "active")
+
+	req := httptest.NewRequest(http.MethodGet, "/projects/2", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !strings.Contains(body, "Iteration Lineage") {
+		t.Errorf("missing lineage section")
+	}
+	if !strings.Contains(body, `href="/projects/1"`) || !strings.Contains(body, `href="/projects/3"`) {
+		t.Errorf("missing prev/next iteration links")
+	}
+	if !strings.Contains(body, "iteration 1") || !strings.Contains(body, "iteration 3 →") {
+		t.Errorf("missing prev/next iteration labels")
+	}
+}
+
+func TestProjectDetail_NotFound(t *testing.T) {
+	s, _ := openTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/projects/999", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestProjectDetail_CascadeReview(t *testing.T) {
+	s, d := openTestServer(t)
+	ctx := context.Background()
+	baseline := seedProject(t, d) // id 1
+	if _, err := d.ExecContext(ctx, `UPDATE projects SET status = 'complete' WHERE id = 1`); err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	folder := t.TempDir()
+	seedExtraProject(t, d, 2, "active")
+	if _, err := d.ExecContext(ctx,
+		`UPDATE projects SET cascade_baseline_project_id = ?, folder_path = ?, lineage_root_id = ?, iteration_number = 2 WHERE id = 2`,
+		baseline, folder, baseline); err != nil {
+		t.Fatalf("make cascade: %v", err)
+	}
+	reset := seedBead(t, d, 2, 300)     // will get a cascade snapshot dir
+	unchanged := seedBead(t, d, 2, 300) // no snapshot
+
+	if err := os.MkdirAll(filepath.Join(folder, "traces", fmt.Sprintf("_bead-%d-cascade-1", reset)), 0o755); err != nil {
+		t.Fatalf("mk snapshot dir: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/projects/2", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, body)
+	}
+	if !strings.Contains(body, "Cascade iteration") || !strings.Contains(body, "Cascade Review") {
+		t.Errorf("missing cascade banner/section")
+	}
+	if !strings.Contains(body, "reset — spec changed") {
+		t.Errorf("reset bead %d not marked as changed", reset)
+	}
+	if !strings.Contains(body, "unchanged — inherited from baseline") {
+		t.Errorf("unchanged bead %d not marked inherited", unchanged)
+	}
+}
+
 // --- W3: guidance log + rewind ---
 
 // seedBeadWithProse inserts a bead whose current revision's full_text JSON

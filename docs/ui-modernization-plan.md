@@ -28,6 +28,7 @@ any one can be picked up cold.
 | 2026-08-30 | — | Plan written | ab75e12 |
 | 2026-08-30 | Milestone A | W7 (remove-project FK guard), W8 (status CSS), W13 htmx vendored | 9a9a51a |
 | 2026-08-30 | Milestone B | W3 (guidance-log render + rewind-from-UI), W10 (pause reason) | 2d67153 |
+| 2026-08-30 | Milestone C | new GET /projects/{id} page, W1 (lineages), W9 (active-project), W2 (cascade) | (pending) |
 
 ---
 
@@ -53,7 +54,15 @@ any one can be picked up cold.
 
 ## W1 — Iteration lineages
 
-**Status:** NOT STARTED
+**Status:** DONE (Milestone C, 2026-08-30). `ProjectRow` carries
+`LineageRootID`/`IterationNumber`/`CascadeBaselineProjectID` via a shared
+`projectColumns` + `scanProjectRow` helper (replaced three hand-written column
+lists). Dashboard "All Projects" table is grouped by lineage (`groupByLineage`
+→ `[]LineageGroup`): multi-iteration lineages get a header row + indented
+members ordered by iteration; standalone projects render as plain rows. The new
+`GET /projects/{id}` page shows `iteration N`, an "Iteration Lineage" strip of
+all siblings, and prev/next-iteration links (`queryLineageMembers`). Tests:
+`TestDashboard_GroupsLineage`, `TestProjectDetail_ShowsIterationNav`.
 
 **Goal.** Make the loop-mode iteration structure a first-class axis of the
 dashboard instead of showing iterations 1/2/3 of a lineage as unrelated rows.
@@ -95,7 +104,16 @@ grouped.
 
 ## W2 — Cascade iterations
 
-**Status:** NOT STARTED
+**Status:** DONE (Milestone C, 2026-08-30). `ProjectRow.IsCascade()` from
+`cascade_baseline_project_id`. The `GET /projects/{id}` page shows a "Cascade
+iteration" banner (linking the baseline project) and a "Cascade Review" table:
+per bead, `reset — spec changed` vs `unchanged — inherited from baseline`,
+derived from whether a `traces/_bead-{id}-cascade-*` snapshot dir exists
+(`listSnapshots`, generalized from `listRewindSnapshots`). `queryCascadeBeads`
++ handler-side snapshot check. Not yet done: reusing `handleBeadSnapshot` to
+*display* a cascade snapshot's contents (rewind snapshots already have this;
+cascade ones only get the reset/unchanged flag) — folded into W11's forensics
+pass. Test: `TestProjectDetail_CascadeReview`.
 
 **Goal.** When a `clone-project --design-doc` cascade project is running or
 done, show that it is a cascade and what its review concluded per bead.
@@ -420,7 +438,13 @@ state, or just grep the templates for `.status ` usages.
 
 ## W9 — Fix: `queryActiveProject` can show the wrong project
 
-**Status:** NOT STARTED
+**Status:** DONE (Milestone C, 2026-08-30). `queryActiveProject` now mirrors the
+orchestrator's own choice exactly (`queue.go` activeProject: `status='active'
+ORDER BY id LIMIT 1`, paused ignored), falling back to the most-recently-updated
+`paused` project only when none is active. `queryOtherNonTerminalProjects` feeds
+a one-line "Other non-terminal projects" notice on the dashboard so a second
+active/paused project can't hide. Tests:
+`TestQueryActiveProject_{PrefersActiveOverLowerIDPaused,FallsBackToPausedWhenNoneActive}`.
 
 **Goal.** The dashboard's "current project" is the one the orchestrator is
 actually working.
@@ -611,11 +635,13 @@ Milestone-based; each milestone is a sensible stopping point.
 - **W3 Part B** (rewind-from-UI) — the missing half of loop-mode interaction
 - **W10** (pause reason) — pairs naturally with "should I resume or redirect?"
 
-### Milestone C — loop-mode structure (1–2 sessions)
-- **New `GET /projects/{id}` detail page** (Decisions #4) — build the shell first
-- **W1** (lineages)
-- **W9** (correct active-project selection) — fold into W1
-- **W2** (cascade view)
+### Milestone C — loop-mode structure — DONE (2026-08-30)
+- **`GET /projects/{id}` detail page** — built (`project.html`, `partials.html`
+  with shared `beadsTable`/`jobsTable`/`pauseBox`/`projectControls` blocks;
+  `GET /projects/{id}/body` for 5s htmx polling). Dashboard links to it.
+- **W1** (lineages) — done
+- **W9** (correct active-project selection) — done
+- **W2** (cascade view) — done
 
 ### Milestone D — dark pipeline phases (2 sessions)
 - **W4** (decomposition debate)

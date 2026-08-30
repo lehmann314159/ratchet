@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"ratchet/internal/db"
 	"ratchet/internal/project"
@@ -25,11 +26,54 @@ type ProjectRow struct {
 	PauseAfterBeadID     sql.NullInt64
 	ReconcileSelfResolve bool
 
+	// Loop-mode lineage / cascade provenance (see project.Project).
+	LineageRootID            sql.NullInt64
+	IterationNumber          int
+	CascadeBaselineProjectID sql.NullInt64
+
 	// NextJobVerb / NextJobBeadID describe the pending handoff_job that was
 	// enqueued right before the project paused — what resuming will dispatch.
-	// Populated only for the paused active-project view.
+	// Populated only for a paused project (fillPauseNextJob).
 	NextJobVerb   string
 	NextJobBeadID sql.NullInt64
+}
+
+// IsCascade reports whether this project is a cascade iteration
+// (clone-project --design-doc) rather than a fresh or plainly-cloned project.
+func (p ProjectRow) IsCascade() bool { return p.CascadeBaselineProjectID.Valid }
+
+// projectColumns is the shared SELECT list for every projects-table query, in
+// the exact order scanProjectRow expects.
+const projectColumns = `id, label, status, folder_path, design_doc_path, created_at,
+	pause_after_reconcile, pause_after_verb, pause_after_bead_id, reconcile_self_resolve,
+	lineage_root_id, iteration_number, cascade_baseline_project_id`
+
+type scanner interface{ Scan(dest ...any) error }
+
+func scanProjectRow(sc scanner) (*ProjectRow, error) {
+	p := &ProjectRow{}
+	err := sc.Scan(&p.ID, &p.Label, &p.Status, &p.FolderPath, &p.DesignDoc, &p.CreatedAt,
+		&p.PauseAfterReconcile, &p.PauseAfterVerb, &p.PauseAfterBeadID, &p.ReconcileSelfResolve,
+		&p.LineageRootID, &p.IterationNumber, &p.CascadeBaselineProjectID)
+	return p, err
+}
+
+// fillPauseNextJob populates NextJobVerb/NextJobBeadID for a paused project —
+// the pending job every pause point enqueues right before pausing, which
+// resume-project will dispatch. No-op for a non-paused project.
+func fillPauseNextJob(ctx context.Context, d *db.DB, p *ProjectRow) error {
+	if p.Status != "paused" {
+		return nil
+	}
+	err := d.QueryRowContext(ctx, `
+		SELECT verb, bead_id FROM handoff_jobs
+		WHERE project_id = ? AND status = 'pending'
+		ORDER BY created_at LIMIT 1`, p.ID,
+	).Scan(&p.NextJobVerb, &p.NextJobBeadID)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("paused project next job: %w", err)
+	}
+	return nil
 }
 
 type BeadRow struct {
@@ -66,49 +110,205 @@ type EscalatedRow struct {
 	Budget           int // current execution_budget from bead_revisions; 0 if not bead-scoped
 }
 
+// queryActiveProject returns the project the dashboard should feature: the one
+// the orchestrator is actually working. The orchestrator (queue.go's
+// activeProject) picks `status = 'active' ORDER BY id LIMIT 1` and ignores
+// 'paused' entirely, so we mirror that exactly. Only when no project is active
+// do we fall back to the most-recently-touched paused project — one that's
+// waiting on a human. Returns (nil, nil) when there is neither.
+//
+// The old query included 'paused' in the same ORDER BY id set, so a low-id
+// paused iteration could shadow the higher-id active project the orchestrator
+// was really running (a real hazard once loop-mode started leaving multiple
+// non-terminal projects around).
 func queryActiveProject(ctx context.Context, d *db.DB) (*ProjectRow, error) {
-	row := d.QueryRowContext(ctx, `
-		SELECT id, label, status, folder_path, design_doc_path, created_at,
-		       pause_after_reconcile, pause_after_verb, pause_after_bead_id,
-		       reconcile_self_resolve
-		FROM projects WHERE status IN ('active', 'paused')
-		ORDER BY id LIMIT 1`)
-	p := &ProjectRow{}
-	if err := row.Scan(&p.ID, &p.Label, &p.Status, &p.FolderPath, &p.DesignDoc, &p.CreatedAt,
-		&p.PauseAfterReconcile, &p.PauseAfterVerb, &p.PauseAfterBeadID, &p.ReconcileSelfResolve); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
+	p, err := scanProjectRow(d.QueryRowContext(ctx,
+		`SELECT `+projectColumns+` FROM projects WHERE status = 'active' ORDER BY id LIMIT 1`))
+	if err == sql.ErrNoRows {
+		p, err = scanProjectRow(d.QueryRowContext(ctx,
+			`SELECT `+projectColumns+` FROM projects WHERE status = 'paused' ORDER BY updated_at DESC, id DESC LIMIT 1`))
+	}
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
 		return nil, fmt.Errorf("active project: %w", err)
 	}
-	if p.Status == "paused" {
-		err := d.QueryRowContext(ctx, `
-			SELECT verb, bead_id FROM handoff_jobs
-			WHERE project_id = ? AND status = 'pending'
-			ORDER BY created_at LIMIT 1`, p.ID,
-		).Scan(&p.NextJobVerb, &p.NextJobBeadID)
-		if err != nil && err != sql.ErrNoRows {
-			return nil, fmt.Errorf("paused project next job: %w", err)
-		}
+	if err := fillPauseNextJob(ctx, d, p); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// queryProjectByID loads one project for the detail page.
+func queryProjectByID(ctx context.Context, d *db.DB, id int64) (*ProjectRow, error) {
+	p, err := scanProjectRow(d.QueryRowContext(ctx,
+		`SELECT `+projectColumns+` FROM projects WHERE id = ?`, id))
+	if err == sql.ErrNoRows {
+		return nil, err
+	}
+	if err != nil {
+		return nil, fmt.Errorf("project %d: %w", id, err)
+	}
+	if err := fillPauseNextJob(ctx, d, p); err != nil {
+		return nil, err
 	}
 	return p, nil
 }
 
 func queryAllProjects(ctx context.Context, d *db.DB) ([]ProjectRow, error) {
-	rows, err := d.QueryContext(ctx, `
-		SELECT id, label, status, folder_path, design_doc_path, created_at
-		FROM projects ORDER BY id DESC`)
+	rows, err := d.QueryContext(ctx, `SELECT `+projectColumns+` FROM projects ORDER BY id DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("all projects: %w", err)
 	}
 	defer rows.Close()
 	var out []ProjectRow
 	for rows.Next() {
-		var p ProjectRow
-		if err := rows.Scan(&p.ID, &p.Label, &p.Status, &p.FolderPath, &p.DesignDoc, &p.CreatedAt); err != nil {
+		p, err := scanProjectRow(rows)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, p)
+		out = append(out, *p)
+	}
+	return out, rows.Err()
+}
+
+// queryOtherNonTerminalProjects lists active/paused projects other than
+// exceptID — surfaced as a one-line notice on the dashboard so a second
+// non-terminal project can't hide behind the featured one.
+func queryOtherNonTerminalProjects(ctx context.Context, d *db.DB, exceptID int64) ([]ProjectRow, error) {
+	rows, err := d.QueryContext(ctx, `SELECT `+projectColumns+`
+		FROM projects WHERE status IN ('active', 'paused') AND id != ? ORDER BY id`, exceptID)
+	if err != nil {
+		return nil, fmt.Errorf("other non-terminal projects: %w", err)
+	}
+	defer rows.Close()
+	var out []ProjectRow
+	for rows.Next() {
+		p, err := scanProjectRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *p)
+	}
+	return out, rows.Err()
+}
+
+// LineageGroup is one iteration lineage: every project sharing a
+// lineage_root_id, ordered by iteration_number. A standalone project is a
+// group of one.
+type LineageGroup struct {
+	RootID  int64
+	Members []ProjectRow
+}
+
+// Multi reports whether this lineage has more than one iteration.
+func (g LineageGroup) Multi() bool { return len(g.Members) > 1 }
+
+// Label is the group's display name — iteration 1's label.
+func (g LineageGroup) Label() string {
+	if len(g.Members) == 0 {
+		return ""
+	}
+	return g.Members[0].Label
+}
+
+// groupByLineage buckets projects by lineage_root_id (falling back to the
+// project's own id when the column is NULL — pre-backfill rows), ordering
+// members by iteration_number and groups by their highest project id
+// descending, so the most recently created lineage sorts first.
+func groupByLineage(projects []ProjectRow) []LineageGroup {
+	idx := make(map[int64]int)
+	var groups []LineageGroup
+	for _, p := range projects {
+		root := p.ID
+		if p.LineageRootID.Valid {
+			root = p.LineageRootID.Int64
+		}
+		gi, ok := idx[root]
+		if !ok {
+			idx[root] = len(groups)
+			groups = append(groups, LineageGroup{RootID: root})
+			gi = len(groups) - 1
+		}
+		groups[gi].Members = append(groups[gi].Members, p)
+	}
+	for gi := range groups {
+		sort.Slice(groups[gi].Members, func(a, b int) bool {
+			return groups[gi].Members[a].IterationNumber < groups[gi].Members[b].IterationNumber
+		})
+	}
+	sort.Slice(groups, func(a, b int) bool {
+		return maxProjectID(groups[a].Members) > maxProjectID(groups[b].Members)
+	})
+	return groups
+}
+
+func maxProjectID(ps []ProjectRow) int64 {
+	var m int64
+	for _, p := range ps {
+		if p.ID > m {
+			m = p.ID
+		}
+	}
+	return m
+}
+
+// CascadeBeadRow describes one bead of a cascade iteration and whether
+// CASCADE_REVIEW reset it (its spec diffed against the baseline) or left it
+// inherited from the clone.
+type CascadeBeadRow struct {
+	BeadID int64
+	Title  string
+	Status string
+	Reset  bool // a traces/_bead-{id}-cascade-* snapshot exists
+}
+
+// queryCascadeBeads returns every bead of a cascade project with its title and
+// status. The caller marks each row's Reset flag from the on-disk cascade
+// snapshot dirs (resetBeadForRerun always snapshots before touching a bead, so
+// a snapshot's presence is the reliable "was reset" signal).
+func queryCascadeBeads(ctx context.Context, d *db.DB, projectID int64) ([]CascadeBeadRow, error) {
+	rows, err := d.QueryContext(ctx, `
+		SELECT b.id, b.status, COALESCE(json_extract(br.full_text, '$.title'), '')
+		FROM beads b
+		LEFT JOIN bead_revisions br ON br.id = b.current_revision_id
+		WHERE b.project_id = ?
+		ORDER BY b.id`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("cascade beads: %w", err)
+	}
+	defer rows.Close()
+	var out []CascadeBeadRow
+	for rows.Next() {
+		var r CascadeBeadRow
+		if err := rows.Scan(&r.BeadID, &r.Status, &r.Title); err != nil {
+			return nil, err
+		}
+		if r.Title == "" {
+			r.Title = fmt.Sprintf("bead-%d", r.BeadID)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// queryLineageMembers returns every project in the lineage rooted at rootID,
+// ordered by iteration_number.
+func queryLineageMembers(ctx context.Context, d *db.DB, rootID int64) ([]ProjectRow, error) {
+	rows, err := d.QueryContext(ctx, `SELECT `+projectColumns+`
+		FROM projects WHERE lineage_root_id = ? ORDER BY iteration_number`, rootID)
+	if err != nil {
+		return nil, fmt.Errorf("lineage members: %w", err)
+	}
+	defer rows.Close()
+	var out []ProjectRow
+	for rows.Next() {
+		p, err := scanProjectRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *p)
 	}
 	return out, rows.Err()
 }

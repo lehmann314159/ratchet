@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"html/template"
@@ -43,10 +44,11 @@ func (s *server) renderPartial(w http.ResponseWriter, tmpl *template.Template, n
 
 type dashboardData struct {
 	baseData
-	Project     *ProjectRow
-	Beads       []BeadRow
-	Jobs        []JobRow
-	AllProjects []ProjectRow
+	Project       *ProjectRow
+	Beads         []BeadRow
+	Jobs          []JobRow
+	OtherProjects []ProjectRow   // active/paused projects other than the featured one
+	Lineages      []LineageGroup // every project, grouped by iteration lineage
 }
 
 func (s *server) dashboardData(r *http.Request) dashboardData {
@@ -57,8 +59,10 @@ func (s *server) dashboardData(r *http.Request) dashboardData {
 	if project != nil {
 		d.Beads, _ = queryBeads(ctx, s.db, project.ID)
 		d.Jobs, _ = queryRecentJobs(ctx, s.db, project.ID)
+		d.OtherProjects, _ = queryOtherNonTerminalProjects(ctx, s.db, project.ID)
 	}
-	d.AllProjects, _ = queryAllProjects(ctx, s.db)
+	all, _ := queryAllProjects(ctx, s.db)
+	d.Lineages = groupByLineage(all)
 	return d
 }
 
@@ -68,6 +72,94 @@ func (s *server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleStatusPartial(w http.ResponseWriter, r *http.Request) {
 	s.renderPartial(w, s.tmpl.dashboard, "status", s.dashboardData(r))
+}
+
+// --- Project detail ---
+
+type projectDetailData struct {
+	baseData
+	Project      *ProjectRow
+	Beads        []BeadRow
+	Jobs         []JobRow
+	Lineage      []ProjectRow     // sibling iterations, ordered by iteration_number
+	PrevIter     *ProjectRow      // iteration N-1, or nil
+	NextIter     *ProjectRow      // iteration N+1, or nil
+	Baseline     *ProjectRow      // cascade baseline project, or nil
+	CascadeBeads []CascadeBeadRow // populated only for a cascade project
+}
+
+func (s *server) projectDetailData(ctx context.Context, r *http.Request, id int64) (*projectDetailData, error) {
+	p, err := queryProjectByID(ctx, s.db, id)
+	if err != nil {
+		return nil, err
+	}
+	d := &projectDetailData{baseData: s.base(r), Project: p}
+	d.Beads, _ = queryBeads(ctx, s.db, id)
+	d.Jobs, _ = queryRecentJobs(ctx, s.db, id)
+
+	root := id
+	if p.LineageRootID.Valid {
+		root = p.LineageRootID.Int64
+	}
+	d.Lineage, _ = queryLineageMembers(ctx, s.db, root)
+	for i := range d.Lineage {
+		m := d.Lineage[i]
+		switch {
+		case m.IterationNumber == p.IterationNumber-1:
+			mm := m
+			d.PrevIter = &mm
+		case m.IterationNumber == p.IterationNumber+1:
+			mm := m
+			d.NextIter = &mm
+		}
+	}
+
+	if p.CascadeBaselineProjectID.Valid {
+		if b, err := queryProjectByID(ctx, s.db, p.CascadeBaselineProjectID.Int64); err == nil {
+			d.Baseline = b
+		}
+		d.CascadeBeads, _ = queryCascadeBeads(ctx, s.db, id)
+		for i := range d.CascadeBeads {
+			d.CascadeBeads[i].Reset = len(listSnapshots(p.FolderPath, d.CascadeBeads[i].BeadID, "cascade")) > 0
+		}
+	}
+	return d, nil
+}
+
+func (s *server) handleProjectDetail(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid project id", http.StatusBadRequest)
+		return
+	}
+	d, err := s.projectDetailData(r.Context(), r, id)
+	if err == sql.ErrNoRows {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, fmt.Sprintf("project detail: %v", err), http.StatusInternalServerError)
+		return
+	}
+	s.render(w, s.tmpl.project, d)
+}
+
+func (s *server) handleProjectDetailPartial(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid project id", http.StatusBadRequest)
+		return
+	}
+	d, err := s.projectDetailData(r.Context(), r, id)
+	if err == sql.ErrNoRows {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, fmt.Sprintf("project detail: %v", err), http.StatusInternalServerError)
+		return
+	}
+	s.renderPartial(w, s.tmpl.project, "projectbody", d)
 }
 
 // --- Escalations list ---
@@ -773,14 +865,16 @@ func (s *server) handleProjectReport(w http.ResponseWriter, r *http.Request) {
 // underscore keeps `go test ./...` from picking up the copied .go files as
 // a second package (see SnapshotBeadFiles's doc comment) — must match here.
 
-// listRewindSnapshots returns the sorted snapshot numbers found for beadID
-// under folder/traces, or nil if none exist (including if folder can't be read).
-func listRewindSnapshots(folder string, beadID int64) []int {
+// listSnapshots returns the sorted snapshot numbers found for beadID and the
+// given kind ("rewind" or "cascade") under folder/traces, or nil if none
+// exist (including if folder can't be read). Both mechanisms use the same
+// _bead-{id}-{kind}-{n} layout via verbs.SnapshotBeadFiles.
+func listSnapshots(folder string, beadID int64, kind string) []int {
 	entries, err := os.ReadDir(filepath.Join(folder, "traces"))
 	if err != nil {
 		return nil
 	}
-	prefix := fmt.Sprintf("_bead-%d-rewind-", beadID)
+	prefix := fmt.Sprintf("_bead-%d-%s-", beadID, kind)
 	var nums []int
 	for _, e := range entries {
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
@@ -792,6 +886,11 @@ func listRewindSnapshots(folder string, beadID int64) []int {
 	}
 	sort.Ints(nums)
 	return nums
+}
+
+// listRewindSnapshots is the rewind-specific shorthand used by the bead page.
+func listRewindSnapshots(folder string, beadID int64) []int {
+	return listSnapshots(folder, beadID, "rewind")
 }
 
 // renderSnapshotDir concatenates a rewind snapshot's README.md manifest and

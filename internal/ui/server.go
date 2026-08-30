@@ -31,6 +31,7 @@ type server struct {
 // templateCache holds pre-parsed template sets keyed by page name.
 type templateCache struct {
 	dashboard   *template.Template
+	project     *template.Template
 	escalations *template.Template
 	escalation  *template.Template
 	beadDetail  *template.Template
@@ -40,10 +41,14 @@ type templateCache struct {
 
 func newTemplateCache() (*templateCache, error) {
 	parse := func(pages ...string) (*template.Template, error) {
-		files := append([]string{"templates/layout.html"}, pages...)
+		files := append([]string{"templates/layout.html", "templates/partials.html"}, pages...)
 		return template.ParseFS(templateFS, files...)
 	}
 	dashboard, err := parse("templates/dashboard.html")
+	if err != nil {
+		return nil, err
+	}
+	projectTmpl, err := parse("templates/project.html")
 	if err != nil {
 		return nil, err
 	}
@@ -69,6 +74,7 @@ func newTemplateCache() (*templateCache, error) {
 	}
 	return &templateCache{
 		dashboard:   dashboard,
+		project:     projectTmpl,
 		escalations: escalations,
 		escalation:  escalation,
 		beadDetail:  beadDetail,
@@ -101,6 +107,8 @@ func (s *server) routes() {
 	s.mux.HandleFunc("POST /projects/{id}/close", s.handleCloseProject)
 	s.mux.HandleFunc("POST /projects/{id}/resume", s.handleResumeProject)
 	s.mux.HandleFunc("POST /projects/{id}/remove", s.handleRemoveProject)
+	s.mux.HandleFunc("GET /projects/{id}", s.handleProjectDetail)
+	s.mux.HandleFunc("GET /projects/{id}/body", s.handleProjectDetailPartial)
 	s.mux.HandleFunc("GET /beads/{id}", s.handleBeadDetail)
 	s.mux.HandleFunc("POST /beads/{id}/rewind", s.handleRewindBead)
 	s.mux.HandleFunc("GET /beads/{id}/report", s.handleBeadReport)

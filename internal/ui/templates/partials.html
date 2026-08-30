@@ -1,0 +1,77 @@
+{{define "pauseBox"}}
+{{if eq .Status "paused"}}
+<div class="alert">
+  <strong>Paused</strong>
+  {{if .PauseAfterReconcile}} · after decomposition review <span class="meta">(pause_after_reconcile)</span>{{end}}
+  {{if .PauseAfterVerb.Valid}} · after verb <code>{{.PauseAfterVerb.String}}</code>{{end}}
+  {{if .PauseAfterBeadID.Valid}} · after bead {{.PauseAfterBeadID.Int64}}{{end}}
+  <br>
+  Resuming dispatches:
+  {{if .NextJobVerb}}<code>{{.NextJobVerb}}</code>{{if .NextJobBeadID.Valid}} <span class="meta">(bead {{.NextJobBeadID.Int64}})</span>{{end}}{{else}}<span class="meta">nothing pending — check handoff_jobs</span>{{end}}
+  <span class="meta"> · reconcile self-resolve: {{if .ReconcileSelfResolve}}permissive{{else}}cautious{{end}}</span>
+</div>
+{{end}}
+{{end}}
+
+{{define "projectControls"}}
+{{if eq .Status "paused"}}
+<form method="post" action="/projects/{{.ID}}/resume" style="display:inline">
+  <button type="submit" class="action-ok">Resume</button>
+</form>
+{{end}}
+{{if or (eq .Status "active") (eq .Status "paused")}}
+<form method="post" action="/projects/{{.ID}}/close" style="display:inline;margin-left:0.25rem">
+  <button type="submit" class="action-close">Full Stop</button>
+</form>
+{{end}}
+{{if or (eq .Status "full_stopped") (eq .Status "complete")}}
+<form method="post" action="/projects/{{.ID}}/remove" style="display:inline;margin-left:0.25rem"
+      onsubmit="return confirm('Remove project {{.ID}} ({{.Label}}) and all its data?')">
+  <button type="submit" class="action-remove">Remove</button>
+</form>
+{{end}}
+{{end}}
+
+{{define "beadsTable"}}
+{{if .}}
+<table>
+  <thead><tr><th>ID</th><th>Title</th><th>Status</th><th>Attempts</th><th>Budget</th></tr></thead>
+  <tbody>
+  {{range .}}
+  <tr>
+    <td class="meta">{{.ID}}</td>
+    <td><a href="/beads/{{.ID}}">{{.Title}}</a></td>
+    <td><span class="status {{.Status}}">{{.Status}}</span></td>
+    <td class="meta">{{if .Attempts}}{{.Attempts}}/{{.MaxAttempts}}{{if .InfraFailures}} <span class="infra-fail">(+ {{.InfraFailures}} infra)</span>{{end}}{{else}}—{{end}}</td>
+    <td class="meta">{{if .Budget}}{{if eq .Status "executing"}}{{.ElapsedSeconds}}s / {{.Budget}}s{{else}}{{.Budget}}s{{end}}{{else}}—{{end}}</td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="empty">No beads yet — pipeline has not reached DECOMPOSE_SPEC yet.</p>
+{{end}}
+{{end}}
+
+{{define "jobsTable"}}
+{{if .}}
+<div style="max-height:290px;overflow-y:auto;border:1px solid #e5e5e5;border-radius:3px">
+<table class="sticky-header">
+  <thead><tr><th>Verb</th><th>Bead</th><th>Status</th><th>Elapsed</th><th>Updated</th></tr></thead>
+  <tbody>
+  {{range .}}
+  <tr>
+    <td>{{.Verb}}</td>
+    <td>{{if .BeadID.Valid}}{{if .BeadTitle}}{{.BeadTitle}}{{else}}bead-{{.BeadID.Int64}}{{end}}{{else}}<span class="meta">—</span>{{end}}</td>
+    <td><span class="status {{.Status}}">{{.Status}}</span></td>
+    <td class="meta">{{if .ElapsedFormatted}}{{.ElapsedFormatted}}{{else}}—{{end}}</td>
+    <td class="meta">{{.UpdatedAt}}</td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{else}}
+<p class="empty">No jobs yet.</p>
+{{end}}
+{{end}}
