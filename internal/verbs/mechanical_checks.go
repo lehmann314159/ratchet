@@ -863,16 +863,39 @@ func extractDecompositionNotesPins(designDoc string) map[string]string {
 // exact rule directly, regardless of how DECOMPOSE's own prose compressed
 // it.
 //
-// Idempotent: skips a bead whose full_text already contains the pin's exact
-// text, so calling this again in a later RECONCILE round never duplicates
-// it.
+// pinAppendixHeader is the ratchet-authored sentence that prefixes an injected
+// pin block. It is distinctive enough to locate a previously-injected appendix
+// — including a copy a DECOMPOSE/RECONCILE model reproduced (often reflowed, or
+// duplicated) in its own regenerated full_text — so injection can normalize to
+// exactly one canonical copy.
+const pinAppendixHeader = "Design doc Decomposition Notes pin for this bead " +
+	"(verbatim, must be followed exactly, not re-derived or paraphrased):\n"
+
+// injectDecompositionNotesPin normalizes bead.FullText so that, when a
+// Decomposition Notes "Pin ... to the X bead" bullet names it, the text ends
+// with exactly one canonical pin appendix — regardless of how many partial,
+// reflowed, or duplicated copies a model left behind on a prior round.
+//
+// It strips everything from the first pinAppendixHeader onward, then appends
+// one canonical block. This is deliberately not a presence check: exprvm-web-v4
+// bead 135 accumulated three near-identical copies across DECOMPOSE + two
+// RECONCILE rounds because the model reproduced the appendix in its output with
+// a one-line wrap difference each time, which an exact-substring guard neither
+// detected nor collapsed. Returns whether FullText changed.
 func injectDecompositionNotesPin(bead *ParsedBead, pins map[string]string) bool {
 	pin, ok := pins[strings.ToLower(bead.Title)]
-	if !ok || strings.Contains(bead.FullText, pin) {
+	if !ok {
 		return false
 	}
-	bead.FullText += "\n\nDesign doc Decomposition Notes pin for this bead " +
-		"(verbatim, must be followed exactly, not re-derived or paraphrased):\n" + pin
+	base := bead.FullText
+	if idx := strings.Index(base, pinAppendixHeader); idx >= 0 {
+		base = strings.TrimRight(base[:idx], " \t\n")
+	}
+	canonical := base + "\n\n" + pinAppendixHeader + pin
+	if canonical == bead.FullText {
+		return false
+	}
+	bead.FullText = canonical
 	return true
 }
 

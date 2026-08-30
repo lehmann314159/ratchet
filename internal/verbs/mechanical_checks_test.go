@@ -677,6 +677,48 @@ func TestInjectDecompositionNotesPin_MotivatingBug(t *testing.T) {
 	}
 }
 
+// TestInjectDecompositionNotesPin_CollapsesReflowedCopies reproduces
+// exprvm-web-v4 bead 135 (2026-08-30): DECOMPOSE injected the pin appendix,
+// then across two RECONCILE rounds the model regenerated full_text with the
+// appendix reproduced — twice verbatim, once with a one-line wrap difference —
+// so the bead spec carried three near-identical copies. injection must
+// normalize any such accumulation back to exactly one canonical block.
+func TestInjectDecompositionNotesPin_CollapsesReflowedCopies(t *testing.T) {
+	doc := "## Decomposition Notes\n\n" +
+		"- **Pin the exact Bytecode-by-error-type rule to the `handlers-templates` bead**:\n" +
+		"  on a Compile error, `Bytecode` stays `\"\"`; on a Run error or success it is\n" +
+		"  always `bytecodeText`.\n"
+	pins := extractDecompositionNotesPins(doc)
+
+	// A bead spec that already carries the appendix three times: two verbatim,
+	// one with the bullet's second line wrapped differently.
+	pin := pins["handlers-templates"]
+	reflowed := strings.Replace(pin, "on a Run error or success it is\n  always", "on a Run error or\n  success it is always", 1)
+	spec := "Implement the web layer.\n\n" +
+		"\n\n" + pinAppendixHeader + pin +
+		"\n\n" + pinAppendixHeader + pin +
+		"\n\n" + pinAppendixHeader + reflowed
+
+	bead := &ParsedBead{Title: "handlers-templates", FullText: spec}
+
+	if !injectDecompositionNotesPin(bead, pins) {
+		t.Fatal("expected normalization to report a change")
+	}
+	if n := strings.Count(bead.FullText, pinAppendixHeader); n != 1 {
+		t.Fatalf("expected exactly one pin appendix after normalization, got %d:\n%s", n, bead.FullText)
+	}
+	if !strings.HasPrefix(bead.FullText, "Implement the web layer.") {
+		t.Errorf("normalization dropped the real spec prose: %q", bead.FullText)
+	}
+	if !strings.Contains(bead.FullText, pin) {
+		t.Errorf("normalized appendix is not the canonical pin text: %q", bead.FullText)
+	}
+	// Second call is now a no-op.
+	if injectDecompositionNotesPin(bead, pins) {
+		t.Error("expected no change on a second normalization pass")
+	}
+}
+
 func TestInjectDecompositionNotesPin_NoMatch(t *testing.T) {
 	pins := extractDecompositionNotesPins(exprvmWebDecompositionNotes)
 	bead := &ParsedBead{Title: "main", FullText: "wires everything together"}
