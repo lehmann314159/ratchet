@@ -767,3 +767,112 @@ func firstSourceGoFile(outputFiles []string) string {
 	return ""
 }
 
+var (
+	decompositionPinStartRe = regexp.MustCompile(`^-\s+\*\*Pin\b`)
+	decompositionPinBeadRe  = regexp.MustCompile("`([A-Za-z0-9_-]+)`\\s+bead\\b")
+	topLevelListItemRe      = regexp.MustCompile(`^(-\s|\d+\.\s)`)
+)
+
+// extractMarkdownSection returns the body of a "## <heading>" section (up to
+// but not including the next "## " heading, or end of file), or "" if the
+// heading is not present. Line-oriented, matching the "## " convention used
+// throughout docs/design_doc_guide.md and docs/design_doc_template.md.
+func extractMarkdownSection(content, heading string) string {
+	lines := strings.Split(content, "\n")
+	target := "## " + heading
+	start := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == target {
+			start = i + 1
+			break
+		}
+	}
+	if start == -1 {
+		return ""
+	}
+	end := len(lines)
+	for i := start; i < len(lines); i++ {
+		if strings.HasPrefix(strings.TrimRight(lines[i], " \t"), "## ") {
+			end = i
+			break
+		}
+	}
+	return strings.Join(lines[start:end], "\n")
+}
+
+// extractDecompositionNotesPins parses every "- **Pin ... `<bead>` bead**: ..."
+// bullet out of the design doc's "## Decomposition Notes" section, keyed by
+// bead title (lowercased). A bullet may span multiple soft-wrapped
+// continuation lines (2-space indented, markdown convention); capture ends
+// at the next top-level list item (another "- " bullet or a numbered "N. "
+// item) or a blank line, matching every real Decomposition Notes section in
+// this repo's design docs (docs/fixture-design-docs/exprvm-web.md,
+// docs/design-docs/connect-four-v1-design-doc.md).
+func extractDecompositionNotesPins(designDoc string) map[string]string {
+	section := extractMarkdownSection(designDoc, "Decomposition Notes")
+	if section == "" {
+		return nil
+	}
+	pins := map[string]string{}
+	var current []string
+	flush := func() {
+		if len(current) == 0 {
+			return
+		}
+		text := strings.TrimSpace(strings.Join(current, "\n"))
+		if m := decompositionPinBeadRe.FindStringSubmatch(text); m != nil {
+			pins[strings.ToLower(m[1])] = text
+		}
+		current = nil
+	}
+	for _, line := range strings.Split(section, "\n") {
+		switch {
+		case decompositionPinStartRe.MatchString(line):
+			flush()
+			current = []string{line}
+		case current == nil:
+			// Not inside a pin bullet — ignore until the next "- **Pin" line.
+		case strings.TrimSpace(line) == "" || topLevelListItemRe.MatchString(line):
+			flush()
+		default:
+			current = append(current, line)
+		}
+	}
+	flush()
+	if len(pins) == 0 {
+		return nil
+	}
+	return pins
+}
+
+// injectDecompositionNotesPin mechanically guarantees a bead's full_text
+// contains the exact text of any Decomposition Notes "Pin ... to the X
+// bead" bullet naming it, regardless of whether DECOMPOSE/RECONCILE's own
+// transcription preserved it faithfully. The prompt asks the model to quote
+// pins verbatim, but nothing previously enforced it — this closes that gap
+// mechanically, the same way applyMechanicalBeadFixes closes prompt gaps for
+// exit criteria.
+//
+// Motivating incident (exprvm-web-v2 bead 117, 2026-08-30): the design doc's
+// precise three-way Bytecode-per-error-type rule (empty on a Compile error,
+// populated on a Run error or success) got compressed by DECOMPOSE into an
+// ambiguous "(if compiled)" clause. REFINE_TESTS_CRITIQUE and
+// REFINE_TESTS_JUDGE never read the design doc at all — only the bead
+// spec — so JUDGE endorsed a finding that contradicted the doc's actual,
+// unambiguous rule. A verbatim pin for this bead would have given JUDGE the
+// exact rule directly, regardless of how DECOMPOSE's own prose compressed
+// it.
+//
+// Idempotent: skips a bead whose full_text already contains the pin's exact
+// text, so calling this again in a later RECONCILE round never duplicates
+// it.
+func injectDecompositionNotesPin(bead *ParsedBead, pins map[string]string) bool {
+	pin, ok := pins[strings.ToLower(bead.Title)]
+	if !ok || strings.Contains(bead.FullText, pin) {
+		return false
+	}
+	bead.FullText += "\n\nDesign doc Decomposition Notes pin for this bead " +
+		"(verbatim, must be followed exactly, not re-derived or paraphrased):\n" + pin
+	return true
+}
+

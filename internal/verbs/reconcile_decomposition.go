@@ -33,6 +33,7 @@ type ReconcileDecomposition struct {
 	knownTitles     map[string]bool
 	budgetDefault   int
 	folderPath      string
+	designDoc       string
 }
 
 func (h *ReconcileDecomposition) Verb() string { return db.VerbReconcileDecomposition }
@@ -77,6 +78,7 @@ func (h *ReconcileDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.C
 	}
 	h.budgetDefault = project.ExecutionBudgetDefault
 	h.folderPath = project.FolderPath
+	h.designDoc = doc
 
 	return oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: reconcileDecompositionSystemPrompt(detectLang(project.FolderPath, beadOutputFiles(beads)), project.ReconcileSelfResolve)},
@@ -315,6 +317,7 @@ func (h *ReconcileDecomposition) applyFixes(ctx context.Context, tx *sql.Tx, pro
 		}
 	}
 	lang := detectLang(h.folderPath, allOutputFiles)
+	pins := extractDecompositionNotesPins(h.designDoc)
 
 	// Deduplicate: multiple findings may all request updates to the same bead
 	// (e.g. three findings about missing test files each produce an updated_bead
@@ -362,6 +365,7 @@ func (h *ReconcileDecomposition) applyFixes(ctx context.Context, tx *sql.Tx, pro
 		}
 
 		applyMechanicalBeadFixes(lang, r.UpdatedBead)
+		injectDecompositionNotesPin(r.UpdatedBead, pins)
 
 		fullText, _ := json.Marshal(r.UpdatedBead)
 		res, err := tx.ExecContext(ctx, `

@@ -24,6 +24,7 @@ const decomposeRedecomposeCap = 3
 type DecomposeSpec struct {
 	budgetDefault int
 	folderPath    string
+	designDoc     string
 }
 
 func (h *DecomposeSpec) Verb() string { return db.VerbDecomposeSpec }
@@ -43,6 +44,7 @@ func (h *DecomposeSpec) Run(ctx context.Context, d *db.DB, oc *ollama.Client, jo
 	}
 	h.budgetDefault = project.ExecutionBudgetDefault
 	h.folderPath = project.FolderPath
+	h.designDoc = doc
 
 	surveyDocPath := filepath.Join(project.FolderPath, "survey.md")
 	surveyDoc, err := os.ReadFile(surveyDocPath)
@@ -153,8 +155,10 @@ func (h *DecomposeSpec) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJ
 		allOutputFiles = append(allOutputFiles, pb.OutputFiles...)
 	}
 	lang := detectLang(h.folderPath, allOutputFiles)
+	pins := extractDecompositionNotesPins(h.designDoc)
 	for _, pb := range out.Beads {
 		applyMechanicalBeadFixes(lang, &pb)
+		injectDecompositionNotesPin(&pb, pins)
 
 		// Write the bead row first (current_revision_id NULL until revision exists).
 		res, err := tx.ExecContext(ctx, `

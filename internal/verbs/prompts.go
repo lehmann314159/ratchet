@@ -105,7 +105,12 @@ Your output is a decomposition plan, not an implementation. Each Bead's full_tex
 Follow the specified bead boundaries, file assignments, and integration bead requirements
 exactly, overriding the generic rules below where they conflict. The design doc author has
 full context of the project's pairing structure and intended test boundaries; their explicit
-guidance supersedes generic heuristics.
+guidance supersedes generic heuristics. If a bullet begins with "Pin" and names a specific
+Bead (e.g. "Pin the exact division sign combinations to the ` + "`vm`" + ` bead"), that Bead's
+full_text must quote the pinned text verbatim, in full — do not paraphrase, summarize, or
+restate it as a general rule. A pin exists specifically because a compressed restatement has
+previously caused an execute model to satisfy the wrong behavior; dropping the exact values
+reproduces the failure the pin exists to prevent.
 
 **Single logical concern:** Each Bead must implement exactly one coherent unit of
 functionality. Two algorithms that happen to be short are still two concerns if they can be

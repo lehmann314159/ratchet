@@ -557,3 +557,133 @@ func TestFindFlips(t *testing.T) {}
 		t.Errorf("escaped criterion should match the real method, but failed: %s", detail)
 	}
 }
+
+// Verbatim from docs/fixture-design-docs/exprvm-web.md's Decomposition Notes,
+// as of the 2026-08-29 fixup (commit 7b87ee1) — two back-to-back pin bullets
+// with no blank line between them, each spanning multiple soft-wrapped lines.
+const exprvmWebDecompositionNotes = `## Decomposition Notes
+
+**Critical dependency chain — do not reorder:**
+
+1. **lexer**: ` + "`Token`" + `, ` + "`TokenType`" + `, ` + "`NewLexer`" + `, ` + "`(*Lexer).Next`" + `. No
+   dependencies on any other bead.
+
+- **Pin the exact disassembly strings to the ` + "`compiler`" + ` bead**: for ` + "`\"x=10\"`" + `
+  (fresh ` + "`Environment`" + `), ` + "`Disassemble`" + ` must return exactly
+  ` + "`[\"PUSH_CONST 10\", \"STORE x\"]`" + `; for ` + "`\"print(x+1)\"`" + ` (same, now-populated
+  ` + "`Environment`" + `), exactly ` + "`[\"LOAD x\", \"PUSH_CONST 1\", \"ADD\", \"PRINT\"]`" + ` — no
+  trailing operand on ` + "`ADD`/`PRINT`" + `. Do not rely on the general
+  opcode-to-mnemonic table alone and leave ` + "`REFINE_TESTS_WRITE`" + ` to re-derive
+  the operand-omission-on-no-operand-opcodes rule itself.
+- **Pin the exact division sign combinations to the ` + "`vm`" + ` bead**: ` + "`7/2 = 3`" + `,
+  ` + "`-7/2 = -3`" + ` (NOT ` + "`-4`" + `), ` + "`7/-2 = -3`" + ` (NOT ` + "`-4`" + `), ` + "`-7/-2 = 3`" + `. Do not rely on
+  the general "truncates toward zero" rule alone and leave
+  ` + "`REFINE_TESTS_WRITE`" + ` to re-derive the negative-operand cases itself.
+
+**Integration bead scenarios** (bounded — one fixed scenario each):
+- Using ` + "`httptest.NewServer`" + `, ` + "`POST /eval`" + ` with input=x=5.
+`
+
+func TestExtractDecompositionNotesPins(t *testing.T) {
+	pins := extractDecompositionNotesPins(exprvmWebDecompositionNotes)
+	if len(pins) != 2 {
+		t.Fatalf("expected 2 pins, got %d: %v", len(pins), pins)
+	}
+	compiler, ok := pins["compiler"]
+	if !ok {
+		t.Fatal("expected a pin keyed by \"compiler\"")
+	}
+	if !strings.HasPrefix(compiler, "- **Pin the exact disassembly strings") {
+		t.Errorf("compiler pin text wrong start: %q", compiler)
+	}
+	if !strings.Contains(compiler, "PUSH_CONST 10") {
+		t.Errorf("compiler pin missing its own content — bullet-boundary detection likely wrong: %q", compiler)
+	}
+	if strings.Contains(compiler, "division sign combinations") {
+		t.Errorf("compiler pin bled into the vm pin — bullet-boundary detection is wrong: %q", compiler)
+	}
+
+	vm, ok := pins["vm"]
+	if !ok {
+		t.Fatal("expected a pin keyed by \"vm\"")
+	}
+	if !strings.Contains(vm, "-7/2 = -3") {
+		t.Errorf("vm pin missing its own content: %q", vm)
+	}
+	if strings.Contains(vm, "disassembly strings") || strings.Contains(vm, "httptest.NewServer") {
+		t.Errorf("vm pin captured neighboring content — bullet-boundary detection is wrong: %q", vm)
+	}
+}
+
+func TestExtractDecompositionNotesPins_ParentheticalCaveat(t *testing.T) {
+	// Verbatim shape from docs/design-docs/connect-four-v1-design-doc.md: the
+	// bead-name backtick is followed by a parenthetical aside before the
+	// closing "**:" rather than immediately by it.
+	doc := "## Decomposition Notes\n\n" +
+		"- **Pin exact literal values to the `ai` bead** (whichever bead ends up\n" +
+		"  implementing `ai.go`): `SearchDepth = 4`.\n"
+	pins := extractDecompositionNotesPins(doc)
+	ai, ok := pins["ai"]
+	if !ok {
+		t.Fatalf("expected a pin keyed by \"ai\", got %v", pins)
+	}
+	if !strings.Contains(ai, "SearchDepth = 4") {
+		t.Errorf("ai pin missing its own content: %q", ai)
+	}
+}
+
+func TestExtractDecompositionNotesPins_NoSection(t *testing.T) {
+	if pins := extractDecompositionNotesPins("## Overview\n\nNo notes here.\n"); pins != nil {
+		t.Errorf("expected nil for a doc with no Decomposition Notes section, got %v", pins)
+	}
+}
+
+// TestInjectDecompositionNotesPin_MotivatingBug reproduces the exact failure
+// mode found live in exprvm-web-v2 bead 117 (2026-08-30): the design doc's
+// precise three-way Bytecode-per-error-type rule got compressed by DECOMPOSE
+// into an ambiguous "(if compiled)" clause, and REFINE_TESTS_JUDGE — which
+// never reads the design doc, only the bead spec — endorsed a CRITIQUE
+// finding that contradicted the doc's actual rule as a result. A pin for
+// this bead, mechanically injected, gives JUDGE the exact rule regardless of
+// how DECOMPOSE's own prose compressed it.
+func TestInjectDecompositionNotesPin_MotivatingBug(t *testing.T) {
+	doc := "## Decomposition Notes\n\n" +
+		"- **Pin the exact Bytecode-by-error-type rule to the `handlers-templates` bead**:\n" +
+		"  on a Compile error, `Bytecode` stays `\"\"` (nothing was compiled — `Disassemble`\n" +
+		"  never runs); on a Run error or success, `Bytecode` is always `bytecodeText`\n" +
+		"  (`Disassemble` already ran before `Run` was ever called). There is no\n" +
+		"  \"partial instructions\" case.\n"
+	pins := extractDecompositionNotesPins(doc)
+
+	bead := &ParsedBead{
+		Title:    "handlers-templates",
+		FullText: "On any error in the pipeline, append HistoryEntry with appropriate Err and Bytecode (if compiled).",
+	}
+	if !injectDecompositionNotesPin(bead, pins) {
+		t.Fatal("expected the pin to be injected")
+	}
+	if !strings.Contains(bead.FullText, "Bytecode-by-error-type rule") || !strings.Contains(bead.FullText, "bytecodeText") {
+		t.Errorf("bead full_text missing the injected pin: %q", bead.FullText)
+	}
+
+	// Idempotent: calling again (as RECONCILE would on a later round) must
+	// not duplicate the pin text.
+	before := bead.FullText
+	if injectDecompositionNotesPin(bead, pins) {
+		t.Error("expected no change on second call — pin already present")
+	}
+	if bead.FullText != before {
+		t.Errorf("full_text changed on second call:\nbefore: %q\nafter:  %q", before, bead.FullText)
+	}
+}
+
+func TestInjectDecompositionNotesPin_NoMatch(t *testing.T) {
+	pins := extractDecompositionNotesPins(exprvmWebDecompositionNotes)
+	bead := &ParsedBead{Title: "main", FullText: "wires everything together"}
+	if injectDecompositionNotesPin(bead, pins) {
+		t.Error("expected no injection for a bead with no matching pin")
+	}
+	if bead.FullText != "wires everything together" {
+		t.Errorf("full_text should be unchanged, got %q", bead.FullText)
+	}
+}
