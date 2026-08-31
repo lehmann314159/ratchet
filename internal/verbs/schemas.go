@@ -198,25 +198,12 @@ var ReconcileDecompositionSchema = orderedObject{
 	{"required", []string{"reasoning", "responses"}},
 }
 
-// RefineTestsCritiqueSchema — schema-mode for REFINE_TESTS_CRITIQUE. Mirrors
-// RefineTestsCritiqueOutput. Only `summary` is enforced by Validate; the
-// schema keeps the reasoning-first shape and pins the field set. This verb
-// runs through ChatWithTools (a run_go_snippet loop) — the schema applies to
-// the final content turn, tool-call turns produce no content and are
-// unaffected (same as REFINE_TESTS_JUDGE).
-var RefineTestsCritiqueSchema = orderedObject{
-	{"type", "object"},
-	{"properties", orderedObject{
-		reasoningProperty("Go through each Test* function against the bead spec and the design-doc " +
-			"excerpts: is every asserted value correct, and does any test assert MORE than either " +
-			"source requires? Note what you verified with run_go_snippet."),
-		{"findings", stringArray()},
-		{"verified_functions", stringArray()},
-		{"all_correct", map[string]any{"type": "boolean"}},
-		{"summary", map[string]any{"type": "string"}},
-	}},
-	{"required", []string{"reasoning", "summary"}},
-}
+// REFINE_TESTS_CRITIQUE and REFINE_TESTS_JUDGE are NOT reasoning-first
+// schema-mode. Both run the ChatWithTools (run_go_snippet) loop, and the
+// tool loop is where schema-mode broke (REFINE_TESTS_WRITE, project 36).
+// Reverted pending a deliberate tool-loop re-approach. See
+// docs/schema-mode-reasoning-field.md. JUDGE keeps its flat, field-presence-
+// only refineTestsJudgeFormatSchema (predates this session).
 
 // --- Phase 3 verbs ---
 
@@ -302,21 +289,3 @@ var RevisePendingSchema = orderedObject{
 // write_function tool calls, and a reasoning-first schema on every turn let the
 // model emit a plan + a completion claim without ever calling write_function
 // (project 36 bead 203, 2026-08-31). Tool-primary verbs stay on bare "json".
-
-// RefineTestsJudgeSchema — schema-mode for REFINE_TESTS_JUDGE, replacing the
-// flat refineTestsJudgeFormatSchema. Only decision + summary are required;
-// functions_to_rewrite / instructions are conditional on decision=="revise",
-// which Validate enforces (a flat schema can't).
-var RefineTestsJudgeSchema = orderedObject{
-	{"type", "object"},
-	{"properties", orderedObject{
-		reasoningProperty("Weigh each critique finding on its merits against the bead spec and the " +
-			"design-doc excerpts — both a wrong asserted value and an over-specified assertion are " +
-			"genuine problems — before you decide approved vs revise."),
-		{"decision", map[string]any{"type": "string", "enum": []string{"approved", "revise"}}},
-		{"functions_to_rewrite", stringArray()},
-		{"instructions", map[string]any{"type": "string"}},
-		{"summary", map[string]any{"type": "string"}},
-	}},
-	{"required", []string{"reasoning", "decision", "summary"}},
-}

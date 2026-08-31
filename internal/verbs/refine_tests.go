@@ -903,8 +903,11 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 	var lastContent string
 	coveredCases := map[string]bool{}
 	for turn := 1; turn <= maxTurns; turn++ {
-		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetCaseTool},
-			&ollama.Options{Format: RefineTestsCritiqueSchema, Think: disableThink()}, nil)
+		// NOT schema-mode: this is the ChatWithTools path (run_go_snippet loop).
+		// Reverted to bare "json" pending a deliberate re-approach to tool-loop
+		// schema-mode (see docs/schema-mode-reasoning-field.md — WRITE showed the
+		// tool loop is where schema-mode breaks).
+		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetCaseTool}, nil, nil)
 		if toolErr != nil {
 			return "", toolErr
 		}
@@ -1012,7 +1015,6 @@ func (h *RefineTestsCritique) Validate(rawOutput string) (string, any) {
 	if strings.TrimSpace(out.Summary) == "" {
 		return "malformed: summary is empty", nil
 	}
-	logSchemaReasoning(db.VerbRefineTestsCritique, out.Reasoning, "findings", len(out.Findings), "all_correct", out.AllCorrect)
 	return "valid", out
 }
 
@@ -1140,8 +1142,11 @@ func (h *RefineTestsJudge) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	var lastContent string
 	usedTool := false
 	for turn := 1; turn <= snippetVerificationTurns; turn++ {
+		// NOT reasoning-first schema-mode — the flat refineTestsJudgeFormatSchema
+		// (field-presence only, predates this session) is the pre-schema-mode
+		// state. Reverted pending a deliberate tool-loop re-approach.
 		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetTool},
-			&ollama.Options{Format: RefineTestsJudgeSchema, Think: disableThink()}, nil)
+			&ollama.Options{Format: refineTestsJudgeFormatSchema}, nil)
 		if toolErr != nil {
 			return "", toolErr
 		}
@@ -1186,12 +1191,25 @@ func (h *RefineTestsJudge) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	return lastContent, nil
 }
 
-// REFINE_TESTS_JUDGE's grammar-constrained output schema is
-// RefineTestsJudgeSchema (internal/verbs/schemas.go) — reasoning-first,
-// summary structurally unreachable-to-omit. Replaced the earlier flat
-// refineTestsJudgeFormatSchema in Phase 3 of docs/schema-mode-reasoning-field.md.
-// The gap it closed still holds: connect-four-v2 bead 56, 2026-08-27, 3/3
-// attempts omitted "summary" despite the prompt listing it.
+// refineTestsJudgeFormatSchema grammar-constrains REFINE_TESTS_JUDGE's output
+// so "summary" is structurally unreachable-to-omit, mirroring Validate's own
+// unconditional requirement below. Only "decision" and "summary" are marked
+// required — "functions_to_rewrite"/"instructions" are genuinely conditional
+// on decision=="revise", which a flat "required" can't express; Validate
+// enforces that in code. Closes the gap that recurred live (connect-four-v2
+// bead 56, 2026-08-27: 3/3 attempts omitted "summary" despite the prompt).
+// This is field-presence enforcement only — NOT the reasoning-first schema-mode
+// (that was tried in Phase 3 and reverted; see docs/schema-mode-reasoning-field.md).
+var refineTestsJudgeFormatSchema = map[string]any{
+	"type": "object",
+	"properties": map[string]any{
+		"decision":             map[string]any{"type": "string"},
+		"functions_to_rewrite": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"instructions":         map[string]any{"type": "string"},
+		"summary":              map[string]any{"type": "string"},
+	},
+	"required": []string{"decision", "summary"},
+}
 
 func (h *RefineTestsJudge) Validate(rawOutput string) (string, any) {
 	var out RefineTestsJudgeOutput
@@ -1210,7 +1228,6 @@ func (h *RefineTestsJudge) Validate(rawOutput string) (string, any) {
 	if out.Decision == "revise" && len(out.FunctionsToRewrite) == 0 {
 		return "malformed: decision is 'revise' but functions_to_rewrite is empty", nil
 	}
-	logSchemaReasoning(db.VerbRefineTestsJudge, out.Reasoning, "decision", out.Decision)
 
 	// Mechanical override: this cycle's "critique findings" came from
 	// ADJUDICATE_NEXT_EXECUTION's re_refine diagnosis, not a real

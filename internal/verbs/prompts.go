@@ -481,13 +481,8 @@ Report only genuine problems. If a test is correct, do not list it. Be specific:
 
 In verified_functions, list the name of EVERY test function you reviewed and found correct — meaning zero findings against it. IMPORTANT: if you have any finding that mentions a function, do NOT include that function in verified_functions. A function is either verified (no findings) or flagged (has findings) — never both. This list is used to lock correct functions from future rewrites.
 
-Respond with a single JSON object, no prose before or after. The FIRST field is
-"reasoning": review each Test* function there — every asserted value against the
-spec and design-doc excerpts, and whether any test over-asserts — noting what you
-verified with run_go_snippet, before you commit to findings. Then the structured
-fields:
+Respond with JSON only, no prose before or after:
 {
-  "reasoning": "<your function-by-function review>",
   "findings": [
     "<specific problem: TestFoo — current X should be Y because Z>"
   ],
@@ -511,12 +506,8 @@ When decision is "revise":
 - In instructions, write one bulleted correction per finding: name the function, state what is wrong, state the correct replacement (for an over-specified assertion, that means the looser property to assert instead), explain in one clause why.
 - Every finding must become an instruction — do not omit any.
 
-Respond with a single JSON object, no prose before or after. The FIRST field is
-"reasoning": weigh each critique finding on its merits there — against the bead
-spec and the design-doc excerpts, remembering that both a wrong asserted value
-and an over-specified assertion are genuine problems — before you decide:
+Respond with JSON only, no prose before or after:
 {
-  "reasoning": "<your finding-by-finding analysis>",
   "decision": "approved" | "revise",
   "functions_to_rewrite": ["TestFoo", "TestBar"],
   "instructions": "<bulleted corrections — only present when decision is revise>",

@@ -184,8 +184,6 @@ type RefineTestsWriteOutput struct {
 
 // RefineTestsCritiqueOutput is the output of REFINE_TESTS_CRITIQUE.
 type RefineTestsCritiqueOutput struct {
-	// Reasoning: schema-mode chain-of-thought (docs/schema-mode-reasoning-field.md).
-	Reasoning         string   `json:"reasoning,omitempty"`
 	Findings          []string `json:"findings"`
 	VerifiedFunctions []string `json:"verified_functions"` // every Test* function reviewed and found correct
 	AllCorrect        bool     `json:"all_correct"`
@@ -213,8 +211,6 @@ func (f *flexString) UnmarshalJSON(data []byte) error {
 
 // RefineTestsJudgeOutput is the output of REFINE_TESTS_JUDGE.
 type RefineTestsJudgeOutput struct {
-	// Reasoning: schema-mode chain-of-thought (docs/schema-mode-reasoning-field.md).
-	Reasoning          string     `json:"reasoning,omitempty"`
 	Decision           string     `json:"decision"`             // "approved" or "revise"
 	FunctionsToRewrite []string   `json:"functions_to_rewrite"` // only set when decision="revise"
 	Instructions       flexString `json:"instructions"`         // only set when decision="revise"

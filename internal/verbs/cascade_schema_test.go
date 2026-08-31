@@ -51,24 +51,6 @@ func TestReconcileDecompositionSchemaReasoningFirst(t *testing.T) {
 	assertReasoningFirst(t, ReconcileDecompositionSchema, "responses", "reasoning", "responses")
 }
 
-func TestRefineTestsCritiqueSchemaReasoningFirst(t *testing.T) {
-	assertReasoningFirst(t, RefineTestsCritiqueSchema, "findings", "reasoning", "summary")
-}
-
-func TestRefineTestsCritiqueValidateAcceptsReasoning(t *testing.T) {
-	h := &RefineTestsCritique{}
-	in := `{"reasoning":"TestVM asserts -7/2 == -4; Go truncates toward zero so it's -3",` +
-		`"findings":["TestVM — -7/2 should be -3 not -4"],"verified_functions":[],` +
-		`"all_correct":false,"summary":"1 problem found in TestVM"}`
-	msg, parsed := h.Validate(in)
-	if msg != "valid" {
-		t.Fatalf("Validate = %q, want valid", msg)
-	}
-	if out := parsed.(RefineTestsCritiqueOutput); !strings.Contains(out.Reasoning, "truncates toward zero") {
-		t.Errorf("out.Reasoning = %q, want it captured", out.Reasoning)
-	}
-}
-
 // The updated_bead sub-schema must reuse the shared bead object shape, so a
 // RECONCILE fix is grammar-constrained to the same fields DECOMPOSE produces.
 func TestReconcileUpdatedBeadUsesBeadSchema(t *testing.T) {

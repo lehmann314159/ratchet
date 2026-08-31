@@ -18,7 +18,6 @@ func TestPhase3SchemasReasoningFirstAndCapped(t *testing.T) {
 		{"CERTIFY_MANIFEST", CertifyManifestSchema, "model_reasoning", "final_decision"},
 		{"ANALYZE_EXECUTION", AnalyzeExecutionSchema, "reasoning", "analyzer_interpretation"},
 		{"REVISE_PENDING", RevisePendingSchema, "reasoning", "revisions"},
-		{"REFINE_TESTS_JUDGE", RefineTestsJudgeSchema, "reasoning", "decision"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -87,19 +86,6 @@ func TestRevisePendingValidateAcceptsReasoning(t *testing.T) {
 		t.Fatalf("Validate = %q, want valid", msg)
 	}
 	if out := parsed.(RevisePendingOutput); !strings.Contains(out.Reasoning, "no downstream") {
-		t.Errorf("reasoning not captured: %q", out.Reasoning)
-	}
-}
-
-func TestRefineTestsJudgeValidateAcceptsReasoning(t *testing.T) {
-	h := &RefineTestsJudge{}
-	in := `{"reasoning":"the finding about TestVM is correct","decision":"revise",` +
-		`"functions_to_rewrite":["TestVM"],"instructions":"fix the -7/2 case","summary":"1 correction in TestVM"}`
-	msg, parsed := h.Validate(in)
-	if msg != "valid" {
-		t.Fatalf("Validate = %q, want valid", msg)
-	}
-	if out := parsed.(RefineTestsJudgeOutput); !strings.Contains(out.Reasoning, "TestVM is correct") {
 		t.Errorf("reasoning not captured: %q", out.Reasoning)
 	}
 }
