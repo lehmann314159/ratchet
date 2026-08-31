@@ -55,7 +55,7 @@ func (h *CertifyManifest) Run(ctx context.Context, d *db.DB, oc *ollama.Client, 
 	raw, err := oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: guidance.InjectForVerbPath(certifyManifestSystemPrompt(), h.folderPath, db.VerbCertifyManifest, "")},
 		{Role: "user", Content: userMsg},
-	}, nil)
+	}, &ollama.Options{Format: CertifyManifestSchema, Think: disableThink()})
 	if err != nil {
 		return "", err
 	}
@@ -135,6 +135,7 @@ func (h *CertifyManifest) Validate(raw string) (string, any) {
 	if out.FinalDecision == "reject" && strings.TrimSpace(out.Feedback) == "" {
 		return "malformed: final_decision is reject but feedback is empty — the next SURVEY_SPEC attempt needs actionable feedback to fix", nil
 	}
+	logSchemaReasoning(db.VerbCertifyManifest, out.ModelReasoning, "final", out.FinalDecision)
 	return "valid", out
 }
 

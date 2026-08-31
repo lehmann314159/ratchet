@@ -49,7 +49,7 @@ func (h *SurveySpec) Run(ctx context.Context, d *db.DB, oc *ollama.Client, job *
 	return oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userMsg},
-	}, nil)
+	}, &ollama.Options{Format: SurveySpecSchema, Think: disableThink()})
 }
 
 func buildSurveyUserMsg(doc, certifyFeedback, lastValidationFailure string) string {
@@ -83,6 +83,7 @@ func (h *SurveySpec) Validate(raw string) (string, any) {
 	if len(out.Files) == 0 {
 		return "malformed: files array is empty", nil
 	}
+	logSchemaReasoning(db.VerbSurveySpec, out.Reasoning, "file_count", len(out.Files))
 	seenPaths := make(map[string]int, len(out.Files))
 	for i, f := range out.Files {
 		if f.Path == "" {

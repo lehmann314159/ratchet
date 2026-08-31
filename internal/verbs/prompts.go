@@ -17,8 +17,12 @@ func surveySpecSystemPrompt() string {
 
 **Retry guidance:** If rejection feedback or a schema error appears before the design document, correct every issue before responding. When rewriting from a prior attempt, rewrite the declarations field completely — do not append to prior content.
 
-Respond with JSON only, no prose before or after:
+Respond with a single JSON object, no prose before or after. The FIRST field is
+"reasoning": work out the module path, package name, and the full file set there
+— every type, function signature, and package var each file must declare — before
+you commit to the manifest. Then the structured fields:
 {
+  "reasoning": "<your working-through of the manifest>",
   "module": "<module name>",
   "package": "<package name>",
   "files": [
@@ -52,10 +56,12 @@ Your role:
    Bad:  "The manifest has issues."
    Good: "store.go declares Save returning error, but the design doc specifies it returns (int64, error) — the inserted row ID must be part of the return type."
 
-Respond with JSON only, no prose before or after:
+Respond with a single JSON object, no prose before or after. The FIRST field is
+"model_reasoning": check the manifest there — does every required declaration
+exist with the right signature, and is the preliminary decision correct? — before
+you commit to a final decision:
 {
-  "preliminary_decision": "approve" | "reject",
-  "model_reasoning": "<your reasoning>",
+  "model_reasoning": "<your check of the manifest against the mechanical results and the design doc>",
   "final_decision": "approve" | "reject",
   "feedback": "<actionable revision guidance for SURVEY — omit or leave empty if approving>"
 }`
@@ -453,7 +459,11 @@ Rules:
 - Unicode characters in string literals: use Go escape sequences (♙, ♚, etc.) or copy the literal character directly — never use angle-bracket hex notation like <0xE2><0x99><0x99>. That notation is not valid Go and the literal string will never appear in HTML output.
 - Checking for an HTML/CSS attribute value (e.g. a class): elements commonly carry more than one space-separated token (e.g. class="intersection empty"). Never assert an exact full attribute value unless you can see the complete literal markup that produces it. To check that one token is present among possibly several, match on the token with a boundary that tolerates trailing content (e.g. class="intersection followed by a space, or a plain substring check on the token name) — not a string that closes the quote immediately after the token.
 
-After all write_function calls, respond with one sentence describing what you wrote or corrected.`
+After all write_function calls, respond with a single JSON object, no prose
+before or after. The FIRST field is "reasoning": work through which test
+functions the bead spec and design-doc excerpts require and what each must
+assert. Then "summary": one sentence describing what you wrote or corrected.
+{"reasoning": "<your working-through>", "summary": "<one sentence>"}`
 
 const refineTestsCritiqueSystemPrompt = `You are a Go test file reviewer. Your sole job is to identify correctness problems — not to fix them.
 
@@ -505,8 +515,12 @@ When decision is "revise":
 - In instructions, write one bulleted correction per finding: name the function, state what is wrong, state the correct replacement (for an over-specified assertion, that means the looser property to assert instead), explain in one clause why.
 - Every finding must become an instruction — do not omit any.
 
-Respond with JSON only, no prose before or after:
+Respond with a single JSON object, no prose before or after. The FIRST field is
+"reasoning": weigh each critique finding on its merits there — against the bead
+spec and the design-doc excerpts, remembering that both a wrong asserted value
+and an over-specified assertion are genuine problems — before you decide:
 {
+  "reasoning": "<your finding-by-finding analysis>",
   "decision": "approved" | "revise",
   "functions_to_rewrite": ["TestFoo", "TestBar"],
   "instructions": "<bulleted corrections — only present when decision is revise>",
@@ -539,8 +553,12 @@ const revisePendingSystemPrompt = `You update pending bead specifications after 
 
 When issuing "update_spec", write the complete updated prose — not a diff or a description of changes. The updated_full_text replaces the existing spec prose in full. Carry forward all original instructions that remain accurate.
 
-Respond with JSON only, no prose before or after:
+Respond with a single JSON object, no prose before or after. The FIRST field is
+"reasoning": for each pending bead, work out there whether the just-committed
+change to the earlier bead's spec requires a matching update here — and if so,
+what — before you commit to the revisions:
 {
+  "reasoning": "<your bead-by-bead analysis>",
   "revisions": [
     {
       "bead_title": "<exact title from the pending spec>",
@@ -556,8 +574,11 @@ Provide your interpretation of what those findings suggest.
 Use hedged language throughout: "suggests", "appears to", "may indicate", "consistent with".
 Do not state causes — state what the evidence is consistent with.
 
-Respond with JSON only, no prose before or after:
+Respond with a single JSON object, no prose before or after. The FIRST field is
+"reasoning": work through what the execution evidence shows there — commands run,
+files written, test output — before you write the hedged interpretation:
 {
+  "reasoning": "<your working-through of the evidence>",
   "analyzer_interpretation": "<hedged interpretation of the mechanical findings>"
 }`
 

@@ -113,19 +113,21 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	raw, err := oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: analyzeExecutionSystemPrompt},
 		{Role: "user", Content: userMsg},
-	}, nil)
+	}, &ollama.Options{Format: AnalyzeExecutionSchema, Think: disableThink()})
 	if err != nil {
 		return "", err
 	}
 
 	// Parse the model's interpretation-only response and assemble the full output.
 	var modelOut struct {
+		Reasoning              string `json:"reasoning"`
 		AnalyzerInterpretation string `json:"analyzer_interpretation"`
 	}
 	if err := json.Unmarshal([]byte(ollama.ExtractJSON(raw)), &modelOut); err != nil {
 		return "", fmt.Errorf("parse analyzer interpretation: %w", err)
 	}
 	out := AnalyzeExecutionOutput{
+		Reasoning:              modelOut.Reasoning,
 		MechanicalFindings:     mechanicalFindings,
 		AnalyzerInterpretation: modelOut.AnalyzerInterpretation,
 	}
@@ -207,6 +209,7 @@ func (h *AnalyzeExecution) Validate(raw string) (string, any) {
 	if strings.TrimSpace(out.MechanicalFindings) == "" {
 		return "malformed: mechanical_findings is empty", nil
 	}
+	logSchemaReasoning(db.VerbAnalyzeExecution, out.Reasoning)
 	return "valid", out
 }
 

@@ -18,9 +18,11 @@ type SurveyManifestFile struct {
 
 // SurveySpecOutput is the structured output of SURVEY_SPEC.
 type SurveySpecOutput struct {
-	Module  string               `json:"module"`
-	Package string               `json:"package"`
-	Files   []SurveyManifestFile `json:"files"`
+	// Reasoning: schema-mode chain-of-thought (docs/schema-mode-reasoning-field.md).
+	Reasoning string               `json:"reasoning,omitempty"`
+	Module    string               `json:"module"`
+	Package   string               `json:"package"`
+	Files     []SurveyManifestFile `json:"files"`
 }
 
 // --- VERIFY_MANIFEST ---
@@ -129,6 +131,9 @@ type ReconcileDecompositionOutput struct {
 // --- ANALYZE_EXECUTION ---
 
 type AnalyzeExecutionOutput struct {
+	// Reasoning: schema-mode chain-of-thought (docs/schema-mode-reasoning-field.md).
+	// This is where the working-through goes so MechanicalFindings stays facts-only.
+	Reasoning string `json:"reasoning,omitempty"`
 	// MechanicalFindings is fielded JSON text: objective facts only, no causal
 	// language ("due to", "because", "caused by", "results in").
 	MechanicalFindings string `json:"mechanical_findings"`
@@ -155,6 +160,8 @@ type RevisePendingRevision struct {
 
 // RevisePendingOutput is the structured output of REVISE_PENDING.
 type RevisePendingOutput struct {
+	// Reasoning: schema-mode chain-of-thought (docs/schema-mode-reasoning-field.md).
+	Reasoning string                  `json:"reasoning,omitempty"`
 	Revisions []RevisePendingRevision `json:"revisions"`
 }
 
@@ -170,7 +177,9 @@ type RefineTestsFile struct {
 // Files are written via write_file tool calls during Run(); only the summary
 // is returned as structured output.
 type RefineTestsWriteOutput struct {
-	Summary string `json:"summary"`
+	// Reasoning: schema-mode chain-of-thought (docs/schema-mode-reasoning-field.md).
+	Reasoning string `json:"reasoning,omitempty"`
+	Summary   string `json:"summary"`
 }
 
 // RefineTestsCritiqueOutput is the output of REFINE_TESTS_CRITIQUE.
@@ -204,6 +213,8 @@ func (f *flexString) UnmarshalJSON(data []byte) error {
 
 // RefineTestsJudgeOutput is the output of REFINE_TESTS_JUDGE.
 type RefineTestsJudgeOutput struct {
+	// Reasoning: schema-mode chain-of-thought (docs/schema-mode-reasoning-field.md).
+	Reasoning          string     `json:"reasoning,omitempty"`
 	Decision           string     `json:"decision"`             // "approved" or "revise"
 	FunctionsToRewrite []string   `json:"functions_to_rewrite"` // only set when decision="revise"
 	Instructions       flexString `json:"instructions"`         // only set when decision="revise"

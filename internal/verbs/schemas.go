@@ -53,15 +53,32 @@ func (o orderedObject) MarshalJSON() ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-// reasoningProperty returns the leading `reasoning` property shared by every
-// schema-mode verb. guidance is verb-specific: what the model should actually
-// work through before committing to the structured fields.
-func reasoningProperty(guidance string) kv {
-	return kv{"reasoning", map[string]any{
-		"type": "string",
+// reasoningMaxLen caps the schema `reasoning` string. Ollama's schema→GBNF
+// DOES enforce string maxLength (probed 2026-08-31, gemma4:31b and the
+// qwen3.6:35b-a3b model that produced a 76KB runaway): the grammar forces the
+// string closed at the cap and the model finishes the object cleanly, no
+// repeated-chop thrash. 16000 is generous — a genuine deep AUDIT chain-of-
+// thought ran ~13-14K chars — while still bounding the pathological blowup
+// that broke its own `\` escape and corrupted the JSON.
+const reasoningMaxLen = 16000
+
+// reasoningPropertyNamed is the leading chain-of-thought property. Nearly
+// every schema-mode verb uses the key "reasoning" (via reasoningProperty);
+// CERTIFY_MANIFEST reuses its existing `model_reasoning` field instead.
+func reasoningPropertyNamed(name, guidance string) kv {
+	return kv{name, map[string]any{
+		"type":      "string",
+		"maxLength": reasoningMaxLen,
 		"description": "Think step by step here FIRST, before filling any field below. " +
 			guidance + " This field is required and must not be empty.",
 	}}
+}
+
+// reasoningProperty returns the leading `reasoning` property shared by most
+// schema-mode verbs. guidance is verb-specific: what the model should actually
+// work through before committing to the structured fields.
+func reasoningProperty(guidance string) kv {
+	return reasoningPropertyNamed("reasoning", guidance)
 }
 
 func stringArray() map[string]any {
@@ -199,4 +216,114 @@ var RefineTestsCritiqueSchema = orderedObject{
 		{"summary", map[string]any{"type": "string"}},
 	}},
 	{"required", []string{"reasoning", "summary"}},
+}
+
+// --- Phase 3 verbs ---
+
+// SurveySpecSchema — schema-mode for SURVEY_SPEC. Mirrors SurveySpecOutput.
+var SurveySpecSchema = orderedObject{
+	{"type", "object"},
+	{"properties", orderedObject{
+		reasoningProperty("Work out the module path, package name, and the full file set — " +
+			"every type, function signature, and package var each file must declare per the design doc."),
+		{"module", map[string]any{"type": "string"}},
+		{"package", map[string]any{"type": "string"}},
+		{"files", map[string]any{
+			"type":     "array",
+			"minItems": 1,
+			"items": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path":         map[string]any{"type": "string"},
+					"declarations": map[string]any{"type": "string"},
+				},
+				"required": []string{"path", "declarations"},
+			},
+		}},
+	}},
+	{"required", []string{"reasoning", "module", "package", "files"}},
+}
+
+// CertifyManifestSchema — schema-mode for CERTIFY_MANIFEST. The MODEL's
+// response carries only model_reasoning / final_decision / feedback;
+// CertifyManifest.Run prepends the mechanical preliminary_decision before
+// Validate sees it. model_reasoning IS the reasoning field (kept, not
+// duplicated) — first, capped.
+var CertifyManifestSchema = orderedObject{
+	{"type", "object"},
+	{"properties", orderedObject{
+		reasoningPropertyNamed("model_reasoning", "Check the manifest against the mechanical results "+
+			"and the design doc: does every required declaration exist with the right signature, and is "+
+			"the preliminary decision correct?"),
+		{"final_decision", map[string]any{"type": "string", "enum": []string{"approve", "reject"}}},
+		{"feedback", map[string]any{"type": "string"}},
+	}},
+	{"required", []string{"model_reasoning", "final_decision"}},
+}
+
+// AnalyzeExecutionSchema — schema-mode for ANALYZE_EXECUTION. The model emits
+// only reasoning + analyzer_interpretation; mechanical_findings is computed in
+// AnalyzeExecution.Run and prepended before Validate. The reasoning field is
+// where the working-through goes so analyzer_interpretation stays a tight
+// hedged summary.
+var AnalyzeExecutionSchema = orderedObject{
+	{"type", "object"},
+	{"properties", orderedObject{
+		reasoningProperty("Work through what the execution evidence shows — commands run, files " +
+			"written, test output — before you write the hedged interpretation."),
+		{"analyzer_interpretation", map[string]any{"type": "string"}},
+	}},
+	{"required", []string{"reasoning", "analyzer_interpretation"}},
+}
+
+// RevisePendingSchema — schema-mode for REVISE_PENDING. Mirrors RevisePendingOutput.
+var RevisePendingSchema = orderedObject{
+	{"type", "object"},
+	{"properties", orderedObject{
+		reasoningProperty("For each pending bead, decide whether the just-committed change to an " +
+			"earlier bead's spec requires a matching update here — and if so, what."),
+		{"revisions", map[string]any{
+			"type": "array",
+			"items": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"bead_title":        map[string]any{"type": "string"},
+					"action":            map[string]any{"type": "string", "enum": []string{"update_spec", "no_change"}},
+					"updated_full_text": map[string]any{"type": "string"},
+				},
+				"required": []string{"bead_title", "action"},
+			},
+		}},
+	}},
+	{"required", []string{"reasoning", "revisions"}},
+}
+
+// RefineTestsWriteSchema — schema-mode for REFINE_TESTS_WRITE. Test files are
+// written via write_function tool calls; only summary is structured output.
+var RefineTestsWriteSchema = orderedObject{
+	{"type", "object"},
+	{"properties", orderedObject{
+		reasoningProperty("Work through which test functions the bead spec and design-doc excerpts " +
+			"require, and what each must assert, before you write them."),
+		{"summary", map[string]any{"type": "string"}},
+	}},
+	{"required", []string{"reasoning", "summary"}},
+}
+
+// RefineTestsJudgeSchema — schema-mode for REFINE_TESTS_JUDGE, replacing the
+// flat refineTestsJudgeFormatSchema. Only decision + summary are required;
+// functions_to_rewrite / instructions are conditional on decision=="revise",
+// which Validate enforces (a flat schema can't).
+var RefineTestsJudgeSchema = orderedObject{
+	{"type", "object"},
+	{"properties", orderedObject{
+		reasoningProperty("Weigh each critique finding on its merits against the bead spec and the " +
+			"design-doc excerpts — both a wrong asserted value and an over-specified assertion are " +
+			"genuine problems — before you decide approved vs revise."),
+		{"decision", map[string]any{"type": "string", "enum": []string{"approved", "revise"}}},
+		{"functions_to_rewrite", stringArray()},
+		{"instructions", map[string]any{"type": "string"}},
+		{"summary", map[string]any{"type": "string"}},
+	}},
+	{"required", []string{"reasoning", "decision", "summary"}},
 }

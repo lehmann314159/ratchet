@@ -68,7 +68,7 @@ func (h *RevisePending) Run(ctx context.Context, d *db.DB, oc *ollama.Client, jo
 	return oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: guidance.InjectForVerbPath(revisePendingSystemPrompt, project.FolderPath, db.VerbRevisePending, "")},
 		{Role: "user", Content: userMsg},
-	}, nil)
+	}, &ollama.Options{Format: RevisePendingSchema, Think: disableThink()})
 }
 
 func (h *RevisePending) Validate(raw string) (string, any) {
@@ -79,6 +79,7 @@ func (h *RevisePending) Validate(raw string) (string, any) {
 	if len(out.Revisions) == 0 {
 		return "malformed: revisions array is empty", nil
 	}
+	logSchemaReasoning(db.VerbRevisePending, out.Reasoning, "revisions", len(out.Revisions))
 	for _, r := range out.Revisions {
 		if strings.TrimSpace(r.BeadTitle) == "" {
 			return "malformed: revision missing bead_title", nil
@@ -115,13 +116,13 @@ func (h *RevisePending) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJ
 	}
 
 	type pendingRow struct {
-		beadID         int64
-		revID          int64
-		revNum         int
-		fullText       string
-		execBudget     int
+		beadID          int64
+		revID           int64
+		revNum          int
+		fullText        string
+		execBudget      int
 		monitorOverride string
-		title          string
+		title           string
 	}
 	var pending []pendingRow
 	for rows.Next() {
@@ -233,7 +234,6 @@ func (h *RevisePending) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJ
 	}
 	return nil
 }
-
 
 func buildRevisePendingUserMsg(triggerBead *beadState, fileContents map[string]string, pendingBeads []beadState) string {
 	var sb strings.Builder
