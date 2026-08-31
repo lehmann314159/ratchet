@@ -196,8 +196,12 @@ For every Bead you issue you must set:
 
 Surface ambiguities in the design doc explicitly in the ambiguities field. Do not silently resolve them.
 
-Respond with JSON only, no prose before or after:
+Respond with a single JSON object, no prose before or after. The FIRST field is
+"reasoning": work through the decomposition there — bead boundaries, behavioral
+dependency order, which file each bead owns, and where every Decomposition Notes
+pin belongs — before you commit to the bead list. Then the structured fields:
 {
+  "reasoning": "<your step-by-step working through the decomposition>",
   "beads": [
     {
       "title": "<short identifier, unique within this decomposition>",

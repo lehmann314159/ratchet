@@ -77,6 +77,10 @@ func firstEmptyStringIndex(ss []string) int {
 // --- DECOMPOSE_SPEC ---
 
 type DecomposeSpecOutput struct {
+	// Reasoning is the model's schema-mode chain-of-thought (see
+	// docs/schema-mode-reasoning-field.md). Captured for logging/inspection
+	// only; not consumed by Commit or any downstream verb.
+	Reasoning   string       `json:"reasoning,omitempty"`
 	Beads       []ParsedBead `json:"beads"`
 	Ambiguities []string     `json:"ambiguities,omitempty"`
 }
@@ -204,7 +208,7 @@ type RefineTestsJudgeOutput struct {
 type AdjudicateNextExecutionOutput struct {
 	// Trend and BeadSpecFit are required fields checked for consistency
 	// against Reasoning (architecture: consistency check).
-	Trend       string `json:"trend"`        // "same" | "narrower" | "unrelated"
+	Trend       string `json:"trend"`         // "same" | "narrower" | "unrelated"
 	BeadSpecFit string `json:"bead_spec_fit"` // "bead_problem" | "execution_capability_problem"
 	Reasoning   string `json:"reasoning"`
 	Decision    string `json:"decision"` // "execute_as_is" | "execute_revised" | "full_stop" | "declare_success" | "test_reject"

@@ -228,10 +228,22 @@ both call paths; thinking field discarded by Chat; thinking accumulated by
 ChatWithTools). Full suite green.
 
 **Phase 1 — one verb end to end: DECOMPOSE_SPEC.**
-Schema + ordered-object helper, `Run` opts, `Validate` tolerates `reasoning`.
-Prove it on `muse-glimmer` and `glm-4.7-flash` against the
-`exprvm-web.md` fixture: decomposition must produce a non-empty, valid
-`beads` array. Compare bead quality against a `qwen3:32b` baseline run.
+Code + unit tests: DONE (2026-08-31, uncommitted).
+- `internal/verbs/schemas.go` — `orderedObject`/`kv` marshaler (JSON object with
+  slice-order keys), `reasoningProperty()`, `disableThink()`, `DecomposeSpecSchema`
+  (`reasoning` first; `beads` with `minItems:1` — grammar-level guard against the
+  empty-array degeneration).
+- `decompose_spec.go` `Run` passes `&ollama.Options{Format: DecomposeSpecSchema,
+  Think: disableThink()}`. `Validate` captures `out.Reasoning`, logs its presence.
+- `outputs.go` `DecomposeSpecOutput.Reasoning` field.
+- `prompts.go` decompose output section rewritten: `reasoning` is the first field.
+- 3 new tests (schema `reasoning`-first + `minItems`; Validate accepts reasoning;
+  Run sends a schema object + `think:false`, not bare `"json"`). Full suite green.
+
+LIVE VALIDATION: NOT YET RUN. Needs deploy + a fresh project on a reasoning-model
+fleet against `exprvm-web.md`. This is the go/no-go on risk #1 (does a strict
+schema fix the `beads:[]` degeneration, or push a new under-fill) and the
+untested assumption that Ollama honors schema property order.
 
 **Phase 2 — the reasoning-heavy reviewers: AUDIT, REFINE_TESTS_CRITIQUE,
 RECONCILE.**

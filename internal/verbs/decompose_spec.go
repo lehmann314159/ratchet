@@ -61,7 +61,7 @@ func (h *DecomposeSpec) Run(ctx context.Context, d *db.DB, oc *ollama.Client, jo
 	return oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: guidance.InjectForVerbPath(decomposeSpecSystemPrompt(project.Language), project.FolderPath, db.VerbDecomposeSpec, "")},
 		{Role: "user", Content: userMsg},
-	}, nil)
+	}, &ollama.Options{Format: DecomposeSpecSchema, Think: disableThink()})
 }
 
 // latestRedecomposeFeedback returns the critique_text of the most recent
@@ -106,6 +106,15 @@ func (h *DecomposeSpec) Validate(raw string) (string, any) {
 	}
 	if len(out.Beads) == 0 {
 		return "malformed: beads array is empty", nil
+	}
+	// Schema-mode: the `reasoning` field should be populated (the schema marks
+	// it required, but that only enforces key presence, not non-emptiness). An
+	// empty one means the model skipped the chain-of-thought — worth noticing,
+	// not worth discarding an otherwise-valid decomposition over.
+	if strings.TrimSpace(out.Reasoning) == "" {
+		slog.Warn("DECOMPOSE_SPEC: schema-mode reasoning field is empty", "bead_count", len(out.Beads))
+	} else {
+		slog.Info("DECOMPOSE_SPEC: schema-mode reasoning captured", "reasoning_chars", len(out.Reasoning), "bead_count", len(out.Beads))
 	}
 	seenTitles := make(map[string]int, len(out.Beads))
 	for i, b := range out.Beads {
