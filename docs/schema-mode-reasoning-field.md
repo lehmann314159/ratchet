@@ -285,8 +285,18 @@ on the complex verbs — malformed JSON and runaway `reasoning` strings. The
 near-term payoff is "speed up the existing fleet", NOT "unlock the fast models"
 — that still needs the models to mature or needs a runaway guard (see risk #8).
 
-**Phase 3 — the rest** (SURVEY, CERTIFY, ANALYZE, REVISE_PENDING,
-REFINE_TESTS_WRITE/JUDGE).
+**Phase 3 — the rest (SURVEY, CERTIFY, ANALYZE, REVISE_PENDING,
+REFINE_TESTS_WRITE/JUDGE) + the maxLength cap. ✅ CODE DONE + committed af5f199
+(2026-08-31).**
+- `reasoningPropertyNamed()` adds `maxLength: 16000` (risk #8); `reasoningProperty`
+  routes through it, so Phases 1–2 pick up the cap retroactively.
+- CERTIFY reuses its existing `model_reasoning` field (first + capped), not a
+  duplicate `reasoning`. ANALYZE's model emits only `{reasoning,
+  analyzer_interpretation}` — `mechanical_findings` is computed in Run.
+- `RefineTestsJudgeSchema` replaces the flat `refineTestsJudgeFormatSchema`.
+  WRITE + JUDGE ride the ChatWithTools loop like CRITIQUE.
+- 11 new tests, full suite green. LIVE VALIDATION not yet run (deploy + a
+  cascade run past the pause, ideally through a bead so REFINE_WRITE/JUDGE fire).
 
 **Phase 4 — ADJUDICATE** (`ChatWithTools` + schema; the tool loop makes this
 the fiddliest — the final turn's content must match the schema while
