@@ -316,8 +316,13 @@ You are an independent reviewer — you did not author this decomposition.
 A clean decomposition with no findings is a valid outcome. Do not fabricate findings on clean material.
 Your contract does not change across debate rounds — same correctness criterion every time.
 
-Respond with JSON only, no prose before or after:
+Respond with a single JSON object, no prose before or after. The FIRST field is
+"reasoning": check every bead's spec against the design doc there — missing
+requirements, wrong numeric values, dropped Decomposition Notes pins,
+independence violations, unrunnable exit criteria — before you commit to the
+findings list. Then the structured fields:
 {
+  "reasoning": "<your bead-by-bead check against the design doc>",
   "findings": [
     {
       "bead_title": "<title of the affected Bead>",
@@ -397,8 +402,12 @@ updated criteria.
 answer must account for what was already argued.
 
 ` + alreadyAddressedSection + `
-Respond with JSON only, no prose before or after:
+Respond with a single JSON object, no prose before or after. The FIRST field is
+"reasoning": work through each AUDIT finding there — is it correct? what is the
+fix, or why do you disagree? — before you commit to the responses. Then the
+structured fields:
 {
+  "reasoning": "<your finding-by-finding analysis>",
   "responses": [
     {
       "bead_title": "<title of the affected Bead>",
@@ -466,8 +475,13 @@ Report only genuine problems. If a test is correct, do not list it. Be specific:
 
 In verified_functions, list the name of EVERY test function you reviewed and found correct — meaning zero findings against it. IMPORTANT: if you have any finding that mentions a function, do NOT include that function in verified_functions. A function is either verified (no findings) or flagged (has findings) — never both. This list is used to lock correct functions from future rewrites.
 
-Respond with JSON only, no prose before or after:
+Respond with a single JSON object, no prose before or after. The FIRST field is
+"reasoning": review each Test* function there — every asserted value against the
+spec and design-doc excerpts, and whether any test over-asserts — noting what you
+verified with run_go_snippet, before you commit to findings. Then the structured
+fields:
 {
+  "reasoning": "<your function-by-function review>",
   "findings": [
     "<specific problem: TestFoo — current X should be Y because Z>"
   ],

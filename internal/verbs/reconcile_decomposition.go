@@ -83,7 +83,7 @@ func (h *ReconcileDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.C
 	return oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: reconcileDecompositionSystemPrompt(detectLang(project.FolderPath, beadOutputFiles(beads)), project.ReconcileSelfResolve)},
 		{Role: "user", Content: buildReconcileUserMsg(doc, beads, history, critique, rejectFeedback)},
-	}, nil)
+	}, &ollama.Options{Format: ReconcileDecompositionSchema, Think: disableThink()})
 }
 
 // latestReconcileRejectFeedback returns the critique_text of the most recent
@@ -171,6 +171,7 @@ func (h *ReconcileDecomposition) Validate(raw string) (string, any) {
 	if len(out.Responses) == 0 {
 		return "malformed: responses array is empty", nil
 	}
+	logSchemaReasoning(db.VerbReconcileDecomposition, out.Reasoning, "responses", len(out.Responses))
 	for i, r := range out.Responses {
 		if r.Action != "agree_and_fix" && r.Action != "disagree" {
 			return fmt.Sprintf("malformed: responses[%d] action must be \"agree_and_fix\" or \"disagree\", got %q", i, r.Action), nil

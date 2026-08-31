@@ -897,7 +897,8 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 	var lastContent string
 	coveredCases := map[string]bool{}
 	for turn := 1; turn <= maxTurns; turn++ {
-		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetCaseTool}, nil, nil)
+		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetCaseTool},
+			&ollama.Options{Format: RefineTestsCritiqueSchema, Think: disableThink()}, nil)
 		if toolErr != nil {
 			return "", toolErr
 		}
@@ -1005,6 +1006,7 @@ func (h *RefineTestsCritique) Validate(rawOutput string) (string, any) {
 	if strings.TrimSpace(out.Summary) == "" {
 		return "malformed: summary is empty", nil
 	}
+	logSchemaReasoning(db.VerbRefineTestsCritique, out.Reasoning, "findings", len(out.Findings), "all_correct", out.AllCorrect)
 	return "valid", out
 }
 

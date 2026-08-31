@@ -94,6 +94,9 @@ type AuditFinding struct {
 }
 
 type AuditDecompositionOutput struct {
+	// Reasoning: schema-mode chain-of-thought (docs/schema-mode-reasoning-field.md).
+	// Captured for logging/inspection; survives injectMechanicalFindings' re-marshal.
+	Reasoning      string         `json:"reasoning,omitempty"`
 	Findings       []AuditFinding `json:"findings"`
 	OverallVerdict string         `json:"overall_verdict"` // "no_issues" | "issues_found"
 }
@@ -118,6 +121,8 @@ type ReconcileResponse struct {
 }
 
 type ReconcileDecompositionOutput struct {
+	// Reasoning: schema-mode chain-of-thought (docs/schema-mode-reasoning-field.md).
+	Reasoning string              `json:"reasoning,omitempty"`
 	Responses []ReconcileResponse `json:"responses"`
 }
 
@@ -170,6 +175,8 @@ type RefineTestsWriteOutput struct {
 
 // RefineTestsCritiqueOutput is the output of REFINE_TESTS_CRITIQUE.
 type RefineTestsCritiqueOutput struct {
+	// Reasoning: schema-mode chain-of-thought (docs/schema-mode-reasoning-field.md).
+	Reasoning         string   `json:"reasoning,omitempty"`
 	Findings          []string `json:"findings"`
 	VerifiedFunctions []string `json:"verified_functions"` // every Test* function reviewed and found correct
 	AllCorrect        bool     `json:"all_correct"`

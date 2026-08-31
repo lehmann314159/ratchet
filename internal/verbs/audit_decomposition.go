@@ -42,7 +42,7 @@ func (h *AuditDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.Clien
 	raw, err := oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: auditDecompositionSystemPrompt(detectLang(project.FolderPath, beadOutputFiles(beads)))},
 		{Role: "user", Content: userMsg},
-	}, nil)
+	}, &ollama.Options{Format: AuditDecompositionSchema, Think: disableThink()})
 	if err != nil {
 		return "", err
 	}
@@ -98,6 +98,7 @@ func (h *AuditDecomposition) Validate(raw string) (string, any) {
 	if err := json.Unmarshal([]byte(ollama.ExtractJSON(raw)), &out); err != nil {
 		return fmt.Sprintf("malformed: JSON parse error: %v", err), nil
 	}
+	logSchemaReasoning(db.VerbAuditDecomposition, out.Reasoning, "verdict", out.OverallVerdict, "findings", len(out.Findings))
 	if out.OverallVerdict != "no_issues" && out.OverallVerdict != "issues_found" {
 		return fmt.Sprintf("malformed: overall_verdict must be \"no_issues\" or \"issues_found\", got %q", out.OverallVerdict), nil
 	}
