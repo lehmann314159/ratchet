@@ -255,9 +255,35 @@ on project 32 under bare "json" (63KB → beads:[], ~17min each):
 Risk #1 (schema fixes degeneration, no new under-fill) resolved.
 
 **Phase 2 — the reasoning-heavy reviewers: AUDIT, REFINE_TESTS_CRITIQUE,
-RECONCILE.**
-These get the most CoT benefit. Validate finding quality doesn't regress
-(count + specificity vs. baseline).
+RECONCILE. ✅ CODE DONE + committed 6d8dab4 (2026-08-31).**
+`AuditDecompositionSchema` / `ReconcileDecompositionSchema` /
+`RefineTestsCritiqueSchema`; extracted `beadObjectSchema()` (shared by
+DECOMPOSE.beads[] + RECONCILE.updated_bead); `logSchemaReasoning()` helper;
+`injectMechanicalFindings` re-marshal carries `reasoning` through; CRITIQUE
+schema on the ChatWithTools loop. 9 new tests, full suite green.
+
+LIVE VALIDATION — MIXED, and it reframed the whole effort:
+- **Project 35 (compiled-default fleet: gemma4:31b DECOMPOSE, qwen3:32b AUDIT
+  — same fleet as baseline runs 28–30, only the code changed): CLEAN WIN.**
+  gemma DECOMPOSE 5.4 min / 1 attempt / clean (baseline was 9–11 min) —
+  ~2× faster, reasoning field a genuine CoT naming all 3 pins verbatim.
+  qwen3:32b AUDIT 1.4 min / 1 attempt / clean. Cascade converged first pass.
+- **Project 34 (muse DECOMPOSE, qwen3.6:35b-a3b AUDIT/reviewers): FRAGILE.**
+  qwen3.6:35b-a3b AUDIT: 2 malformed-JSON attempts (~6 min each), attempt 1 a
+  76KB runaway `reasoning` string that broke its own `\` escape; valid on
+  attempt 3. muse RECONCILE (round 2): 2 malformed (`{", "responses":…` — botched
+  the leading `reasoning` key on the nested schema), valid on attempt 3, one
+  strike short of escalation. Whole cascade ~31 min, 5 malformed attempts.
+  But the review was DEEPER — P34's AUDIT caught a real integration-test-file
+  deviation that P33's qwen3:32b bare-json AUDIT (`no_issues`) missed.
+
+**Conclusion:** schema-mode is a clear win for the CURRENT fleet (faster,
+equally stable, inspectable reasoning) and qwen3:32b's older template handles
+the schema-mode reviewer verbs cleanly. The newer fast reasoning models
+(muse-glimmer, qwen3.6:35b-a3b, glm-4.7-flash) remain fragile under schema-mode
+on the complex verbs — malformed JSON and runaway `reasoning` strings. The
+near-term payoff is "speed up the existing fleet", NOT "unlock the fast models"
+— that still needs the models to mature or needs a runaway guard (see risk #8).
 
 **Phase 3 — the rest** (SURVEY, CERTIFY, ANALYZE, REVISE_PENDING,
 REFINE_TESTS_WRITE/JUDGE).
@@ -291,6 +317,21 @@ committed on `loop-mode`.
 3. **Property ordering.** Ollama follows schema property order for generation;
    Go maps don't preserve order. Must use an ordered emitter. Low risk, but a
    silent bug if missed (`reasoning` ends up last → no CoT benefit).
+   *Resolved in Phase 1 live validation — Ollama does honor the order.*
+
+8. **Runaway `reasoning` string** (found in Phase 2 live). The schema constrains
+   the field's *type* (string) but not its *length* — a reasoning model that
+   won't stop filled it to 76KB and eventually emitted an invalid `\` escape,
+   corrupting the JSON. Candidate mitigation: `maxLength` on `reasoningProperty`.
+   UNTESTED — Ollama's schema→GBNF may or may not enforce string `maxLength`.
+   Worth a targeted probe before Phase 5: if it works, it de-risks the fast
+   models significantly.
+
+9. **Malformed leading key on complex nested schemas** (found in Phase 2 live).
+   muse-glimmer botched emitting the `reasoning` key first on the RECONCILE
+   schema (nested `updated_bead`): `{", "responses":…`. Model-specific
+   grammar-adherence degradation. The retry mechanism recovers it (tolerance 2)
+   but barely. Not seen on the flatter DECOMPOSE/AUDIT schemas.
 
 4. **ADJUDICATE tool loop.** The schema applies to the *final* answer turn.
    Intermediate `run_go_snippet` tool-call turns must not be schema-checked.
