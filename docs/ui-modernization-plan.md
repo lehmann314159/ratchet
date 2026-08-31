@@ -31,6 +31,7 @@ any one can be picked up cold.
 | 2026-08-30 | Milestone C | new GET /projects/{id} page, W1 (lineages), W9 (active-project), W2 (cascade) | 7937138 |
 | 2026-08-30 | Milestone D | W4 (decomposition debate), W5 (manifest bootstrap), W6 (REFINE_TESTS cycle) | 268c57f |
 | 2026-08-30 | Milestone E | W11 (markdown/trace/compressed-history/adjudication), W12 (escalation chain), W13 (model assignments, poll-gating, breadcrumb) | a007058 |
+| 2026-08-30 | follow-up | preserve scroll + &lt;details&gt; state across the 5s refresh (snapshot/restore script) | e8e4259 |
 
 ---
 
@@ -703,10 +704,16 @@ Milestone-based; each milestone is a sensible stopping point.
 
 ---
 
-**All milestones (A–E) complete.** Remaining small follow-ups noted in the
-workstream Status lines: display cascade snapshot *contents* (W2/W11), and
-adjudication sub-field badge CSS for `trend`/`bead_spec_fit` (W8, superseded by
-W11d's panel — the values now render as plain text in a panel, not badges).
+**All milestones (A–E) complete.** Post-milestone follow-up (`e8e4259`): the
+5s `hx-swap="outerHTML"` refresh was resetting scroll positions and collapsing
+open `<details>` on every tick — a `htmx:beforeSwap`/`afterSwap` snapshot/restore
+script in `layout.html` (keyed by element id: `#jobs-scroll`, `#projects-scroll`,
+`#round-N`) now preserves both.
+
+Remaining small follow-ups noted in the workstream Status lines: display cascade
+snapshot *contents* (W2/W11), and adjudication sub-field badge CSS for
+`trend`/`bead_spec_fit` (W8, superseded by W11d's panel — the values now render
+as plain text in a panel, not badges).
 
 ---
 
