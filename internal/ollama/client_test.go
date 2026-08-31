@@ -300,3 +300,145 @@ func TestChatWithToolsNoWarningOnNormalTurn(t *testing.T) {
 		t.Errorf("unexpected empty-turn warning for a normal turn: %s", buf.String())
 	}
 }
+
+func boolPtr(b bool) *bool { return &b }
+
+// TestChatOmitsThinkByDefault: a caller passing no Options (every verb today)
+// must produce a request with no `think` key at all, so Ollama leaves the
+// model's own default in force. Regression guard for Phase 0 of
+// docs/schema-mode-reasoning-field.md — the plumbing must be additive.
+func TestChatOmitsThinkByDefault(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"message":{"role":"assistant","content":"{}"},"done":true}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	if _, err := c.Chat(context.Background(), "m", []Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if _, present := gotBody["think"]; present {
+		t.Errorf("request body has a `think` key with nil Options.Think; want it omitted: %v", gotBody["think"])
+	}
+}
+
+// TestChatSendsThinkTopLevel: Options.Think must land as a TOP-LEVEL request
+// field (not inside `options`, where Ollama silently drops it — the bug this
+// plumbing replaces).
+func TestChatSendsThinkTopLevel(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		var gotBody map[string]any
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			json.Unmarshal(body, &gotBody)
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"message":{"role":"assistant","content":"{}"},"done":true}`))
+		}))
+
+		c := New(srv.URL)
+		_, err := c.Chat(context.Background(), "m", []Message{{Role: "user", Content: "hi"}},
+			&Options{Think: boolPtr(want)})
+		srv.Close()
+		if err != nil {
+			t.Fatalf("Chat: %v", err)
+		}
+		if got, ok := gotBody["think"].(bool); !ok || got != want {
+			t.Errorf("top-level think = %v (ok=%v), want %v", gotBody["think"], ok, want)
+		}
+		if opts, ok := gotBody["options"].(map[string]any); ok {
+			if _, leaked := opts["think"]; leaked {
+				t.Errorf("`think` leaked into options: %v", opts["think"])
+			}
+		}
+	}
+}
+
+// TestChatWithToolsThinkPlumbing: the tool-calling path must omit `think`
+// with nil Options (previously it hard-coded options.think=false, a no-op)
+// and send it top-level when set.
+func TestChatWithToolsThinkPlumbing(t *testing.T) {
+	capture := func(opts *Options) map[string]any {
+		var gotBody map[string]any
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			json.Unmarshal(body, &gotBody)
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"message":{"role":"assistant","content":"{}"},"done":true}`+"\n")
+		}))
+		defer srv.Close()
+		c := New(srv.URL)
+		if _, err := c.ChatWithTools(context.Background(), "m",
+			[]Message{{Role: "user", Content: "hi"}}, nil, opts, nil); err != nil {
+			t.Fatalf("ChatWithTools: %v", err)
+		}
+		return gotBody
+	}
+
+	def := capture(nil)
+	if _, present := def["think"]; present {
+		t.Errorf("nil Options: `think` present top-level, want omitted: %v", def["think"])
+	}
+	if opts, ok := def["options"].(map[string]any); ok {
+		if _, leaked := opts["think"]; leaked {
+			t.Errorf("nil Options: stale `think` in options map: %v", opts["think"])
+		}
+	}
+
+	set := capture(&Options{Think: boolPtr(false)})
+	if got, ok := set["think"].(bool); !ok || got != false {
+		t.Errorf("Think=false: top-level think = %v (ok=%v), want false", set["think"], ok)
+	}
+}
+
+// TestChatDiscardsThinkingField: a response carrying a separated `thinking`
+// field must not break Chat() — it returns Content only, thinking is logged
+// and dropped.
+func TestChatDiscardsThinkingField(t *testing.T) {
+	buf := captureLogs(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"message":{"role":"assistant","content":"{\"ok\":true}","thinking":"let me consider..."},"done":true}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	got, err := c.Chat(context.Background(), "m", []Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if got != `{"ok":true}` {
+		t.Errorf("Chat content = %q, want the JSON only", got)
+	}
+	if !strings.Contains(buf.String(), "separated thinking") {
+		t.Errorf("expected a thinking-discarded log line, got: %s", buf.String())
+	}
+}
+
+// TestChatWithToolsCapturesThinking: streamed `thinking` chunks accumulate
+// onto the returned Message.Thinking while Content stays exactly the answer.
+func TestChatWithToolsCapturesThinking(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"message":{"role":"assistant","thinking":"step one "}}`+"\n")
+		io.WriteString(w, `{"message":{"role":"assistant","thinking":"step two"}}`+"\n")
+		io.WriteString(w, `{"message":{"role":"assistant","content":"{\"done\":1}"},"done":true}`+"\n")
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	msg, err := c.ChatWithTools(context.Background(), "m",
+		[]Message{{Role: "user", Content: "hi"}}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("ChatWithTools: %v", err)
+	}
+	if msg.Content != `{"done":1}` {
+		t.Errorf("Content = %q, want the answer only", msg.Content)
+	}
+	if msg.Thinking != "step one step two" {
+		t.Errorf("Thinking = %q, want the two chunks joined", msg.Thinking)
+	}
+}

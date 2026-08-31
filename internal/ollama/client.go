@@ -74,8 +74,16 @@ func NewUnbounded(baseURL string) *Client {
 }
 
 type Message struct {
-	Role      string     `json:"role"`
-	Content   string     `json:"content"`
+	Role    string `json:"role"`
+	Content string `json:"content"`
+	// Thinking carries a reasoning model's separated chain-of-thought when
+	// Ollama returns it in a distinct channel (top-level `think` enabled, no
+	// grammar constraint blocking the think tags). It is captured for logging
+	// and debugging only — never fed to a downstream verb. Empty for
+	// non-reasoning models and whenever a `format` grammar suppresses the
+	// separate thinking phase. omitempty so outbound request messages don't
+	// carry a stray key.
+	Thinking  string     `json:"thinking,omitempty"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
@@ -92,9 +100,9 @@ type ToolFunction struct {
 }
 
 type ToolParameters struct {
-	Type       string                `json:"type"` // "object"
+	Type       string                  `json:"type"` // "object"
 	Properties map[string]ToolProperty `json:"properties"`
-	Required   []string              `json:"required"`
+	Required   []string                `json:"required"`
 }
 
 type ToolProperty struct {
@@ -132,12 +140,31 @@ type Options struct {
 	// "summary" — 3/3 identical failures on connect-four-v2 bead 56,
 	// 2026-08-27) rather than relying on retry-after-rejection alone.
 	Format any
+	// Think controls Ollama's top-level `think` request field, which toggles
+	// reasoning-model chain-of-thought separation. Nil (the default for every
+	// caller that passes no Options) omits the field entirely, leaving the
+	// model's own default in force — this preserves historical behavior.
+	// A non-nil pointer sends `"think": true` / `"think": false`.
+	//
+	// NOTE: `think` is a TOP-LEVEL field of the /api/chat request, not an
+	// entry in `options`. An earlier version of ChatWithTools set
+	// `options: {"think": false}`, which Ollama silently ignores (unknown
+	// option keys are dropped) — a confirmed no-op. This field sends it in
+	// the right place.
+	//
+	// `think` and a `format` JSON-schema grammar are effectively mutually
+	// exclusive: the grammar masks the think tags, so a reasoning model
+	// cannot emit a separate thinking phase under a schema (see
+	// docs/schema-mode-reasoning-field.md). Schema-mode verbs pass
+	// Think: ptr(false) and carry their reasoning in a schema field instead.
+	Think *bool
 }
 
 type chatRequest struct {
 	Model    string         `json:"model"`
 	Messages []Message      `json:"messages"`
 	Stream   bool           `json:"stream"`
+	Think    *bool          `json:"think,omitempty"`
 	Format   any            `json:"format,omitempty"`
 	Options  map[string]any `json:"options,omitempty"`
 }
@@ -211,6 +238,7 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 	temp := DefaultTemperature
 	numCtx := defaultNumCtx
 	var format any = "json"
+	var think *bool
 	if opts != nil {
 		if opts.Temperature > 0 {
 			temp = opts.Temperature
@@ -221,12 +249,14 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 		if opts.Format != nil {
 			format = opts.Format
 		}
+		think = opts.Think
 	}
 
 	req := chatRequest{
 		Model:    model,
 		Messages: msgs,
 		Stream:   false,
+		Think:    think,
 		Format:   format,
 		Options:  map[string]any{"temperature": temp, "num_ctx": numCtx},
 	}
@@ -264,6 +294,10 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 	if cr.Error != "" {
 		return "", fmt.Errorf("ollama: %s", cr.Error)
 	}
+	if cr.Message.Thinking != "" {
+		slog.Info("chat: model returned separated thinking (discarded)",
+			"model", model, "thinking_chars", len(cr.Message.Thinking), "content_chars", len(cr.Message.Content))
+	}
 	return cr.Message.Content, nil
 }
 
@@ -288,6 +322,7 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 	temp := DefaultTemperature
 	numCtx := defaultNumCtx
 	var format any = "json"
+	var think *bool
 	if opts != nil {
 		if opts.Temperature > 0 {
 			temp = opts.Temperature
@@ -298,6 +333,7 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		if opts.Format != nil {
 			format = opts.Format
 		}
+		think = opts.Think
 	}
 
 	req := struct {
@@ -305,6 +341,7 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		Messages []Message      `json:"messages"`
 		Tools    []Tool         `json:"tools"`
 		Stream   bool           `json:"stream"`
+		Think    *bool          `json:"think,omitempty"`
 		Format   any            `json:"format,omitempty"`
 		Options  map[string]any `json:"options,omitempty"`
 	}{
@@ -312,8 +349,13 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		Messages: msgs,
 		Tools:    tools,
 		Stream:   true,
+		Think:    think,
 		Format:   format,
-		Options:  map[string]any{"temperature": temp, "num_ctx": numCtx, "think": false},
+		// `think` goes top-level (above), not in options: Ollama silently
+		// drops unknown option keys, so the previous `options: {"think": false}`
+		// here was a confirmed no-op. nil think == field omitted == model default,
+		// preserving historical behavior for callers that pass no Options.
+		Options: map[string]any{"temperature": temp, "num_ctx": numCtx},
 	}
 
 	body, err := json.Marshal(req)
@@ -352,6 +394,7 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 	}
 
 	var contentSB strings.Builder
+	var thinkingSB strings.Builder
 	var toolCalls []ToolCall
 	var doneReason string
 	dec := json.NewDecoder(resp.Body)
@@ -377,6 +420,9 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 			if tokenWriter != nil {
 				io.WriteString(tokenWriter, chunk.Message.Content)
 			}
+		}
+		if chunk.Message.Thinking != "" {
+			thinkingSB.WriteString(chunk.Message.Thinking)
 		}
 		if len(chunk.Message.ToolCalls) > 0 {
 			toolCalls = append(toolCalls, chunk.Message.ToolCalls...)
@@ -408,9 +454,14 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		slog.Warn("ChatWithTools: turn produced neither content nor a tool call",
 			"model", model, "done_reason", doneReason, "message_count", len(msgs))
 	}
+	if thinkingSB.Len() > 0 {
+		slog.Info("ChatWithTools: model returned separated thinking (not fed downstream)",
+			"model", model, "thinking_chars", thinkingSB.Len(), "content_chars", contentSB.Len())
+	}
 	return Message{
 		Role:      "assistant",
 		Content:   contentSB.String(),
+		Thinking:  thinkingSB.String(),
 		ToolCalls: toolCalls,
 	}, nil
 }
