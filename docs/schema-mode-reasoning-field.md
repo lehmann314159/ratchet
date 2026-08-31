@@ -240,10 +240,19 @@ Code + unit tests: DONE (2026-08-31, uncommitted).
 - 3 new tests (schema `reasoning`-first + `minItems`; Validate accepts reasoning;
   Run sends a schema object + `think:false`, not bare `"json"`). Full suite green.
 
-LIVE VALIDATION: NOT YET RUN. Needs deploy + a fresh project on a reasoning-model
-fleet against `exprvm-web.md`. This is the go/no-go on risk #1 (does a strict
-schema fix the `beads:[]` degeneration, or push a new under-fill) and the
-untested assumption that Ollama honors schema property order.
+LIVE VALIDATION: PASS (2026-08-31, project 33 exprvm-web-schema-test,
+muse-glimmer:30b-q8_0-dflash fleet). The same model that failed DECOMPOSE 2/2
+on project 32 under bare "json" (63KB → beads:[], ~17min each):
+- 1 attempt, ~2 min, 8KB output, Validate=valid, 9 beads (matches the known-
+  good structure), reasoning field populated with genuine CoT (1239 chars).
+- Ollama HONORS schema property order — `reasoning` was authored first and
+  filled before any structured field (risk #3 resolved).
+- AUDIT_DECOMPOSITION (qwen3:32b, still bare "json") returned `no_issues` on
+  the FIRST pass — no RECONCILE round, cascade converged. Matches the gemma4
+  fleet's best runs (v7). Project paused at --pause-after-reconcile.
+- Minor: muse-glimmer leaks a trailing `<|eot|>` token; ExtractJSON's
+  brace-matching strips it. Candidate for the strip list.
+Risk #1 (schema fixes degeneration, no new under-fill) resolved.
 
 **Phase 2 — the reasoning-heavy reviewers: AUDIT, REFINE_TESTS_CRITIQUE,
 RECONCILE.**
