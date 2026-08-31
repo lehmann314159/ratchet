@@ -322,10 +322,20 @@ committed on `loop-mode`.
 8. **Runaway `reasoning` string** (found in Phase 2 live). The schema constrains
    the field's *type* (string) but not its *length* — a reasoning model that
    won't stop filled it to 76KB and eventually emitted an invalid `\` escape,
-   corrupting the JSON. Candidate mitigation: `maxLength` on `reasoningProperty`.
-   UNTESTED — Ollama's schema→GBNF may or may not enforce string `maxLength`.
-   Worth a targeted probe before Phase 5: if it works, it de-risks the fast
-   models significantly.
+   corrupting the JSON. Mitigation: `maxLength` on `reasoningProperty`.
+   **PROBED 2026-08-31 — Ollama's schema→GBNF DOES enforce string `maxLength`.**
+   `qwen3.6:35b-a3b` (the model that produced the 76KB runaway) and `gemma4:31b`,
+   both given a schema with `reasoning` `maxLength:400` and a prompt demanding
+   exhaustive unsummarized analysis: reasoning came back at exactly 400 chars,
+   JSON valid, verdict still produced, model stopped cleanly (~100 tokens total,
+   no repeated-chop thrash). The grammar forces the string closed at the cap and
+   the model finishes the object.
+   Cost: reasoning truncates mid-thought if the model wanted more. So the cap
+   must be generous — genuine deep AUDIT reasoning ran ~13–14K chars. Proposal:
+   `maxLength: 16000` on `reasoningProperty` — bounds the pathological
+   multi-10K-to-MB blowup and the escape corruption without truncating a
+   real chain-of-thought in the common case. Add + validate in Phase 3.
+   This meaningfully de-risks the fast reasoning models for Phase 5.
 
 9. **Malformed leading key on complex nested schemas** (found in Phase 2 live).
    muse-glimmer botched emitting the `reasoning` key first on the RECONCILE
