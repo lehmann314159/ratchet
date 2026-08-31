@@ -64,33 +64,31 @@ Respond with JSON only, no prose before or after:
 func decomposeSpecSystemPrompt(lang string) string {
 	goExitCriteriaRule := ""
 	if lang == "go" {
-		goExitCriteriaRule = "\n  For Go beads: when output_files includes a *_test.go file, exit_criteria must use" +
-			"\n  `-run TestFoo` naming the primary test function (e.g. `go test -v -run TestHandleIndex ./...`)." +
-			"\n  A bare `go test ./...` without `-run` will silently exit 0 with \"no tests to run\" if the" +
-			"\n  test function was not written — the named `-run` flag is the only way to detect this." +
-			"\n  A shell-based exit criterion that starts a background process and later stops it must use" +
-			"\n  only portable POSIX/bash builtins — `&` to background it, `$!` to capture its PID, `kill" +
-			"\n  $PID` to stop it. Do not invoke any external process-management utility (`timeout`," +
-			"\n  `fuser`, `pgrep`, `lsof`, `ss`, `netstat`, or similar): their flags, output format, and even" +
-			"\n  installation are not guaranteed across *nix systems, and ratchet must run correctly on any" +
-			"\n  of them, not just the one a given criterion happened to be written against. The harness" +
-			"\n  already enforces its own 60-second timeout per criterion (internal/execcheck/verify.go)," +
-			"\n  independent of the shell, so no external timeout mechanism is needed either. Confirmed live" +
-			"\n  (tictactoe-v1 bead \"main-entry\", 2026-08-29) with two separate incidents the same evening:" +
-			"\n  a `timeout 5s bash -c '...'` criterion failed with \"command not found\" (not installed)," +
-			"\n  and after removing that, a `fuser -k 8080/tcp` criterion failed with \"Unknown option: k\"" +
-			"\n  (this system's BSD-flavored `fuser` doesn't support the GNU/Linux `-k` flag or `PORT/tcp`" +
-			"\n  syntax) — different binaries, same root cause: assuming one OS's toolset. Correct pattern:" +
-			"\n  `./binary & PID=$!; sleep 1; curl -f http://localhost:PORT/ || (kill $PID; exit 1); kill $PID`." +
-			"\n  A fixed port must also be verified by response *content* specific to this app, not just a" +
-			"\n  successful connection: pipe curl's output through `grep -q \"<a string unique to this app>\"`" +
-			"\n  before treating the check as passed. A fixed port can and does collide with an unrelated" +
-			"\n  process already listening there — confirmed live (2026-08-29): a stray process from a" +
-			"\n  completely unrelated project had been listening on :8080 for weeks, and a connectivity-only" +
-			"\n  criterion (`curl -f`, no content check) would have silently declared success against it," +
-			"\n  verifying nothing about the actual implementation. Correct pattern: `./binary & PID=$!;" +
-			"\n  sleep 1; curl -s http://localhost:PORT/ | grep -q \"<unique string>\" || (kill $PID; exit 1);" +
-			"\n  kill $PID`."
+		goExitCriteriaRule = "\n  Go bead exit criteria — pick exactly one form per bead, in this priority order:" +
+			"\n  1. `grep -q 'func TestFoo' foo_test.go && go test -v -run TestFoo ./...` — the default for" +
+			"\n     any bead with independently testable logic. This INCLUDES HTTP handlers: a handler bead's" +
+			"\n     tests use `net/http/httptest` (`httptest.NewRecorder` for a handler in isolation," +
+			"\n     `httptest.NewServer` for a request through the mux) — httptest starts a real HTTP server" +
+			"\n     on a random port, so there is never a reason to start the real binary or bind a fixed" +
+			"\n     port to verify HTTP behavior. The named `-run` flag is mandatory: a bare `go test ./...`" +
+			"\n     silently exits 0 with \"no tests to run\" if the function was never written, and the grep" +
+			"\n     guard makes that a hard failure." +
+			"\n  2. `go build ./...` — for a pure wiring/entrypoint bead (`main.go` that only constructs" +
+			"\n     values, registers routes on a mux, and calls `http.ListenAndServe`). It has no logic to" +
+			"\n     unit-test; its request/response behavior is covered by the integration-test beads. Do" +
+			"\n     NOT give the entrypoint bead a criterion that runs the real binary and curls a fixed" +
+			"\n     port — that is fragile (port collisions, `sleep` races, shell process management) and" +
+			"\n     redundant with the integration beads." +
+			"\n  3. A shell criterion that starts the real compiled binary — ONLY when the deliverable" +
+			"\n     genuinely cannot be exercised in-process (essentially never for a Go web service, since" +
+			"\n     httptest covers it). If you must: use only portable POSIX/bash builtins — `&` to" +
+			"\n     background, `$!` to capture the PID, `kill $PID` to stop — never an external utility" +
+			"\n     (`timeout`, `fuser`, `pgrep`, `lsof`, `ss`, `netstat`): their flags and availability" +
+			"\n     vary across *nix systems (confirmed live, tictactoe-v1 \"main-entry\" 2026-08-29:" +
+			"\n     `timeout 5s ...` \"command not found\"; `fuser -k 8080/tcp` \"Unknown option: k\" on BSD" +
+			"\n     fuser). The harness enforces its own 60s per-criterion timeout, so no external timeout" +
+			"\n     is needed. A fixed port must be verified by response *content* (`grep -q \"<unique" +
+			"\n     string>\"`), never connectivity alone — but prefer forms 1 and 2 and avoid this entirely."
 	}
 	return fmt.Sprintf(`You decompose a design document into a list of Beads — well-scoped, independently executable units of work, each with a clear done-condition.
 
@@ -219,20 +217,22 @@ func auditDecompositionSystemPrompt(lang string) string {
 		goSection = "\n   Additionally, if a Bead's output_files include HTTP handler files (handlers.go, routes.go,\n" +
 			"   server.go, or similarly named files) and its exit_criteria contain only a build check\n" +
 			"   (`go build ./...` or equivalent), flag it — build success cannot verify template rendering,\n" +
-			"   FuncMap registration, or handler response structure; a runtime smoke test is required.\n" +
+			"   FuncMap registration, or handler response structure; a runtime test is required.\n" +
 			"   Exception: if the Bead's full_text specifies that tests use `httptest.NewServer` or\n" +
 			"   `httptest.NewRecorder`, then `go test -run TestFoo` is a sufficient runtime check —\n" +
 			"   httptest starts a real HTTP server on a random port. Do not flag this pattern.\n" +
-			"   Also flag if the exit criterion starts a server on a fixed port (e.g. :8080) rather than\n" +
-			"   using `net/http/httptest.NewServer` — a fixed port may collide with the execution\n" +
-			"   environment and cause the criterion to silently verify the wrong server.\n" +
-			"   When httptest isn't available (a bare main.go entrypoint Bead with no *_test.go file), a\n" +
-			"   fixed-port criterion is unavoidable — but flag it unless it verifies response *content*\n" +
-			"   specific to this app (e.g. `curl -s ... | grep -q \"<unique string>\"`), not just a successful\n" +
-			"   connection (`curl -f` alone). Confirmed live (2026-08-29): a stray process from a completely\n" +
-			"   unrelated project had been listening on :8080 for weeks, and a connectivity-only criterion\n" +
-			"   would have silently declared success against it, verifying nothing about the actual\n" +
-			"   implementation — this must be flagged even on a re-audit of an already-existing Bead.\n" +
+			"   A pure wiring/entrypoint Bead (`main.go` that only constructs values, registers routes on a\n" +
+			"   mux, and calls `http.ListenAndServe`) with a `go build ./...` exit criterion is CORRECT —\n" +
+			"   do not flag it. It has no logic to unit-test; its request/response behavior is covered by\n" +
+			"   the integration-test Beads.\n" +
+			"   Flag any exit criterion that starts the real compiled binary and curls a fixed port\n" +
+			"   (e.g. `./main & ... curl http://localhost:8080/`). For a Go service this is always wrong:\n" +
+			"   `net/http/httptest` starts a real HTTP server on a random port and covers every case, so a\n" +
+			"   fixed port (collision risk — confirmed live 2026-08-29: a stray process from an unrelated\n" +
+			"   project sat on :8080 for weeks) and the shell process management (`sleep` races, `kill`) are\n" +
+			"   never necessary. The fix is to move the check into an integration-test Bead using httptest,\n" +
+			"   or (for the entrypoint Bead) to `go build ./...`. This must be flagged even on a re-audit of\n" +
+			"   an already-existing Bead.\n" +
 			"   Also flag any exit criterion that starts a background process and stops it using anything\n" +
 			"   other than portable POSIX/bash builtins (`&` to background, `$!` to capture its PID, `kill\n" +
 			"   $PID` to stop it). Flag any use of an external process-management utility (`timeout`,\n" +
