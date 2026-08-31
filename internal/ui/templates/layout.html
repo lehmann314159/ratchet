@@ -5,6 +5,33 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{template "title" .}} — Ratchet</title>
   <script src="/static/htmx-2.0.4.min.js"></script>
+  <script>
+    // The dashboard and project pages refresh every 5s by swapping their whole
+    // body (hx-swap="outerHTML"), which resets scroll positions and collapses
+    // every <details>. Snapshot that state by element id before each swap and
+    // restore it after. Any element that should survive a refresh just needs a
+    // stable id (currently: #jobs-scroll, #projects-scroll, #round-N).
+    (function () {
+      var saved = {};
+      function snapshot() {
+        saved = {};
+        document.querySelectorAll("[id]").forEach(function (el) {
+          if (el.scrollTop || el.scrollLeft) saved["s:" + el.id] = [el.scrollTop, el.scrollLeft];
+          if (el.tagName === "DETAILS") saved["o:" + el.id] = el.open;
+        });
+      }
+      function restore() {
+        Object.keys(saved).forEach(function (k) {
+          var el = document.getElementById(k.slice(2));
+          if (!el) return;
+          if (k[0] === "s") { el.scrollTop = saved[k][0]; el.scrollLeft = saved[k][1]; }
+          else el.open = saved[k];
+        });
+      }
+      document.addEventListener("htmx:beforeSwap", snapshot);
+      document.addEventListener("htmx:afterSwap", restore);
+    })();
+  </script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: ui-monospace, monospace; font-size: 14px; color: #222; background: #fafafa; padding: 0 20px 40px; }

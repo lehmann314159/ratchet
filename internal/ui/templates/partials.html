@@ -63,7 +63,7 @@
     <td class="meta">{{.RoundNumber}}</td>
     <td><span class="status {{.Outcome}}">{{.Outcome}}</span></td>
     <td>
-      <details>
+      <details id="round-{{.RoundNumber}}">
         <summary class="meta">critique &amp; reconciliation</summary>
         <div class="round-detail">
           <strong>AUDIT critique</strong>
@@ -85,7 +85,7 @@
 
 {{define "jobsTable"}}
 {{if .}}
-<div style="max-height:290px;overflow-y:auto;border:1px solid #e5e5e5;border-radius:3px">
+<div id="jobs-scroll" style="max-height:290px;overflow-y:auto;border:1px solid #e5e5e5;border-radius:3px">
 <table class="sticky-header">
   <thead><tr><th>Verb</th><th>Bead</th><th>Status</th><th>Elapsed</th><th>Updated</th></tr></thead>
   <tbody>

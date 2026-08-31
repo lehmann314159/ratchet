@@ -751,6 +751,30 @@ func TestHandleRemoveProject_StandaloneLineageRootSucceeds(t *testing.T) {
 	}
 }
 
+// TestRefreshStatePreservationWiring asserts the snapshot/restore script and
+// the opt-in ids are present, so a 5s htmx refresh keeps scroll positions and
+// <details> open-state (they'd otherwise reset on every hx-swap="outerHTML").
+func TestRefreshStatePreservationWiring(t *testing.T) {
+	s, d := openTestServer(t)
+	pid := seedProject(t, d)
+	seedJob(t, d, pid, 0, "SURVEY_SPEC", "running")
+	seedRound(t, d, pid, 1, "crit", "recon", "converged")
+
+	layout := getBody(t, s, "/")
+	if !strings.Contains(layout, `document.addEventListener("htmx:beforeSwap"`) ||
+		!strings.Contains(layout, `document.addEventListener("htmx:afterSwap"`) {
+		t.Errorf("layout missing the snapshot/restore lifecycle hooks")
+	}
+	if !strings.Contains(layout, `id="jobs-scroll"`) || !strings.Contains(layout, `id="projects-scroll"`) {
+		t.Errorf("dashboard missing scrollbox ids")
+	}
+
+	proj := getBody(t, s, "/projects/"+strconv.FormatInt(pid, 10))
+	if !strings.Contains(proj, `id="jobs-scroll"`) || !strings.Contains(proj, `id="round-1"`) {
+		t.Errorf("project page missing jobs-scroll / round-N ids")
+	}
+}
+
 // --- Milestone E: forensics depth ---
 
 func TestRenderMarkdown_BasicAndSafe(t *testing.T) {
