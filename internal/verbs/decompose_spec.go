@@ -146,15 +146,19 @@ func (h *DecomposeSpec) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJ
 	out := parsed.(DecomposeSpecOutput)
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	if violations := forwardFileReferenceChecks(out.Beads); len(violations) > 0 {
-		return h.commitRedecompose(ctx, tx, job, violations, now)
-	}
-
 	var allOutputFiles []string
 	for _, pb := range out.Beads {
 		allOutputFiles = append(allOutputFiles, pb.OutputFiles...)
 	}
 	lang := detectLang(h.folderPath, allOutputFiles)
+
+	// Source-side gate: bead ordering + exit-criteria/prose/output_files
+	// consistency, checked against what the mechanical-repair pass would
+	// produce. Reject-and-retry rather than shipping an inconsistent bead.
+	if violations := beadConsistencyViolations(lang, out.Beads, nil); len(violations) > 0 {
+		return h.commitRedecompose(ctx, tx, job, violations, now)
+	}
+
 	pins := extractDecompositionNotesPins(h.designDoc)
 	for _, pb := range out.Beads {
 		applyMechanicalBeadFixes(lang, &pb)

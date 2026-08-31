@@ -2,9 +2,15 @@ package verbs
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"ratchet/internal/db"
 )
 
 // TestRunGoSnippet covers the 2026-07-20 exprvm-web-v1 incident directly:
@@ -270,4 +276,77 @@ func TestMissingVerificationCases(t *testing.T) {
 			t.Errorf("missing = %v, want none once at least one case is covered", missing)
 		}
 	})
+}
+
+// TestRefineTestsWriteCommitHardCompletenessGate: the write loop's in-turn
+// completeness nag is soft (abandoned on the last turn). Commit must escalate
+// when a required test function is still missing, rather than enqueue CRITIQUE
+// on an incomplete file that then gets rubber-stamped. (exprvm-web bead 144:
+// TestHandlerRuntime was never written; the bead thrashed to escalation ~1h
+// later on the grep guard instead.)
+func TestRefineTestsWriteCommitHardCompletenessGate(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	must := func(name, content string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must("go.mod", "module widget\n\ngo 1.22\n")
+	must("handlers.go", "package widget\n\nfunc HandleIndex() {}\n")
+	// The test file compiles but is missing the required TestHandlerRuntime.
+	must("handlers_test.go", "package widget\n\nimport \"testing\"\n\nfunc TestHandleIndex(t *testing.T) {}\n")
+
+	if _, err := d.ExecContext(ctx, `
+		INSERT INTO projects (id, label, folder_path, design_doc_path, status,
+			monitor_override_default, execution_budget_default, audit_reconcile_round_cap,
+			created_at, updated_at)
+		VALUES (-1, 'fixture: REFINE_TESTS_WRITE hard completeness gate', ?, 'design_doc.md', 'active',
+			'honor', 300, 2, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, dir); err != nil {
+		t.Fatal(err)
+	}
+	specBytes, _ := json.Marshal(ParsedBead{
+		Title:       "handlers-templates",
+		FullText:    "Implement HandleIndex. Also write TestHandlerRuntime, an integration test.",
+		OutputFiles: []string{"handlers.go", "handlers_test.go"},
+		ExitCriteria: []string{
+			"grep -q 'func TestHandleIndex' handlers_test.go && go test -run TestHandleIndex .",
+			"grep -q 'func TestHandlerRuntime' handlers_test.go && go test -run TestHandlerRuntime .",
+		},
+	})
+	spec := string(specBytes)
+	res, err := d.ExecContext(ctx, `INSERT INTO beads (project_id, status, current_revision_id) VALUES (-1, 'pending', NULL)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beadID, _ := res.LastInsertId()
+	rr, err := d.ExecContext(ctx, `
+		INSERT INTO bead_revisions (project_id, bead_id, revision_number, full_text,
+			execution_budget, monitor_override, created_by_verb, created_at)
+		VALUES (-1, ?, 1, ?, 300, 'honor', 'DECOMPOSE_SPEC', '2026-01-01T00:00:00Z')`, beadID, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revID, _ := rr.LastInsertId()
+	if _, err := d.ExecContext(ctx, `UPDATE beads SET current_revision_id = ? WHERE id = ?`, revID, beadID); err != nil {
+		t.Fatal(err)
+	}
+
+	job := seedJob(t, d, -1, db.VerbRefineTestsWrite, sql.NullInt64{Int64: beadID, Valid: true})
+	inTx(t, d, func(tx *sql.Tx) error {
+		return (&RefineTestsWrite{}).Commit(ctx, tx, job, RefineTestsWriteOutput{Summary: "wrote what I could"})
+	})
+
+	var status string
+	if err := d.QueryRowContext(ctx, `SELECT status FROM handoff_jobs WHERE id = ?`, job.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "escalated" {
+		t.Errorf("job status = %q, want escalated (required TestHandlerRuntime missing)", status)
+	}
+	if n := countRows(t, d, `SELECT COUNT(*) FROM handoff_jobs WHERE verb = ? AND bead_id = ?`, db.VerbRefineTestsCritique, beadID); n != 0 {
+		t.Errorf("CRITIQUE jobs = %d, want 0 (must not proceed on an incomplete file)", n)
+	}
 }

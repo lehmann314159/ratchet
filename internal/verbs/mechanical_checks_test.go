@@ -245,6 +245,73 @@ func TestFixBareGrepFile_Negated(t *testing.T) {
 			t.Errorf("expected no fix, got %q", result)
 		}
 	})
+
+	t.Run("file-qualified positive collapses against a bare negated of the same pattern+file", func(t *testing.T) {
+		// The checkers-684 shape without relying on fixFileBasedGoTest to first
+		// strip the positive clause's file: pass 1 resolves the bare negated to
+		// game.go, pass 2 then sees both target game.go and drops the positive.
+		criterion := "grep -q 'PAT' game.go && ! grep -q 'PAT'"
+		result, ok := fixBareGrepFile(criterion, []string{"game.go", "ai.go"})
+		if !ok {
+			t.Fatal("expected a fix")
+		}
+		want := "! grep -q 'PAT' game.go"
+		if result != want {
+			t.Errorf("result = %q, want %q", result, want)
+		}
+	})
+
+	t.Run("positive and negated of the same pattern but DIFFERENT files are both kept", func(t *testing.T) {
+		criterion := "grep -q 'PAT' a.go && ! grep -q 'PAT' b.go"
+		result, ok := fixBareGrepFile(criterion, []string{"a.go", "b.go"})
+		if ok {
+			t.Errorf("expected no fix (both files explicit, no contradiction), got %q", result)
+		}
+		_ = result
+	})
+}
+
+func TestFixFileBasedGoTest_PreservesGrepGuardFile(t *testing.T) {
+	// The bug: an earlier version ran strings.Fields over the WHOLE compound
+	// criterion and dropped every .go token — including handlers_test.go from a
+	// leading grep guard — leaving a bare `grep -q '...'` that reads stdin and
+	// always fails. It only operates on the `go test` clause now.
+	cases := []struct {
+		name string
+		in   string
+		want string
+		ok   bool
+	}{
+		{
+			name: "grep guard .go arg is preserved; go test clause is untouched (already package form)",
+			in:   "grep -q 'func TestFoo' foo_test.go && go test -v -run TestFoo ./...",
+			want: "grep -q 'func TestFoo' foo_test.go && go test -v -run TestFoo ./...",
+			ok:   false,
+		},
+		{
+			name: "file-based go test clause is rewritten; grep guard file kept",
+			in:   "grep -q 'func TestFoo' foo_test.go && go test ./foo_test.go -run TestFoo",
+			want: "grep -q 'func TestFoo' foo_test.go && go test -run TestFoo .",
+			ok:   true,
+		},
+		{
+			name: "bare file-based go test still rewritten",
+			in:   "go test ./foo_test.go -run TestFoo",
+			want: "go test -run TestFoo .",
+			ok:   true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := fixFileBasedGoTest(tc.in)
+			if ok != tc.ok {
+				t.Errorf("ok = %v, want %v", ok, tc.ok)
+			}
+			if strings.TrimSpace(got) != tc.want {
+				t.Errorf("got  %q\nwant %q", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestDeriveTestFileName(t *testing.T) {
@@ -834,4 +901,130 @@ func TestInjectDecompositionNotesPin_NoMatch(t *testing.T) {
 	if bead.FullText != "wires everything together" {
 		t.Errorf("full_text should be unchanged, got %q", bead.FullText)
 	}
+}
+
+func TestExtractRunNames(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"go test -run TestFoo ./...", []string{"TestFoo"}},
+		{"go test -run=TestFoo .", []string{"TestFoo"}},
+		{"go test -v -run 'TestA|TestB' ./...", []string{"TestA", "TestB"}},
+		{"go test -run 'TestA TestB' ./...", nil}, // accidental space form — I6-residual reports it, not this
+		{"go test -run '^TestFoo$' .", []string{"TestFoo"}},
+		{"go test -run 'TestFoo/sub case' .", []string{"TestFoo"}},
+		{"go test ./...", nil},
+	}
+	for _, tc := range cases {
+		got := extractRunNames(tc.in)
+		if len(got) != len(tc.want) {
+			t.Errorf("extractRunNames(%q) = %v, want %v", tc.in, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("extractRunNames(%q) = %v, want %v", tc.in, got, tc.want)
+				break
+			}
+		}
+	}
+}
+
+func TestCheckBeadCriteriaConsistency(t *testing.T) {
+	t.Run("clean bead — no violations", func(t *testing.T) {
+		b := ParsedBead{
+			Title:        "compiler",
+			FullText:     "Implement Compile and Disassemble. Test with TestCompile and TestDisassemble.",
+			OutputFiles:  []string{"compiler.go", "compiler_test.go"},
+			ExitCriteria: []string{"grep -q 'func TestCompile' compiler_test.go && go test -run TestCompile ./..."},
+		}
+		if v := checkBeadCriteriaConsistency([]ParsedBead{b}); len(v) != 0 {
+			t.Errorf("expected no violations, got %v", v)
+		}
+	})
+
+	t.Run("orphan -run name — no guard, not in prose", func(t *testing.T) {
+		b := ParsedBead{
+			Title:        "handlers-templates",
+			FullText:     "Implement HandleIndex and HandleEval.",
+			OutputFiles:  []string{"handlers.go", "handlers_test.go"},
+			ExitCriteria: []string{"go test -v -run TestHandlerRuntime ./..."},
+		}
+		v := checkBeadCriteriaConsistency([]ParsedBead{b})
+		if len(v) == 0 || !strings.Contains(v[0], "TestHandlerRuntime") {
+			t.Errorf("expected a violation naming TestHandlerRuntime, got %v", v)
+		}
+	})
+
+	t.Run("space-separated -run value still present", func(t *testing.T) {
+		b := ParsedBead{
+			Title:        "x",
+			FullText:     "TestA and TestB",
+			OutputFiles:  []string{"x.go", "x_test.go"},
+			ExitCriteria: []string{"grep -q 'func TestA' x_test.go && grep -q 'func TestB' x_test.go && go test -run 'TestA TestB' ./..."},
+		}
+		v := checkBeadCriteriaConsistency([]ParsedBead{b})
+		if len(v) == 0 {
+			t.Fatalf("expected a violation for the space-separated -run value")
+		}
+	})
+
+	t.Run("grep guard names a test file the bead does not own", func(t *testing.T) {
+		b := ParsedBead{
+			Title:        "handlers",
+			FullText:     "TestHandleIndex",
+			OutputFiles:  []string{"handlers.go", "handlers_test.go"},
+			ExitCriteria: []string{"grep -q 'func TestHandleIndex' other_test.go && go test -run TestHandleIndex ./..."},
+		}
+		v := checkBeadCriteriaConsistency([]ParsedBead{b})
+		if len(v) == 0 || !strings.Contains(v[0], "other_test.go") {
+			t.Errorf("expected a violation naming other_test.go, got %v", v)
+		}
+	})
+}
+
+func TestCheckAddedRequiredFuncsHaveProse(t *testing.T) {
+	before := ParsedBead{
+		Title:        "handlers-templates",
+		FullText:     "Implement HandleIndex and HandleEval.",
+		ExitCriteria: []string{"grep -q 'func TestHandleIndex' handlers_test.go && go test -run TestHandleIndex ./..."},
+	}
+
+	t.Run("RECONCILE adds an orphan required function", func(t *testing.T) {
+		after := ParsedBead{
+			Title:    "handlers-templates",
+			FullText: "Implement HandleIndex and HandleEval.", // unchanged — no prose for TestHandlerRuntime
+			ExitCriteria: []string{
+				"grep -q 'func TestHandleIndex' handlers_test.go && go test -run TestHandleIndex ./...",
+				"grep -q 'func TestHandlerRuntime' handlers_test.go && go test -run TestHandlerRuntime ./...",
+			},
+		}
+		v := checkAddedRequiredFuncsHaveProse(before, after)
+		if len(v) != 1 || !strings.Contains(v[0], "TestHandlerRuntime") {
+			t.Errorf("expected one violation naming TestHandlerRuntime, got %v", v)
+		}
+	})
+
+	t.Run("RECONCILE adds a required function AND describes it — no violation", func(t *testing.T) {
+		after := ParsedBead{
+			Title:    "handlers-templates",
+			FullText: "Implement HandleIndex and HandleEval. Also write TestHandlerRuntime, an integration test using httptest.NewServer.",
+			ExitCriteria: []string{
+				"grep -q 'func TestHandleIndex' handlers_test.go && go test -run TestHandleIndex ./...",
+				"grep -q 'func TestHandlerRuntime' handlers_test.go && go test -run TestHandlerRuntime ./...",
+			},
+		}
+		if v := checkAddedRequiredFuncsHaveProse(before, after); len(v) != 0 {
+			t.Errorf("expected no violation, got %v", v)
+		}
+	})
+
+	t.Run("no new required functions — no violation even if prose is silent on test names", func(t *testing.T) {
+		after := before
+		after.FullText = "Reworded prose that still names no test functions."
+		if v := checkAddedRequiredFuncsHaveProse(before, after); len(v) != 0 {
+			t.Errorf("expected no violation for a stable required-func set, got %v", v)
+		}
+	})
 }

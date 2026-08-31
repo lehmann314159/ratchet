@@ -219,3 +219,61 @@ func TestReconcileDecompositionCommitCleanFixStillConverges(t *testing.T) {
 		t.Errorf("bead_revisions rev2 = %d, want 1 (clean agree_and_fix must still be applied)", n)
 	}
 }
+
+// TestReconcileDecompositionCommitRejectsOrphanRequiredFunc is the direct
+// regression for the exprvm-web bead-135 escalation: RECONCILE replaced a
+// fixed-port curl check with a `grep -q 'func TestHandlerRuntime'` exit
+// criterion but never added prose telling REFINE_TESTS what that function
+// should test. The model then dropped it under turn pressure, CRITIQUE/JUDGE
+// rubber-stamped the incomplete file, and the bead thrashed for ~1h. Commit
+// must reject the fix and make RECONCILE add the prose (or not add the
+// criterion) before it ships.
+func TestReconcileDecompositionCommitRejectsOrphanRequiredFunc(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "fixture: RECONCILE rejects an orphan required test function")
+	beadID, _ := seedBead(t, d, -1, "handlers-templates")
+
+	job := seedJob(t, d, -1, db.VerbReconcileDecomposition, sql.NullInt64{})
+	h := &ReconcileDecomposition{
+		lastCritique:    "the curl exit criterion uses a fixed port",
+		lastRoundsSoFar: 0,
+		lastBeads: []beadState{{
+			Title:        "handlers-templates",
+			FullText:     "Implement HandleIndex and HandleEval in handlers.go.",
+			OutputFiles:  []string{"handlers.go", "handlers_test.go"},
+			ExitCriteria: []string{"grep -q 'func TestHandleIndex' handlers_test.go && go test -v -run TestHandleIndex ./..."},
+		}},
+	}
+	out := ReconcileDecompositionOutput{
+		Responses: []ReconcileResponse{
+			{BeadTitle: "handlers-templates", Action: "agree_and_fix", Reason: "replace curl with httptest",
+				UpdatedBead: &ParsedBead{
+					Title:       "handlers-templates",
+					FullText:    "Implement HandleIndex and HandleEval in handlers.go.", // unchanged — no prose for TestHandlerRuntime
+					OutputFiles: []string{"handlers.go", "handlers_test.go"},
+					ExitCriteria: []string{
+						"grep -q 'func TestHandleIndex' handlers_test.go && go test -v -run TestHandleIndex ./...",
+						"grep -q 'func TestHandlerRuntime' handlers_test.go && go test -v -run TestHandlerRuntime ./...",
+					},
+				}},
+		},
+	}
+	inTx(t, d, func(tx *sql.Tx) error { return h.Commit(ctx, tx, job, out) })
+
+	var outcome, critique string
+	if err := d.QueryRowContext(ctx,
+		`SELECT outcome, critique_text FROM audit_reconcile_rounds WHERE project_id = -1 ORDER BY id DESC LIMIT 1`,
+	).Scan(&outcome, &critique); err != nil {
+		t.Fatalf("expected a rejection row: %v", err)
+	}
+	if outcome != "reconcile_rejected" {
+		t.Fatalf("outcome = %q, want reconcile_rejected", outcome)
+	}
+	if !strings.Contains(critique, "TestHandlerRuntime") {
+		t.Errorf("critique should name the orphan function: %q", critique)
+	}
+	if n := countRows(t, d, `SELECT COUNT(*) FROM bead_revisions WHERE bead_id = ? AND revision_number > 1`, beadID); n != 0 {
+		t.Errorf("rejected fix must not be applied: %d new revisions", n)
+	}
+}

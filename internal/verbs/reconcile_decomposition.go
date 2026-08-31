@@ -117,8 +117,9 @@ func buildReconcileUserMsg(doc string, beads []beadState, history []debateRound,
 	var sb strings.Builder
 	if rejectFeedback != "" {
 		sb.WriteString("## Your Previous Fix Attempt Was Rejected\n\n")
-		sb.WriteString("Your last response introduced a bead-ordering violation that would make a bead ")
-		sb.WriteString("structurally unable to pass no matter how many times it is executed. Fix this in your new response:\n\n")
+		sb.WriteString("Your last response had a structural problem that would make a bead unable to pass ")
+		sb.WriteString("(a bead-ordering violation, an exit criterion inconsistent with its own bead, or a ")
+		sb.WriteString("required test function with no supporting prose). Fix this in your new response:\n\n")
 		sb.WriteString(rejectFeedback)
 		sb.WriteString("\n\n")
 	}
@@ -234,7 +235,17 @@ func (h *ReconcileDecomposition) Commit(ctx context.Context, tx *sql.Tx, job *db
 	// commit, so RECONCILE moving a file's ownership between beads without
 	// also fixing dispatch order previously went uncaught until AUDIT (or a
 	// real bead execution) discovered the symptom rounds later.
-	if violations := forwardFileReferenceChecks(mergeProposedBeads(h.lastBeads, out)); len(violations) > 0 {
+	// Source-side gate: bead ordering + exit-criteria/prose/output_files
+	// consistency (including the differential check that RECONCILE didn't add a
+	// required test function without prose for it — the exprvm-web bead-135
+	// TestHandlerRuntime orphan), checked against what the mechanical-repair
+	// pass would produce. Reject-and-retry via commitReject.
+	before := make(map[string]ParsedBead, len(h.lastBeads))
+	for _, b := range h.lastBeads {
+		before[b.Title] = ParsedBead{Title: b.Title, FullText: b.FullText, OutputFiles: b.OutputFiles, ExitCriteria: b.ExitCriteria}
+	}
+	lang := detectLang(h.folderPath, beadOutputFiles(h.lastBeads))
+	if violations := beadConsistencyViolations(lang, mergeProposedBeads(h.lastBeads, out), before); len(violations) > 0 {
 		return h.commitReject(ctx, tx, job, out, violations, now)
 	}
 
@@ -448,7 +459,8 @@ func (h *ReconcileDecomposition) commitReject(ctx context.Context, tx *sql.Tx, j
 		return err
 	}
 
-	critique := "Bead ordering violations in your proposed fix (structural, mechanically detected — not a model judgment call):\n- " +
+	critique := "Structural problems in your proposed fix (mechanically detected — not a model judgment call). " +
+		"Fix these and resubmit:\n- " +
 		strings.Join(violations, "\n- ")
 	reconciliationJSON, _ := json.Marshal(out)
 

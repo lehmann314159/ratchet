@@ -390,43 +390,61 @@ func goFixBeadSpec(bead *ParsedBead) bool {
 // fixFileBasedGoTest detects `go test ./foo_test.go [-run TestFoo]` and rewrites
 // to package form `go test [-run TestFoo] .`. Returns the rewritten criterion and
 // true if a rewrite occurred.
+//
+// Operates ONLY on the `&&`-separated clause that contains `go test`, never the
+// whole criterion — a leading `grep -q 'func TestX' foo_test.go` guard also
+// contains a `.go` token, and an earlier version of this function stripped it,
+// leaving a bare `grep -q 'func TestX'` that reads stdin and always fails. That
+// was masked by `fixBareGrepFile` re-adding a filename on the next pass (and
+// could re-point the guard at the wrong file when a bead owns >1 test file).
 func fixFileBasedGoTest(criterion string) (string, bool) {
 	if !strings.Contains(criterion, "go test") {
 		return criterion, false
 	}
-	// The compile-only form (go test -c) is never file-based and may be part of
-	// a compound criterion whose subsequent stages contain .go file paths (e.g.
-	// grep arguments). Skip it entirely to avoid stripping those paths.
-	if strings.Contains(criterion, "go test -c") {
-		return criterion, false
-	}
-	parts := strings.Fields(criterion)
-	var kept []string
-	removed := false
-	for _, p := range parts {
-		// Drop any .go file path argument (not a flag, ends with .go).
-		if !strings.HasPrefix(p, "-") && strings.HasSuffix(p, ".go") {
-			removed = true
+	clauses := strings.Split(criterion, "&&")
+	changed := false
+	for ci, clause := range clauses {
+		if !strings.Contains(clause, "go test") || strings.Contains(clause, "go test -c") {
+			// go test -c is a compile-only form, never file-based.
 			continue
 		}
-		kept = append(kept, p)
+		parts := strings.Fields(clause)
+		var kept []string
+		removed := false
+		for _, p := range parts {
+			// Drop a .go file path argument (not a flag, ends with .go).
+			if !strings.HasPrefix(p, "-") && strings.HasSuffix(p, ".go") {
+				removed = true
+				continue
+			}
+			kept = append(kept, p)
+		}
+		if !removed {
+			continue
+		}
+		hasSel := false
+		for _, p := range kept {
+			if p == "." || p == "./..." || (strings.HasPrefix(p, "./") && !strings.HasSuffix(p, ".go")) {
+				hasSel = true
+				break
+			}
+		}
+		if !hasSel {
+			kept = append(kept, ".")
+		}
+		// Preserve the original clause's surrounding spacing around " && ".
+		lead, trail := leadingSpace(clause), trailingSpace(clause)
+		clauses[ci] = lead + strings.Join(kept, " ") + trail
+		changed = true
 	}
-	if !removed {
+	if !changed {
 		return criterion, false
 	}
-	// Add "." as package selector if no selector is present.
-	hasSel := false
-	for _, p := range kept {
-		if p == "." || p == "./..." || (strings.HasPrefix(p, "./") && !strings.HasSuffix(p, ".go")) {
-			hasSel = true
-			break
-		}
-	}
-	if !hasSel {
-		kept = append(kept, ".")
-	}
-	return strings.Join(kept, " "), true
+	return strings.Join(clauses, "&&"), true
 }
+
+func leadingSpace(s string) string  { return s[:len(s)-len(strings.TrimLeft(s, " \t"))] }
+func trailingSpace(s string) string { return s[len(strings.TrimRight(s, " \t")):] }
 
 // addGrepGuard prepends `grep -q 'func TestFoo' file_test.go && ` to a go test
 // criterion that targets a single simple test function name via -run. This makes
@@ -616,36 +634,30 @@ func hasNamedFile(files []string, name string) bool {
 	return false
 }
 
-// parseBareGrep checks whether an " && "-split criterion subcommand is a
-// `grep -q 'PATTERN'` (optionally negated with a leading "! ") that has no
-// filename argument yet — a filename is absent when nothing follows the
-// closing quote, or when only a shell connective (&&, ||, |) follows.
-// Returns the pattern text, whether it was negated, and whether it matched.
-func parseBareGrep(part string) (pattern string, negated bool, ok bool) {
+// parseGrepClause parses an " && "-split subcommand that is a `grep -q 'PATTERN'`
+// (optionally negated with a leading "! "), whether or not it already has a
+// file argument. file is "" for a bare clause. ok is false if the subcommand is
+// not a grep -q at all.
+func parseGrepClause(part string) (pattern string, negated bool, file string, ok bool) {
 	const grepPrefix = "grep -q '"
-	const negationPrefix = "! "
-	negated = strings.HasPrefix(part, negationPrefix)
-	body := part
-	if negated {
-		body = strings.TrimPrefix(part, negationPrefix)
-	}
+	part = strings.TrimSpace(part)
+	negated = strings.HasPrefix(part, "! ")
+	body := strings.TrimPrefix(part, "! ")
 	if !strings.HasPrefix(body, grepPrefix) {
-		return "", false, false
+		return "", false, "", false
 	}
 	after := body[len(grepPrefix):]
 	closeIdx := strings.Index(after, "'")
 	if closeIdx < 0 {
-		return "", false, false
+		return "", false, "", false
 	}
 	pattern = after[:closeIdx]
-	afterClose := strings.TrimLeft(after[closeIdx+1:], " \t")
-	if afterClose != "" &&
-		!strings.HasPrefix(afterClose, "&&") &&
-		!strings.HasPrefix(afterClose, "||") &&
-		!strings.HasPrefix(afterClose, "|") {
-		return "", false, false // already has a filename argument
+	rest := strings.TrimSpace(after[closeIdx+1:])
+	// A shell connective means no file; otherwise the first token is the file.
+	if rest != "" && !strings.HasPrefix(rest, "&&") && !strings.HasPrefix(rest, "||") && !strings.HasPrefix(rest, "|") {
+		file = strings.Fields(rest)[0]
 	}
-	return pattern, negated, true
+	return pattern, negated, file, true
 }
 
 // fixBareGrepFile adds a filename argument to each `grep -q 'func Foo'`
@@ -681,15 +693,52 @@ func fixBareGrepFile(criterion string, outputFiles []string) (string, bool) {
 	parts := strings.Split(criterion, " && ")
 	fixed := false
 
-	negatedPatterns := map[string]bool{}
+	resolveFile := func(pattern, existing string) string {
+		if existing != "" {
+			return existing
+		}
+		funcName := strings.TrimPrefix(pattern, "func ")
+		if strings.HasPrefix(funcName, "Test") {
+			return testFileForName(funcName, outputFiles)
+		}
+		return firstSourceGoFile(outputFiles)
+	}
+
+	// Pass 1: give every bare grep clause a file argument.
+	for i, part := range parts {
+		pattern, negated, file, ok := parseGrepClause(part)
+		if !ok || file != "" {
+			continue
+		}
+		resolved := resolveFile(pattern, file)
+		if resolved == "" {
+			continue
+		}
+		newBody := "grep -q '" + pattern + "' " + resolved
+		if negated {
+			newBody = "! " + newBody
+		}
+		parts[i] = newBody
+		fixed = true
+	}
+
+	// Pass 2: collapse a positive/negated pair that share the identical pattern
+	// AND the same file — "PATTERN present in F and absent from F" is always
+	// unsatisfiable. The natural way a model expresses "move this assertion out
+	// of F" (checkers-try-1 bead 684). Keep the negated half. This must compare
+	// resolved files, not just bare-ness — the old version only caught bare/bare
+	// pairs and silently relied on fixFileBasedGoTest incidentally stripping the
+	// positive clause's file to make it bare.
+	type key struct{ pattern, file string }
+	negatedKeys := map[key]bool{}
 	for _, part := range parts {
-		if pattern, negated, ok := parseBareGrep(part); ok && negated {
-			negatedPatterns[pattern] = true
+		if pattern, negated, file, ok := parseGrepClause(part); ok && negated {
+			negatedKeys[key{pattern, file}] = true
 		}
 	}
 	deduped := parts[:0]
 	for _, part := range parts {
-		if pattern, negated, ok := parseBareGrep(part); ok && !negated && negatedPatterns[pattern] {
+		if pattern, negated, file, ok := parseGrepClause(part); ok && !negated && negatedKeys[key{pattern, file}] {
 			fixed = true
 			continue
 		}
@@ -697,28 +746,6 @@ func fixBareGrepFile(criterion string, outputFiles []string) (string, bool) {
 	}
 	parts = deduped
 
-	for i, part := range parts {
-		pattern, negated, ok := parseBareGrep(part)
-		if !ok {
-			continue
-		}
-		funcName := strings.TrimPrefix(pattern, "func ")
-		var file string
-		if strings.HasPrefix(funcName, "Test") {
-			file = testFileForName(funcName, outputFiles)
-		} else {
-			file = firstSourceGoFile(outputFiles)
-		}
-		if file == "" {
-			continue
-		}
-		newBody := "grep -q '" + pattern + "' " + file
-		if negated {
-			newBody = "! " + newBody
-		}
-		parts[i] = newBody
-		fixed = true
-	}
 	if !fixed {
 		return criterion, false
 	}
@@ -756,7 +783,7 @@ func stripAPICheckFileContentChecks(criterion string) (string, bool) {
 
 // grepPatternRe matches a `grep -q '...'` pattern body regardless of what
 // precedes it (bare, negated, or already carrying a trailing filename) —
-// unlike parseBareGrep, which only recognizes the fileless form. Assumes the
+// unlike parseGrepClause, which is line-oriented rather than regex. Assumes the
 // pattern itself never contains a literal single quote, consistent with
 // every other grep-pattern helper in this file.
 var grepPatternRe = regexp.MustCompile(`grep -q '([^']*)'`)
@@ -948,4 +975,172 @@ func injectDecompositionNotesPin(bead *ParsedBead, pins map[string]string) bool 
 	}
 	bead.FullText = canonical
 	return true
+}
+
+// --- exit-criteria ↔ prose ↔ output_files consistency (audit 2026-08-30) ---
+//
+// applyMechanicalBeadFixes repairs the syntactically-broken subset of these
+// invariants after the fact. The two functions below are *source-side* checks:
+// they return human-readable violations so DECOMPOSE / RECONCILE / ADJUDICATE
+// can reject a bead they just emitted and retry, rather than shipping an
+// inconsistent bead downstream where REFINE_TESTS silently works around it (or
+// doesn't). Structural only — every check is string/regex-decidable, no model
+// judgment. Confirmed live: exprvm-web-v4/v5 bead 135/144, where RECONCILE
+// consolidated two exit criteria into one `-run 'TestA TestB'` (zero tests) and
+// invented a required function `TestHandlerRuntime` with no prose to support it.
+
+// runFlagValueRe captures a `-run` flag's value: an unquoted token, or the
+// contents of a single/double-quoted string. Group 1 = unquoted, group 2/3 =
+// quoted contents.
+var runFlagValueRe = regexp.MustCompile(`-run(?:=|\s+)(?:'([^']*)'|"([^"]*)"|(\S+))`)
+
+// extractRunNames returns every top-level test-function name referenced by any
+// `-run` flag in criterion. It splits an alternation (`A|B`) into individual
+// names, strips anchor fragments (`^`, `$`), and takes only the top-level
+// function name from a subtest path (`TestFoo/case` -> "TestFoo"). It does NOT
+// split on spaces: a `-run` value with a space is a separate defect that
+// checkBeadCriteriaConsistency's I6-residual check reports, and a legitimate
+// subtest path can contain a space (`-run 'TestFoo/two words'`). A segment
+// containing a space therefore yields no name here.
+func extractRunNames(criterion string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range runFlagValueRe.FindAllStringSubmatch(criterion, -1) {
+		val := m[1] + m[2] + m[3] // exactly one group is non-empty
+		for _, seg := range strings.Split(val, "|") {
+			seg = strings.Trim(seg, "^$()")
+			if i := strings.IndexByte(seg, '/'); i >= 0 {
+				seg = seg[:i]
+			}
+			seg = strings.TrimSpace(seg)
+			if seg == "" || strings.ContainsAny(seg, " \t") {
+				continue
+			}
+			if !seen[seg] {
+				seen[seg] = true
+				out = append(out, seg)
+			}
+		}
+	}
+	return out
+}
+
+// grepGuardFileRe captures a `grep -q 'func TestX' <file>` guard's function name
+// (group 1) and file argument (group 2). The file is optional (a bare guard has
+// none — fixBareGrepFile handles that separately).
+var grepGuardFileRe = regexp.MustCompile(`grep\s+-q\s+['"]func\s+(Test\w+)['"](?:\s+(\S+\.go))?`)
+
+// checkBeadCriteriaConsistency returns violations for beads whose exit_criteria
+// are internally inconsistent or inconsistent with output_files, in ways a
+// model retry can fix.
+func checkBeadCriteriaConsistency(beads []ParsedBead) []string {
+	var violations []string
+	for _, b := range beads {
+		ownedTestFiles := map[string]bool{}
+		for _, f := range b.OutputFiles {
+			if strings.HasSuffix(f, "_test.go") {
+				ownedTestFiles[filepath.Base(f)] = true
+			}
+		}
+		guardedFuncs := map[string]bool{}
+		for _, name := range extractRequiredTestFuncs(b.ExitCriteria) {
+			guardedFuncs[name] = true
+		}
+
+		for _, c := range b.ExitCriteria {
+			// I7: every grep -q 'func TestX' <file> names a *_test.go this bead owns.
+			for _, m := range grepGuardFileRe.FindAllStringSubmatch(c, -1) {
+				file := m[2]
+				if file == "" {
+					continue // bare guard — fixBareGrepFile's problem
+				}
+				if strings.HasSuffix(file, "_test.go") && !ownedTestFiles[filepath.Base(file)] {
+					violations = append(violations, fmt.Sprintf(
+						"bead %q: exit criterion greps %q for a test function, but that file is not in this bead's output_files %v",
+						b.Title, file, b.OutputFiles))
+				}
+			}
+			// I6-residual: a -run value fixRunFlagSeparator could not normalize
+			// (a space remained because a token was not a plain TestXxx name).
+			for _, m := range runFlagValueRe.FindAllStringSubmatch(c, -1) {
+				val := m[1] + m[2] + m[3]
+				if strings.Contains(val, " ") {
+					violations = append(violations, fmt.Sprintf(
+						"bead %q: exit criterion has `-run %q` — `go test -run` takes a Go regexp; "+
+							"separate multiple test names with `|`, not a space", b.Title, val))
+				}
+			}
+			// I18: every -run name is established as a real required function —
+			// by a grep guard (anywhere in this bead's criteria) or by the prose.
+			for _, name := range extractRunNames(c) {
+				if guardedFuncs[name] || strings.Contains(b.FullText, name) {
+					continue
+				}
+				violations = append(violations, fmt.Sprintf(
+					"bead %q: exit criterion runs `-run %s` but nothing establishes %s as a required test "+
+						"function for this bead — no `grep -q 'func %s'` guard and no mention in the bead prose",
+					b.Title, name, name, name))
+			}
+		}
+	}
+	return violations
+}
+
+// checkAddedRequiredFuncsHaveProse returns a violation for every test function
+// that `after`'s exit_criteria newly require (versus `before`) but that
+// `after.FullText` does not describe. This is the precise shape of the
+// exprvm-web bead-135 orphan: RECONCILE replaced a curl check with a
+// `grep -q 'func TestHandlerRuntime'` criterion and never added prose telling
+// REFINE_TESTS what that function should test, so the model dropped it under
+// turn pressure. Differential, so it never fires on a bead whose required
+// functions are stable from DECOMPOSE.
+func checkAddedRequiredFuncsHaveProse(before, after ParsedBead) []string {
+	had := map[string]bool{}
+	for _, n := range extractRequiredTestFuncs(before.ExitCriteria) {
+		had[n] = true
+	}
+	var violations []string
+	for _, n := range extractRequiredTestFuncs(after.ExitCriteria) {
+		if had[n] || strings.Contains(after.FullText, n) {
+			continue
+		}
+		violations = append(violations, fmt.Sprintf(
+			"bead %q: your change adds a new required test function %s to the exit criteria, but the bead "+
+				"prose does not describe it — add a sentence stating what %s must test, or do not add the criterion",
+			after.Title, n, n))
+	}
+	return violations
+}
+
+// clonePB returns a deep copy of b (the two string slices are the only
+// reference fields), so a caller can run applyMechanicalBeadFixes on the copy
+// without mutating the model's original output.
+func clonePB(b ParsedBead) ParsedBead {
+	b.OutputFiles = append([]string(nil), b.OutputFiles...)
+	b.ExitCriteria = append([]string(nil), b.ExitCriteria...)
+	return b
+}
+
+// beadConsistencyViolations is the single source-side gate DECOMPOSE / RECONCILE
+// / ADJUDICATE call before committing a bead they just emitted. It runs the
+// mechanical-repair pass on copies of the proposed beads, then returns every
+// consistency violation that survives repair — so the verb can reject-and-retry
+// rather than shipping an inconsistent bead. `before` maps bead title to its
+// prior stored spec, for the differential added-required-function check; pass
+// nil when there is no prior state (DECOMPOSE).
+func beadConsistencyViolations(lang string, proposed []ParsedBead, before map[string]ParsedBead) []string {
+	repaired := make([]ParsedBead, len(proposed))
+	for i, b := range proposed {
+		repaired[i] = clonePB(b)
+		applyMechanicalBeadFixes(lang, &repaired[i])
+	}
+	var v []string
+	v = append(v, forwardFileReferenceChecks(repaired)...)
+	v = append(v, checkBeadCriteriaConsistency(repaired)...)
+	for _, r := range repaired {
+		if b, ok := before[r.Title]; ok {
+			v = append(v, checkAddedRequiredFuncsHaveProse(b, r)...)
+		}
+	}
+	return v
 }

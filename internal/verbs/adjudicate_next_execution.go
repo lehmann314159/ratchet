@@ -726,6 +726,12 @@ type AdjudicateNextExecution struct {
 	// check already computed above it.
 	forcedReRefineNames []string
 	forcedReRefineText  map[string]string
+
+	// currentBeadSpec caches the pre-revision bead spec (from Run) so Commit's
+	// execute_revised path can diff a revised_bead against it — checking the
+	// revised spec is internally consistent and that ADJUDICATE didn't invent a
+	// new required test function (which is re_refine's job, not execute_revised's).
+	currentBeadSpec ParsedBead
 }
 
 func (h *AdjudicateNextExecution) Verb() string { return db.VerbAdjudicateNextExecution }
@@ -750,6 +756,10 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 	}
 	if currentBead == nil {
 		return "", fmt.Errorf("bead %d not found in project %d", beadID, job.ProjectID)
+	}
+	h.currentBeadSpec = ParsedBead{
+		Title: currentBead.Title, FullText: currentBead.FullText,
+		OutputFiles: currentBead.OutputFiles, ExitCriteria: currentBead.ExitCriteria,
 	}
 
 	// Input 2: revision log.
@@ -1199,10 +1209,29 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 		// Apply language-specific structural fixes to the revised spec before
 		// storing it, catching the same class of errors that DECOMPOSE and
 		// RECONCILE fix at decomposition time (e.g. go test without a test file).
-		applyMechanicalBeadFixes(
-			detectLang(h.folderPath, out.RevisedBead.OutputFiles),
-			out.RevisedBead,
-		)
+		lang := detectLang(h.folderPath, out.RevisedBead.OutputFiles)
+		applyMechanicalBeadFixes(lang, out.RevisedBead)
+
+		// Source-side gate: don't commit a revised spec that is internally
+		// inconsistent (an orphan -run name, a grep guard for a file the bead
+		// doesn't own) or that invents a new required test function — inventing
+		// a test function is re_refine's job, not execute_revised's. On a
+		// violation, downgrade to execute_as_is: retry the bead against its
+		// current, unmodified spec rather than a broken revision.
+		if v := beadConsistencyViolations(lang, []ParsedBead{*out.RevisedBead},
+			map[string]ParsedBead{h.currentBeadSpec.Title: h.currentBeadSpec}); len(v) > 0 {
+			slog.Warn("ADJUDICATE execute_revised downgraded to execute_as_is — revised spec failed consistency checks",
+				"bead_id", beadID, "violations", v)
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE beads SET status = 'pending' WHERE id = ?`, beadID); err != nil {
+				return fmt.Errorf("reset bead to pending: %w", err)
+			}
+			_, err := tx.ExecContext(ctx, `
+				INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
+				VALUES (?, ?, ?, 'pending', ?, ?)`,
+				job.ProjectID, db.VerbExecuteBead, beadID, now, now)
+			return err
+		}
 
 		fullText, _ := json.Marshal(out.RevisedBead)
 		res, err := tx.ExecContext(ctx, `

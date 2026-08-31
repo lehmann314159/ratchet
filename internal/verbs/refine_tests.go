@@ -196,7 +196,6 @@ func runGoSnippet(ctx context.Context, src string) (output string, err error) {
 	return result, nil
 }
 
-
 func cycleID(job *db.HandoffJob) int64 {
 	if job.RefinementCycleID.Valid {
 		return job.RefinementCycleID.Int64
@@ -655,6 +654,38 @@ func (h *RefineTestsWrite) Commit(ctx context.Context, tx *sql.Tx, job *db.Hando
 		_, err := tx.ExecContext(ctx,
 			`UPDATE handoff_jobs SET status = 'escalated', updated_at = ? WHERE id = ?`, now, job.ID)
 		return err
+	}
+
+	// Hard completeness gate: every test function the exit criteria require
+	// (`grep -q 'func TestX'`) must actually be in the test file. The write
+	// loop's in-turn nag is soft — it stops nagging on the last turn and
+	// finalizes an incomplete file, which CRITIQUE/JUDGE then rubber-stamp and
+	// EXECUTE thrashes on for ~1h before the grep guard fails. Escalate here
+	// instead, with a specific message. (exprvm-web bead 144: TestHandlerRuntime.)
+	var beadFullText string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT br.full_text FROM beads b JOIN bead_revisions br ON br.id = b.current_revision_id
+		WHERE b.id = ?`, beadID).Scan(&beadFullText); err == nil {
+		var spec ParsedBead
+		if json.Unmarshal([]byte(beadFullText), &spec) == nil {
+			required := extractRequiredTestFuncs(spec.ExitCriteria)
+			var testPath string
+			for _, f := range spec.OutputFiles {
+				if strings.HasSuffix(f, "_test.go") && filepath.Base(f) != apiCheckTestFilename {
+					testPath = filepath.Join(folderPath, f)
+					break
+				}
+			}
+			if testPath != "" {
+				if missing := missingRequiredFuncs(testPath, required); len(missing) > 0 {
+					slog.Error("REFINE_TESTS_WRITE: required test functions still missing after all attempts — escalating",
+						"bead_id", beadID, "cycle_id", cid, "missing", missing)
+					_, err := tx.ExecContext(ctx,
+						`UPDATE handoff_jobs SET status = 'escalated', updated_at = ? WHERE id = ?`, now, job.ID)
+					return err
+				}
+			}
+		}
 	}
 
 	// Enqueue CRITIQUE for this cycle.

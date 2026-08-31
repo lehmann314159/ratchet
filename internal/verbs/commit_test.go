@@ -836,3 +836,97 @@ func TestAdjudicateNextExecutionCommitFullStopPartial(t *testing.T) {
 		t.Errorf("B02 status = %q, want full_stopped (cascade)", b2Status)
 	}
 }
+
+// TestDecomposeSpecCommitRejectsInconsistentCriteria: DECOMPOSE emits a bead
+// whose grep guard names a *_test.go file the bead does not own — a criterion
+// that can never pass because that file will not exist. Commit must
+// redecompose rather than write the bead. (An orphan bare `-run TestX` name is
+// instead auto-repaired by addGrepGuard, so this targets the residue A catches
+// after the mechanical-repair pass.)
+func TestDecomposeSpecCommitRejectsInconsistentCriteria(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "fixture: DECOMPOSE rejects an inconsistent exit criterion")
+	job := seedJob(t, d, -1, db.VerbDecomposeSpec, sql.NullInt64{})
+
+	out := DecomposeSpecOutput{
+		Beads: []ParsedBead{{
+			Title: "handlers", FullText: "Implement HandleIndex. Cover it with TestHandleIndex.",
+			ExecutionBudget: 300, MonitorOverride: "honor",
+			OutputFiles:  []string{"handlers.go", "handlers_test.go"},
+			ExitCriteria: []string{"grep -q 'func TestHandleIndex' other_test.go && go test -run TestHandleIndex ./..."},
+		}},
+	}
+	inTx(t, d, func(tx *sql.Tx) error {
+		return (&DecomposeSpec{folderPath: "/tmp"}).Commit(ctx, tx, job, out)
+	})
+
+	var outcome string
+	if err := d.QueryRowContext(ctx,
+		`SELECT outcome FROM audit_reconcile_rounds WHERE project_id = -1 ORDER BY id DESC LIMIT 1`,
+	).Scan(&outcome); err != nil {
+		t.Fatalf("expected a redecompose row: %v", err)
+	}
+	if outcome != "redecompose" {
+		t.Errorf("outcome = %q, want redecompose", outcome)
+	}
+	if n := countRows(t, d, `SELECT COUNT(*) FROM beads WHERE project_id = -1`); n != 0 {
+		t.Errorf("no bead should be written on a rejected decomposition, got %d", n)
+	}
+}
+
+// TestAdjudicateExecuteRevisedDowngradesOnInventedTestFunc: ADJUDICATE's
+// execute_revised must not invent a new required test function — adding a test
+// is re_refine's job (the test files are locked during EXECUTE). When the
+// revised_bead does it anyway, Commit downgrades to execute_as_is: the bead
+// retries against its current spec, no broken revision is written.
+func TestAdjudicateExecuteRevisedDowngradesOnInventedTestFunc(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "fixture: ADJUDICATE execute_revised downgrade")
+	beadID, revID := seedBead(t, d, -1, "handlers")
+	zero := 0
+	seedExecution(t, d, -1, beadID, revID, "success", &zero)
+
+	job := seedJob(t, d, -1, db.VerbAdjudicateNextExecution, sql.NullInt64{Int64: beadID, Valid: true})
+	h := &AdjudicateNextExecution{
+		folderPath: "/tmp",
+		currentBeadSpec: ParsedBead{
+			Title:        "handlers",
+			FullText:     "Implement HandleIndex.",
+			OutputFiles:  []string{"handlers.go", "handlers_test.go"},
+			ExitCriteria: []string{"grep -q 'func TestHandleIndex' handlers_test.go && go test -run TestHandleIndex ./..."},
+		},
+	}
+	out := AdjudicateNextExecutionOutput{
+		Trend: "same", BeadSpecFit: "execution_capability_problem",
+		Reasoning: "add an integration test",
+		Decision:  "execute_revised",
+		RevisedBead: &ParsedBead{
+			Title: "handlers", FullText: "Implement HandleIndex.", // no prose for the new function
+			ExecutionBudget: 300, MonitorOverride: "honor",
+			OutputFiles: []string{"handlers.go", "handlers_test.go"},
+			ExitCriteria: []string{
+				"grep -q 'func TestHandleIndex' handlers_test.go && go test -run TestHandleIndex ./...",
+				"grep -q 'func TestHandlersIntegration' handlers_test.go && go test -run TestHandlersIntegration ./...",
+			},
+		},
+	}
+	inTx(t, d, func(tx *sql.Tx) error { return h.Commit(ctx, tx, job, out) })
+
+	// No new revision — the broken revised spec must not be stored.
+	if n := countRows(t, d, `SELECT COUNT(*) FROM bead_revisions WHERE bead_id = ? AND revision_number > 1`, beadID); n != 0 {
+		t.Errorf("bead_revisions beyond rev1 = %d, want 0 (downgraded to execute_as_is)", n)
+	}
+	// Bead reset to pending + EXECUTE_BEAD enqueued (execute_as_is behavior).
+	var status string
+	if err := d.QueryRowContext(ctx, `SELECT status FROM beads WHERE id = ?`, beadID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" {
+		t.Errorf("bead status = %q, want pending", status)
+	}
+	if n := countRows(t, d, `SELECT COUNT(*) FROM handoff_jobs WHERE verb = ? AND bead_id = ? AND status = 'pending'`, db.VerbExecuteBead, beadID); n != 1 {
+		t.Errorf("pending EXECUTE_BEAD jobs = %d, want 1", n)
+	}
+}
