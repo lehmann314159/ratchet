@@ -177,9 +177,9 @@ type RefineTestsFile struct {
 // Files are written via write_file tool calls during Run(); only the summary
 // is returned as structured output.
 type RefineTestsWriteOutput struct {
-	// Reasoning: schema-mode chain-of-thought (docs/schema-mode-reasoning-field.md).
-	Reasoning string `json:"reasoning,omitempty"`
-	Summary   string `json:"summary"`
+	// NOT schema-mode — REFINE_TESTS_WRITE is tool-primary (write_function);
+	// a reasoning field let the model skip the tool calls. See its Run.
+	Summary string `json:"summary"`
 }
 
 // RefineTestsCritiqueOutput is the output of REFINE_TESTS_CRITIQUE.

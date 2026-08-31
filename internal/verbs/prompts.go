@@ -459,11 +459,11 @@ Rules:
 - Unicode characters in string literals: use Go escape sequences (♙, ♚, etc.) or copy the literal character directly — never use angle-bracket hex notation like <0xE2><0x99><0x99>. That notation is not valid Go and the literal string will never appear in HTML output.
 - Checking for an HTML/CSS attribute value (e.g. a class): elements commonly carry more than one space-separated token (e.g. class="intersection empty"). Never assert an exact full attribute value unless you can see the complete literal markup that produces it. To check that one token is present among possibly several, match on the token with a boundary that tolerates trailing content (e.g. class="intersection followed by a space, or a plain substring check on the token name) — not a string that closes the quote immediately after the token.
 
-After all write_function calls, respond with a single JSON object, no prose
-before or after. The FIRST field is "reasoning": work through which test
-functions the bead spec and design-doc excerpts require and what each must
-assert. Then "summary": one sentence describing what you wrote or corrected.
-{"reasoning": "<your working-through>", "summary": "<one sentence>"}`
+After all write_function calls, respond with JSON only, no prose before or
+after: {"summary": "<one sentence describing what you wrote or corrected>"}.
+Do NOT respond with this object until you have actually called write_function
+for every test function you were asked to produce — the summary is a report of
+completed work, not a plan.`
 
 const refineTestsCritiqueSystemPrompt = `You are a Go test file reviewer. Your sole job is to identify correctness problems — not to fix them.
 

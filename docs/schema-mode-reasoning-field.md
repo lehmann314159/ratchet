@@ -202,7 +202,7 @@ first; add the column only if it's needed for querying.
 | ANALYZE_EXECUTION | `AnalyzeExecutionOutput` | low (2 strings) | |
 | COMPRESS_ANALYSIS | `CompressAnalysisOutput` | low | on mistral (not a reasoning model) — low priority |
 | REVISE_PENDING | `RevisePendingOutput` | medium | |
-| REFINE_TESTS_WRITE | `RefineTestsWriteOutput` | medium | |
+| REFINE_TESTS_WRITE | `RefineTestsWriteOutput` | — | **NOT schema-mode.** Tool-primary (write_function); a reasoning-first schema let the model emit a plan + completion claim without calling the tool (project 36 bead 203, 2026-08-31). Stays on bare "json". |
 | REFINE_TESTS_CRITIQUE | `RefineTestsCritiqueOutput` | medium (findings) | reasoning-heavy — CoT win |
 | REFINE_TESTS_JUDGE | `RefineTestsJudgeOutput` | medium | prior missing-`summary` bug (cf#15260 note in code) — schema `required` fixes that too |
 | ADJUDICATE_NEXT_EXECUTION | `AdjudicateNextExecutionOutput` | **high** (decision + optional revised bead) + tool loop | uses `ChatWithTools`; do last |
@@ -295,8 +295,20 @@ REFINE_TESTS_WRITE/JUDGE) + the maxLength cap. ✅ CODE DONE + committed af5f199
   analyzer_interpretation}` — `mechanical_findings` is computed in Run.
 - `RefineTestsJudgeSchema` replaces the flat `refineTestsJudgeFormatSchema`.
   WRITE + JUDGE ride the ChatWithTools loop like CRITIQUE.
-- 11 new tests, full suite green. LIVE VALIDATION not yet run (deploy + a
-  cascade run past the pause, ideally through a bead so REFINE_WRITE/JUDGE fire).
+- 11 new tests, full suite green.
+- **LIVE VALIDATION (project 36, default fleet) — found a regression, fixed:**
+  SURVEY 3.3 min (was ~12 — schema-mode sped it up again), CERTIFY / DECOMPOSE /
+  AUDIT all clean first-try. **REFINE_TESTS_WRITE escalated** — gemma4:31b emitted
+  its plan as `reasoning` + a summary claiming completion and never called
+  `write_function`; the completeness gate escalated on the missing TestLexer.
+  Root cause: a reasoning-first schema on a **tool-primary** verb gives the
+  model a grammar-legal way to declare victory without doing the work.
+  Fix: REFINE_TESTS_WRITE reverted to bare "json" + a prompt line forbidding
+  the summary until write_function has actually been called. CRITIQUE and JUDGE
+  keep schema-mode — they have a real structured decision AND a run_go_snippet
+  gate (JUDGE's is hard: Run errors if it's never called) — but watch them in
+  the re-run. **Principle: schema-mode is for verbs whose output IS a structured
+  decision, not verbs whose output is tool calls.**
 
 **Phase 4 — ADJUDICATE** (`ChatWithTools` + schema; the tool loop makes this
 the fiddliest — the final turn's content must match the schema while

@@ -346,8 +346,13 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 			break
 		}
 
-		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{writeFunctionTool, runGoSnippetCaseTool},
-			&ollama.Options{Format: RefineTestsWriteSchema, Think: disableThink()}, nil)
+		// NOT schema-mode: REFINE_TESTS_WRITE's real output is the write_function
+		// tool calls, not a structured field. A reasoning-first schema on every
+		// turn let the model emit its plan as `reasoning` + a summary claiming
+		// completion and never call write_function — the completeness gate then
+		// escalated on the missing test function (project 36 bead 203, 2026-08-31).
+		// Tool-primary verbs stay on bare "json".
+		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{writeFunctionTool, runGoSnippetCaseTool}, nil, nil)
 		if toolErr != nil {
 			return "", toolErr
 		}
@@ -627,7 +632,6 @@ func (h *RefineTestsWrite) Validate(rawOutput string) (string, any) {
 	if strings.TrimSpace(out.Summary) == "" {
 		return "malformed: summary is empty", nil
 	}
-	logSchemaReasoning(db.VerbRefineTestsWrite, out.Reasoning)
 	return "valid", out
 }
 

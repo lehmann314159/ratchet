@@ -298,17 +298,10 @@ var RevisePendingSchema = orderedObject{
 	{"required", []string{"reasoning", "revisions"}},
 }
 
-// RefineTestsWriteSchema — schema-mode for REFINE_TESTS_WRITE. Test files are
-// written via write_function tool calls; only summary is structured output.
-var RefineTestsWriteSchema = orderedObject{
-	{"type", "object"},
-	{"properties", orderedObject{
-		reasoningProperty("Work through which test functions the bead spec and design-doc excerpts " +
-			"require, and what each must assert, before you write them."),
-		{"summary", map[string]any{"type": "string"}},
-	}},
-	{"required", []string{"reasoning", "summary"}},
-}
+// REFINE_TESTS_WRITE is deliberately NOT schema-mode: its real output is the
+// write_function tool calls, and a reasoning-first schema on every turn let the
+// model emit a plan + a completion claim without ever calling write_function
+// (project 36 bead 203, 2026-08-31). Tool-primary verbs stay on bare "json".
 
 // RefineTestsJudgeSchema — schema-mode for REFINE_TESTS_JUDGE, replacing the
 // flat refineTestsJudgeFormatSchema. Only decision + summary are required;

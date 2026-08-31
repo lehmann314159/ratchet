@@ -18,7 +18,6 @@ func TestPhase3SchemasReasoningFirstAndCapped(t *testing.T) {
 		{"CERTIFY_MANIFEST", CertifyManifestSchema, "model_reasoning", "final_decision"},
 		{"ANALYZE_EXECUTION", AnalyzeExecutionSchema, "reasoning", "analyzer_interpretation"},
 		{"REVISE_PENDING", RevisePendingSchema, "reasoning", "revisions"},
-		{"REFINE_TESTS_WRITE", RefineTestsWriteSchema, "reasoning", "summary"},
 		{"REFINE_TESTS_JUDGE", RefineTestsJudgeSchema, "reasoning", "decision"},
 	}
 	for _, c := range cases {
