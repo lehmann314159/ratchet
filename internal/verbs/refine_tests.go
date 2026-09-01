@@ -388,6 +388,24 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 			summary = strings.TrimSpace(msg.Content)
 		}
 		if len(msg.ToolCalls) == 0 {
+			// An empty turn with a required test function still absent from disk
+			// means the model produced no write_function call at all — e.g. a
+			// thinking-stream runaway that hit the num_predict cap without ever
+			// emitting a tool call (gemma4:31b, bead 246, 2026-08-31). The
+			// per-case gate below is vacuous in that state (requiredCases is
+			// keyed off accepted writes, so it's empty → "nothing missing" →
+			// break after one turn), which is how that runaway escalated
+			// immediately instead of retrying. Re-prompt for the missing
+			// required functions and keep going; each turn is num_predict-bounded.
+			if stillMissing := missingRequiredFuncs(testPath, requiredFuncs); len(stillMissing) > 0 && turn < maxTurns {
+				slog.Warn("REFINE_TESTS_WRITE: empty turn, required functions still missing — re-prompting",
+					"bead_id", beadID, "turn", turn, "missing", stillMissing)
+				messages = append(messages, ollama.Message{Role: "user", Content: "You have not called " +
+					"write_function yet for: " + strings.Join(stillMissing, ", ") + ". Call write_function now — " +
+					"once per function, with the complete test body. Keep your reasoning brief; the write_function " +
+					"call is what matters, not a written-out plan."})
+				continue
+			}
 			missing := missingWriteCases(requiredCases, coveredCases)
 			if len(missing) == 0 || turn == maxTurns {
 				if len(missing) > 0 {
