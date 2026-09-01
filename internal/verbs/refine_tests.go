@@ -8,6 +8,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -304,6 +305,20 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		{Role: "user", Content: userMsg},
 	}
 
+	// Capture the raw model stream for this write cycle to a trace file so a
+	// pathological turn (a model that streams without ever stopping) can be
+	// inspected afterward. Best-effort: any failure here must not block
+	// refinement.
+	var streamTrace io.Writer
+	if tracesDir := filepath.Join(folderPath, "traces"); os.MkdirAll(tracesDir, 0o755) == nil {
+		if tf, terr := os.OpenFile(
+			filepath.Join(tracesDir, fmt.Sprintf("refine-write-bead-%d-cycle-%d.log", beadID, cid)),
+			os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); terr == nil {
+			defer tf.Close()
+			streamTrace = tf
+		}
+	}
+
 	// writtenFuncs collects accepted function bodies; funcOrder preserves
 	// insertion order for cycle-1 assembly (Go maps are unordered).
 	writtenFuncs := make(map[string]string)
@@ -352,7 +367,14 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		// completion and never call write_function — the completeness gate then
 		// escalated on the missing test function (project 36 bead 203, 2026-08-31).
 		// Tool-primary verbs stay on bare "json".
-		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{writeFunctionTool, runGoSnippetCaseTool}, nil, nil)
+		if streamTrace != nil {
+			fmt.Fprintf(streamTrace, "\n===== [cycle %d turn %d] %s =====\n", cid, turn, time.Now().Format(time.RFC3339))
+		}
+		// Thinking stays ON here despite bead 224's runaway (gemma4:31b, 2026-08-31):
+		// disableThink stopped the model using native tool-calling — it emitted a
+		// ReAct-style {"action":...} blob as content instead of a write_function
+		// call. The runaway is bounded instead by ChatWithTools's num_predict cap.
+		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{writeFunctionTool, runGoSnippetCaseTool}, nil, streamTrace)
 		if toolErr != nil {
 			return "", toolErr
 		}

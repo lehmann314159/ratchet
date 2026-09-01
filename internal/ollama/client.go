@@ -37,6 +37,40 @@ const (
 	MonitorNumCtx = 16384
 )
 
+// toolLoopNumPredict caps generated tokens per ChatWithTools turn. A tool-loop
+// turn's legitimate output is small — a tool call or two, or a short final JSON
+// answer, preceded by at most a few thousand tokens of reasoning (observed max
+// ~1,900 on this fleet). 8192 leaves generous headroom while bounding a
+// degenerate turn — specifically a reasoning model whose thinking stream never
+// terminates to call a tool (gemma4:31b on REFINE_TESTS_WRITE, exprvm-web-baseline
+// bead 224, 2026-08-31: 14.5K tokens and still climbing, wedging Ollama's single
+// slot for the full 60-minute client timeout). At the cap Ollama returns
+// done_reason:"length" and ends the turn cleanly, so the caller's loop proceeds
+// to its normal (eventually escalating) path instead of hanging. Callers that
+// legitimately need more can override via Options.NumPredict.
+const toolLoopNumPredict = 8192
+
+// streamProgressLogEvery is how many stream chunks ChatWithTools consumes
+// between "still in progress" log lines. At ~1 token/chunk and a large model's
+// ~9 tok/s that is roughly one line per minute — enough to make a runaway
+// generation (a model that streams steadily but never stops) visible while it
+// is happening, instead of only inferable after the client timeout fires many
+// minutes later.
+const streamProgressLogEvery = 500
+
+// logSnippetReplacer keeps a stream-tail sample on one log line while still
+// showing whitespace runaways (endless "\n" or "\t") rather than collapsing them.
+var logSnippetReplacer = strings.NewReplacer("\n", "\\n", "\r", "\\r", "\t", "\\t")
+
+// lastRunes returns up to the final n runes of s as a single-line log snippet.
+func lastRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) > n {
+		r = r[len(r)-n:]
+	}
+	return logSnippetReplacer.Replace(string(r))
+}
+
 type Client struct {
 	BaseURL    string
 	httpClient *http.Client
@@ -158,6 +192,10 @@ type Options struct {
 	// docs/schema-mode-reasoning-field.md). Schema-mode verbs pass
 	// Think: ptr(false) and carry their reasoning in a schema field instead.
 	Think *bool
+	// NumPredict overrides the per-request generated-token cap when positive.
+	// Zero means: ChatWithTools uses toolLoopNumPredict; Chat sets no cap
+	// (its runaway bound is the schema reasoning field's maxLength).
+	NumPredict int
 }
 
 type chatRequest struct {
@@ -237,6 +275,7 @@ func (c *Client) Warmup(ctx context.Context, model string) error {
 func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *Options) (string, error) {
 	temp := DefaultTemperature
 	numCtx := defaultNumCtx
+	numPredict := 0
 	var format any = "json"
 	var think *bool
 	if opts != nil {
@@ -246,19 +285,26 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 		if opts.NumCtx > 0 {
 			numCtx = opts.NumCtx
 		}
+		if opts.NumPredict > 0 {
+			numPredict = opts.NumPredict
+		}
 		if opts.Format != nil {
 			format = opts.Format
 		}
 		think = opts.Think
 	}
 
+	reqOptions := map[string]any{"temperature": temp, "num_ctx": numCtx}
+	if numPredict > 0 {
+		reqOptions["num_predict"] = numPredict
+	}
 	req := chatRequest{
 		Model:    model,
 		Messages: msgs,
 		Stream:   false,
 		Think:    think,
 		Format:   format,
-		Options:  map[string]any{"temperature": temp, "num_ctx": numCtx},
+		Options:  reqOptions,
 	}
 
 	body, err := json.Marshal(req)
@@ -321,6 +367,7 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message, tools []Tool, opts *Options, tokenWriter io.Writer) (Message, error) {
 	temp := DefaultTemperature
 	numCtx := defaultNumCtx
+	numPredict := toolLoopNumPredict
 	var format any = "json"
 	var think *bool
 	if opts != nil {
@@ -329,6 +376,9 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		}
 		if opts.NumCtx > 0 {
 			numCtx = opts.NumCtx
+		}
+		if opts.NumPredict > 0 {
+			numPredict = opts.NumPredict
 		}
 		if opts.Format != nil {
 			format = opts.Format
@@ -355,7 +405,11 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		// drops unknown option keys, so the previous `options: {"think": false}`
 		// here was a confirmed no-op. nil think == field omitted == model default,
 		// preserving historical behavior for callers that pass no Options.
-		Options: map[string]any{"temperature": temp, "num_ctx": numCtx},
+		//
+		// num_predict is always set here (default toolLoopNumPredict): a
+		// tool-loop turn should be short, and an uncapped one lets a degenerate
+		// reasoning stream run until the client timeout — see toolLoopNumPredict.
+		Options: map[string]any{"temperature": temp, "num_ctx": numCtx, "num_predict": numPredict},
 	}
 
 	body, err := json.Marshal(req)
@@ -397,6 +451,8 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 	var thinkingSB strings.Builder
 	var toolCalls []ToolCall
 	var doneReason string
+	chunks := 0
+	nextProgressLog := streamProgressLogEvery
 	dec := json.NewDecoder(resp.Body)
 	for {
 		// Check context before each decode so a cancelled budget timer unblocks
@@ -423,9 +479,25 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		}
 		if chunk.Message.Thinking != "" {
 			thinkingSB.WriteString(chunk.Message.Thinking)
+			// Tee thinking to the trace writer too. Without this, a model that
+			// runs away inside its thinking stream (never emitting content or a
+			// tool call) leaves no record of what it was doing — only a length
+			// count after the fact.
+			if tokenWriter != nil {
+				io.WriteString(tokenWriter, chunk.Message.Thinking)
+			}
 		}
 		if len(chunk.Message.ToolCalls) > 0 {
 			toolCalls = append(toolCalls, chunk.Message.ToolCalls...)
+		}
+		chunks++
+		if chunks >= nextProgressLog {
+			slog.Info("ChatWithTools: streaming still in progress",
+				"model", model, "chunks", chunks,
+				"content_chars", contentSB.Len(), "thinking_chars", thinkingSB.Len(),
+				"content_tail", lastRunes(contentSB.String(), 200),
+				"thinking_tail", lastRunes(thinkingSB.String(), 200))
+			nextProgressLog += streamProgressLogEvery
 		}
 		if chunk.Done {
 			doneReason = chunk.DoneReason

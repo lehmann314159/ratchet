@@ -394,6 +394,62 @@ func TestChatWithToolsThinkPlumbing(t *testing.T) {
 	}
 }
 
+// TestChatWithToolsCapsNumPredict: every ChatWithTools turn carries a
+// num_predict cap (default toolLoopNumPredict) so a degenerate turn can't run
+// until the client timeout; Options.NumPredict overrides it.
+func TestChatWithToolsCapsNumPredict(t *testing.T) {
+	capture := func(opts *Options) map[string]any {
+		var gotBody map[string]any
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			json.Unmarshal(body, &gotBody)
+			io.WriteString(w, `{"message":{"role":"assistant","content":"{}"},"done":true}`+"\n")
+		}))
+		defer srv.Close()
+		c := New(srv.URL)
+		if _, err := c.ChatWithTools(context.Background(), "m",
+			[]Message{{Role: "user", Content: "hi"}}, nil, opts, nil); err != nil {
+			t.Fatalf("ChatWithTools: %v", err)
+		}
+		o, _ := gotBody["options"].(map[string]any)
+		return o
+	}
+
+	if got := capture(nil)["num_predict"]; got != float64(toolLoopNumPredict) {
+		t.Errorf("default num_predict = %v, want %d", got, toolLoopNumPredict)
+	}
+	if got := capture(&Options{NumPredict: 2048})["num_predict"]; got != float64(2048) {
+		t.Errorf("overridden num_predict = %v, want 2048", got)
+	}
+}
+
+// TestChatOmitsNumPredictByDefault: the plain Chat() path sets no num_predict
+// unless a caller asks — its runaway bound is the schema reasoning maxLength.
+func TestChatOmitsNumPredictByDefault(t *testing.T) {
+	capture := func(opts *Options) map[string]any {
+		var gotBody map[string]any
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			json.Unmarshal(body, &gotBody)
+			w.Write([]byte(`{"message":{"role":"assistant","content":"{}"},"done":true}`))
+		}))
+		defer srv.Close()
+		c := New(srv.URL)
+		if _, err := c.Chat(context.Background(), "m", []Message{{Role: "user", Content: "hi"}}, opts); err != nil {
+			t.Fatalf("Chat: %v", err)
+		}
+		o, _ := gotBody["options"].(map[string]any)
+		return o
+	}
+
+	if _, present := capture(nil)["num_predict"]; present {
+		t.Errorf("Chat() sent num_predict with nil Options; want omitted")
+	}
+	if got := capture(&Options{NumPredict: 4096})["num_predict"]; got != float64(4096) {
+		t.Errorf("Chat() num_predict = %v, want 4096", got)
+	}
+}
+
 // TestChatDiscardsThinkingField: a response carrying a separated `thinking`
 // field must not break Chat() — it returns Content only, thinking is logged
 // and dropped.
@@ -440,5 +496,60 @@ func TestChatWithToolsCapturesThinking(t *testing.T) {
 	}
 	if msg.Thinking != "step one step two" {
 		t.Errorf("Thinking = %q, want the two chunks joined", msg.Thinking)
+	}
+}
+
+// TestChatWithToolsTeesThinkingToWriter: when a token writer is supplied, both
+// content and thinking chunks are streamed to it — so a model that runs away
+// inside its thinking stream still leaves a trace record.
+func TestChatWithToolsTeesThinkingToWriter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"message":{"role":"assistant","thinking":"pondering "}}`+"\n")
+		io.WriteString(w, `{"message":{"role":"assistant","thinking":"harder "}}`+"\n")
+		io.WriteString(w, `{"message":{"role":"assistant","content":"{\"ok\":1}"},"done":true}`+"\n")
+	}))
+	defer srv.Close()
+
+	var buf strings.Builder
+	c := New(srv.URL)
+	if _, err := c.ChatWithTools(context.Background(), "m",
+		[]Message{{Role: "user", Content: "hi"}}, nil, nil, &buf); err != nil {
+		t.Fatalf("ChatWithTools: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "pondering harder") {
+		t.Errorf("token writer missing thinking chunks; got %q", got)
+	}
+	if !strings.Contains(got, `{"ok":1}`) {
+		t.Errorf("token writer missing content; got %q", got)
+	}
+}
+
+// TestChatWithToolsLogsStreamProgress: a stream that runs long without
+// finishing emits periodic "still in progress" log lines with a tail sample,
+// so a runaway generation is visible while it happens.
+func TestChatWithToolsLogsStreamProgress(t *testing.T) {
+	buf := captureLogs(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fl, _ := w.(http.Flusher)
+		for i := 0; i < streamProgressLogEvery+5; i++ {
+			io.WriteString(w, `{"message":{"role":"assistant","thinking":"loop "}}`+"\n")
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+		io.WriteString(w, `{"message":{"role":"assistant","content":"{}"},"done":true}`+"\n")
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	if _, err := c.ChatWithTools(context.Background(), "m",
+		[]Message{{Role: "user", Content: "hi"}}, nil, nil, nil); err != nil {
+		t.Fatalf("ChatWithTools: %v", err)
+	}
+	if !strings.Contains(buf.String(), "streaming still in progress") {
+		t.Errorf("expected a stream-progress log line, got: %s", buf.String())
 	}
 }
