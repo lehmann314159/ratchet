@@ -106,6 +106,18 @@ All `.go` files use `package main` at the project root — no subdirectories.
 - `main.go` contains exactly: `var env *Environment`, `var history
   []HistoryEntry`, `var mu sync.Mutex`, `var templates *template.Template`,
   and `func main()`. Nothing else.
+- **Template package (both `main.go` and `templates.go`): `import
+  "html/template"`, never `text/template`.** `RenderIndex`/`RenderRepl` write
+  rendered HTML to an `http.ResponseWriter` and the transcript interpolates
+  user-submitted text (`Input`, `Err`, `Output`), so `html/template`'s
+  contextual auto-escaping is required for correctness, not a preference.
+  `html/template`'s package identifier is `template`, so every
+  `*template.Template` / `template.Must` / `template.New` reference below is
+  written unqualified as usual — but the import in both files must resolve to
+  `html/template`. A `text/template` import in either file is a bug: the two
+  packages' `*Template` types are not assignable to each other, so `templates
+  = InitTemplates()` in `main()` (or any test) will not compile if the files
+  disagree.
 - `lexer.go` contains: `Token`, `TokenType` and its constants, `NewLexer`,
   `(*Lexer).Next`. No parsing logic — never references `Program`, `Stmt`, or
   `Expr`.
@@ -303,6 +315,7 @@ func HandleIndex(w http.ResponseWriter, r *http.Request)
 func HandleEval(w http.ResponseWriter, r *http.Request)
 
 // ---- templates.go ----
+// import "html/template"  (NOT "text/template" — see File assignment rules)
 
 func InitTemplates() *template.Template
 func RenderIndex(w http.ResponseWriter, data PageData)
@@ -316,7 +329,7 @@ func RenderRepl(w http.ResponseWriter, data PageData)
 var env       *Environment
 var history   []HistoryEntry
 var mu        sync.Mutex
-var templates *template.Template
+var templates *template.Template   // import "html/template" (NOT "text/template")
 ```
 
 ### Export signatures
@@ -681,7 +694,9 @@ holds for every branch above, success or error alike — the fragment always
 reflects the just-updated `history`, including the newest entry's `Err` if
 it failed.
 
-**`InitTemplates() *template.Template`** — parses inline Go string literals
+**`InitTemplates() *template.Template`** — the returned type is
+`*html/template.Template` (`templates.go` imports `html/template`, whose
+package identifier is `template`). Parses inline Go string literals
 (no external `.html` files) defining exactly two named templates, `"repl"`
 and `"index"`. Must panic on a parse failure (mirrors every other fixture's
 `InitTemplates` convention).
@@ -984,7 +999,9 @@ dynamic renders outside it.**
    `HandleEval`, `InitTemplates`, `RenderIndex`. Calls beads 2, 3, 4, 5 in
    the fixed order specified in `HandleEval`'s Behavioral Specification. Must
    be decomposed last — its handler logic depends on the final signatures of
-   every other bead.
+   every other bead. `templates.go` must `import "html/template"` — the same
+   package `main.go` uses for `var templates *template.Template` (bead 7);
+   `text/template` here produces a type that will not assign to that variable.
 7. **cli** (main.go): wires everything together in `main()`. Decomposed
    after bead 6, since it references `HandleIndex`/`HandleEval`.
 
@@ -1010,6 +1027,16 @@ dynamic renders outside it.**
   "an error occurred" with "nothing was compiled" — only a `Compile` error
   means that; a `Run` error means compilation succeeded and `Bytecode` must
   be non-empty.
+- **Pin the template package to the `handlers-templates` and `cli` beads**:
+  both `templates.go` (`InitTemplates`, bead 6) and `main.go` (`var templates
+  *template.Template`, bead 7) must `import "html/template"`. `html/template`
+  is required for correctness — the templates render user-submitted text
+  (`Input`, `Err`, `Output`) into HTML and need contextual auto-escaping —
+  and the two files must agree: a `text/template` import in either one yields
+  a `*Template` type that will not assign to the other's, so `templates =
+  InitTemplates()` fails to compile. Neither bead's spec may leave the
+  template package unstated; both must name `html/template` explicitly. Do
+  not let REFINE_TESTS_WRITE or EXECUTE_BEAD pick a package by default.
 
 **Integration bead scenarios** (bounded — one fixed scenario each):
 - Using `httptest.NewServer`, `POST /eval` with `input=x=5` (assert HTTP 200,
