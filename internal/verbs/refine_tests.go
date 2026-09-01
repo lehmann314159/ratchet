@@ -67,6 +67,36 @@ func missingRequiredFuncs(testPath string, required []string) []string {
 	return missing
 }
 
+// compileErrLocRe strips the "./file.go:12:34: " (or "file.go:12:34: ")
+// location prefix from a Go compile-error line so the same underlying error
+// compares equal across turns even when its line/column shifts.
+var compileErrLocRe = regexp.MustCompile(`^\S+?:\d+:\d+:\s*`)
+
+// normalizeCompileErrors reduces `go build`/`go vet` output to a stable,
+// order-independent signature of the distinct error messages it contains —
+// dropping the "# package" header, per-line file:line:col prefixes, and the
+// "too many errors" truncation marker. An empty result means no recognizable
+// compile errors. Used to detect a REFINE_TESTS_WRITE turn loop stuck on the
+// same error (see the early-bail in Run).
+func normalizeCompileErrors(out string) string {
+	seen := map[string]bool{}
+	var msgs []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.Contains(line, "too many errors") {
+			continue
+		}
+		line = compileErrLocRe.ReplaceAllString(line, "")
+		if line == "" || seen[line] {
+			continue
+		}
+		seen[line] = true
+		msgs = append(msgs, line)
+	}
+	sort.Strings(msgs)
+	return strings.Join(msgs, "\n")
+}
+
 // refinementCycleCap is the maximum number of write-critique-judge cycles
 // per bead before escalating to the user.
 const refinementCycleCap = 5
@@ -346,6 +376,9 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	// CRITIQUE.
 	requiredCases := make(map[string][]string)
 	coveredCases := map[string]bool{}
+	// Tracks a turn loop stuck on an unchanging compile error — see the
+	// early-bail in the compile-failed branch below.
+	var prevCompileErrSig string
 	turn := 0
 	for {
 		turn++
@@ -501,6 +534,7 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 
 		ok, compileOut := runCompile(ctx, folderPath)
 		if ok {
+			prevCompileErrSig = ""
 			// Completeness check: verify all required Test* functions are present.
 			if missing := missingRequiredFuncs(testPath, requiredFuncs); len(missing) > 0 && turn < maxTurns {
 				slog.Warn("REFINE_TESTS_WRITE: compile passed but required functions missing",
@@ -532,6 +566,29 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 			continue
 		}
 		slog.Error("REFINE_TESTS_WRITE: compile failed", "bead_id", beadID, "turn", turn, "output", compileOut)
+
+		// Early-bail: if the same compile error survives consecutive turns despite
+		// fresh write_function attempts, the fix almost certainly needs a non-test
+		// source file this verb cannot touch — a conflicting type or import
+		// declaration in an implementation file, say. Detect the stall and stop;
+		// Commit still escalates on the non-compiling file, just far sooner and
+		// with a clearer signal than grinding every remaining turn identically
+		// (exprvm-web-baseline-3 bead 246, 2026-09-01: a text/template vs
+		// html/template mismatch between main.go and templates.go burned ~11
+		// turns / ~2h, every turn failing the same way). Gated past
+		// refinementWriteAttempts so genuine multi-error iteration isn't cut off.
+		sig := normalizeCompileErrors(compileOut)
+		if sig != "" && sig == prevCompileErrSig && turn >= refinementWriteAttempts {
+			slog.Error("REFINE_TESTS_WRITE: identical compile error across consecutive turns — "+
+				"fix likely requires a non-test source file; bailing early",
+				"bead_id", beadID, "turn", turn, "output", compileOut)
+			summary = "Compile could not be fixed from the test file: the same error persisted across " +
+				"consecutive rewrite attempts, which indicates the fix requires a change to a non-test " +
+				"source file (e.g. a conflicting type or import declaration). Last compile output:\n" + compileOut
+			break
+		}
+		prevCompileErrSig = sig
+
 		if turn < maxTurns {
 			messages = append(messages, ollama.Message{
 				Role:    "user",

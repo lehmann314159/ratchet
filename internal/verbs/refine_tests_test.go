@@ -239,6 +239,36 @@ func TestMissingWriteCases(t *testing.T) {
 	}
 }
 
+func TestNormalizeCompileErrors(t *testing.T) {
+	// Real captures from exprvm-web-baseline-3 bead 246 (2026-09-01): turn 4 had
+	// two errors, turn 5 had one — but the html/html-template mismatch is the same
+	// underlying error in both, and turn 6 repeated turn 5 verbatim. After
+	// normalization, turn 5 and turn 6 must produce an identical signature so the
+	// early-bail fires; turn 4 (a superset) must not.
+	turn4 := "# exprvm-web [exprvm-web.test]\n" +
+		"./handlers_test.go:17:7: cannot use &sync.Mutex{} (value of type *\"sync\".Mutex) as \"sync\".Mutex value in assignment\n" +
+		"./handlers_test.go:18:14: cannot use InitTemplates() (value of type *\"html/template\".Template) as *\"text/template\".Template value in assignment"
+	turn5 := "# exprvm-web [exprvm-web.test]\n" +
+		"./handlers_test.go:18:14: cannot use InitTemplates() (value of type *\"html/template\".Template) as *\"text/template\".Template value in assignment"
+	turn6 := "# exprvm-web [exprvm-web.test]\n" +
+		"./handlers_test.go:19:2: cannot use InitTemplates() (value of type *\"html/template\".Template) as *\"text/template\".Template value in assignment"
+
+	if got := normalizeCompileErrors(turn5); got != normalizeCompileErrors(turn6) {
+		t.Errorf("turn5 vs turn6 signatures differ despite same error at a moved line:\n%q\n%q", got, normalizeCompileErrors(turn5))
+	}
+	if normalizeCompileErrors(turn4) == normalizeCompileErrors(turn5) {
+		t.Error("turn4 (two errors) must not match turn5 (one error)")
+	}
+	if normalizeCompileErrors("") != "" || normalizeCompileErrors("# pkg\n") != "" {
+		t.Error("no error lines must normalize to empty")
+	}
+	// "too many errors" truncation marker is noise, not a distinct error.
+	withMarker := turn5 + "\n./handlers_test.go:18:14: too many errors"
+	if normalizeCompileErrors(withMarker) != normalizeCompileErrors(turn5) {
+		t.Error("'too many errors' marker must be ignored")
+	}
+}
+
 func TestMissingVerificationCases(t *testing.T) {
 	allCases := map[string][]string{
 		"TestHandlers": {"HandleIndex", "HandleEval_Success", "HandleEval_CompileError"},
