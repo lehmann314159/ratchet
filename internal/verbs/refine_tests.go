@@ -361,12 +361,18 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 			break
 		}
 
-		// NOT schema-mode: REFINE_TESTS_WRITE's real output is the write_function
-		// tool calls, not a structured field. A reasoning-first schema on every
-		// turn let the model emit its plan as `reasoning` + a summary claiming
-		// completion and never call write_function — the completeness gate then
-		// escalated on the missing test function (project 36 bead 203, 2026-08-31).
-		// Tool-primary verbs stay on bare "json".
+		// No `format` constraint at all here (OmitFormat). REFINE_TESTS_WRITE's
+		// real output is the write_function tool calls; its final Content is
+		// taken verbatim as a free-text summary (see json.Marshal below), never
+		// parsed as model JSON — so the loose "json" grammar bought nothing and
+		// actively broke native tool-calling for non-reasoning models and for
+		// gemma4:31b+disableThink, which serialized the write_function payload
+		// as content and never called the tool (root-caused 2026-08-31,
+		// docs/format-json-tool-turn.md). A reasoning-first schema was also
+		// tried and reverted: it let the model emit its plan as `reasoning` + a
+		// summary claiming completion and never call write_function, so the
+		// completeness gate escalated on the missing test function (project 36
+		// bead 203, 2026-08-31).
 		if streamTrace != nil {
 			fmt.Fprintf(streamTrace, "\n===== [cycle %d turn %d] %s =====\n", cid, turn, time.Now().Format(time.RFC3339))
 		}
@@ -374,7 +380,7 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		// disableThink stopped the model using native tool-calling — it emitted a
 		// ReAct-style {"action":...} blob as content instead of a write_function
 		// call. The runaway is bounded instead by ChatWithTools's num_predict cap.
-		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{writeFunctionTool, runGoSnippetCaseTool}, nil, streamTrace)
+		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{writeFunctionTool, runGoSnippetCaseTool}, &ollama.Options{OmitFormat: true}, streamTrace)
 		if toolErr != nil {
 			return "", toolErr
 		}

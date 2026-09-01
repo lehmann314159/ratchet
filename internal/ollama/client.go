@@ -196,6 +196,17 @@ type Options struct {
 	// Zero means: ChatWithTools uses toolLoopNumPredict; Chat sets no cap
 	// (its runaway bound is the schema reasoning field's maxLength).
 	NumPredict int
+	// OmitFormat drops the `format` field from the request entirely, overriding
+	// the default `format:"json"` (and any Format set above). Only honored by
+	// ChatWithTools. Use it on a tool-primary loop whose final turn is NOT
+	// parsed as model-emitted JSON — REFINE_TESTS_WRITE, whose Content is taken
+	// verbatim as a free-text summary. The loose "json" grammar there buys
+	// nothing and actively breaks native tool-calling for any model that
+	// doesn't emit a separate thinking pass first: gemma4:31b under
+	// disableThink, and every non-reasoning model, dump the tool payload as
+	// content and never call the tool (root-caused 2026-08-31,
+	// docs/format-json-tool-turn.md).
+	OmitFormat bool
 }
 
 type chatRequest struct {
@@ -354,16 +365,20 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 // responsible for the multi-turn loop: executing tool calls and feeding
 // results back as tool messages.
 //
-// format:"json" is set here too, same rationale as Chat() — every caller of
-// this function (REFINE_TESTS_WRITE, REFINE_TESTS_CRITIQUE,
-// ADJUDICATE_NEXT_EXECUTION) eventually parses the final turn's Content as a
-// single JSON object via ollama.ExtractJSON, exactly like the plain Chat()
-// path, just reached through a tool-calling loop instead of a single
-// request. Confirmed live against this deployment's Ollama server that
-// format:"json" and tools coexist without interference: a request
-// combining both still returns a proper tool_calls entry with empty
-// Content, rather than the format constraint blocking or corrupting the
-// tool call.
+// format:"json" is set here by default, same rationale as Chat(): most callers
+// (REFINE_TESTS_CRITIQUE, REFINE_TESTS_JUDGE, ADJUDICATE_NEXT_EXECUTION)
+// eventually parse the final turn's Content as a single JSON object via
+// ollama.ExtractJSON, exactly like the plain Chat() path, just reached through
+// a tool-calling loop instead of a single request.
+//
+// The "format:json and tools coexist without interference" claim was only ever
+// validated against reasoning models with thinking ON — which emit a separate
+// thinking pass and then a clean tool_call. It does NOT hold otherwise: under
+// gemma4:31b+disableThink, or any non-reasoning model, the loose "json" grammar
+// makes the model serialize the tool payload as Content and never emit a
+// tool_call (root-caused 2026-08-31, docs/format-json-tool-turn.md). A
+// tool-primary loop whose final turn is not parsed as model JSON should pass
+// Options.OmitFormat to drop the constraint — REFINE_TESTS_WRITE does.
 func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message, tools []Tool, opts *Options, tokenWriter io.Writer) (Message, error) {
 	temp := DefaultTemperature
 	numCtx := defaultNumCtx
@@ -382,6 +397,9 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		}
 		if opts.Format != nil {
 			format = opts.Format
+		}
+		if opts.OmitFormat {
+			format = nil
 		}
 		think = opts.Think
 	}

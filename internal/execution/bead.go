@@ -171,6 +171,17 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 
 	oc := ollama.NewUnbounded(ollamaURL)
 	tools := toolDefinitions()
+	// OmitFormat: EXECUTE_BEAD is a pure tool-calling loop (write_file / read_file
+	// / run_command) — msg.Content is only streamed to the trace and checked for
+	// emptiness, never parsed as JSON (the sole json.Unmarshal above is of the
+	// bead spec from the DB). The default format:"json" grammar therefore buys
+	// nothing and, same as it did for REFINE_TESTS_WRITE, blocks native
+	// tool-calling: gemma4:31b runs its whole budget in a single unterminating
+	// thinking stream and never emits a write_file call (exprvm-web-baseline-3
+	// bead 242, execs 198/199: content_chars=0 throughout, thinking_chars
+	// climbing to the budget wall, one [TURN] marker). See
+	// docs/format-json-tool-turn.md.
+	execOpts := &ollama.Options{OmitFormat: true}
 	messages := []ollama.Message{
 		{Role: "system", Content: guidance.InjectForVerbPath(executeBeadSystemPrompt, folderPath, db.VerbExecuteBead, "")},
 		{Role: "user", Content: buildBeadUserMsg(parsedBead.FullText, parsedBead.OutputFiles, parsedBead.ExitCriteria, contextFiles, priorHistory, resumeNote, folderPath)},
@@ -183,7 +194,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	for turn := 1; ; turn++ {
 		writeLine(traceFile, fmt.Sprintf("[TURN %d]", turn))
 
-		msg, err := oc.ChatWithTools(ctx, model, messages, tools, nil, traceFile)
+		msg, err := oc.ChatWithTools(ctx, model, messages, tools, execOpts, traceFile)
 		if err != nil {
 			select {
 			case cause := <-terminationCh:

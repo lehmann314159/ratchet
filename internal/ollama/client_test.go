@@ -82,6 +82,35 @@ func TestChatWithToolsSetsJSONFormat(t *testing.T) {
 	}
 }
 
+// TestChatWithToolsOmitFormat: Options.OmitFormat drops the `format` field
+// from the request entirely. REFINE_TESTS_WRITE passes this because its tool
+// turns are pure tool-calling (write_function) and its final Content is taken
+// verbatim as a summary, never parsed as model JSON — while the loose "json"
+// grammar breaks native tool-calling for non-reasoning models
+// (docs/format-json-tool-turn.md).
+func TestChatWithToolsOmitFormat(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &gotBody); err != nil {
+			t.Fatalf("unmarshal request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"message":{"role":"assistant","content":"{}"},"done":true}` + "\n"))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	tools := []Tool{{Type: "function", Function: ToolFunction{Name: "write_function"}}}
+	if _, err := c.ChatWithTools(context.Background(), "some-model",
+		[]Message{{Role: "user", Content: "hi"}}, tools, &Options{OmitFormat: true}, nil); err != nil {
+		t.Fatalf("ChatWithTools: %v", err)
+	}
+	if _, present := gotBody["format"]; present {
+		t.Errorf("request body still carries format = %v, want it omitted", gotBody["format"])
+	}
+}
+
 func TestExtractJSONPlain(t *testing.T) {
 	got := ExtractJSON(`{"decision": "execute_as_is"}`)
 	want := `{"decision": "execute_as_is"}`
