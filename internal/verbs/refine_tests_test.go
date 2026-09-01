@@ -269,6 +269,70 @@ func TestNormalizeCompileErrors(t *testing.T) {
 	}
 }
 
+func TestStuckCompileErr(t *testing.T) {
+	mismatch := "cannot use InitTemplates() (value of type *\"html/template\".Template) as *\"text/template\".Template value in assignment"
+	sig := func(lines ...string) string { return strings.Join(lines, "\n") }
+
+	// The real blocker (mismatch) recurs while the model thrashes a different
+	// secondary error on the middle turn — whole-signature equality between
+	// consecutive turns never matches (turn 2 differs from both neighbours),
+	// but the recurrence check sees the mismatch line twice. This is the real
+	// exprvm-web-baseline-5 bead 264 shape: mismatch / undefined:text / mismatch.
+	thrash := []string{
+		sig(mismatch),
+		sig("undefined: text"),
+		sig(mismatch),
+	}
+	if line, stuck := stuckCompileErr(thrash, stuckCompileMinRecur); !stuck || line != mismatch {
+		t.Errorf("thrash case: got (%q, %v), want (%q, true)", line, stuck, mismatch)
+	}
+
+	// Genuine progress: every turn's error set is disjoint, nothing recurs.
+	progressing := []string{
+		sig("undefined: a", "undefined: b"),
+		sig("missing return"),
+		sig("undefined: c"),
+		sig("syntax error: unexpected }"),
+	}
+	if line, stuck := stuckCompileErr(progressing, stuckCompileMinRecur); stuck {
+		t.Errorf("progressing case must not be flagged as stuck; got recurring line %q", line)
+	}
+
+	if _, stuck := stuckCompileErr(nil, stuckCompileMinRecur); stuck {
+		t.Error("empty window must not be stuck")
+	}
+
+	// A single failed turn is never stuck (need the error to actually recur).
+	if _, stuck := stuckCompileErr([]string{sig(mismatch, "undefined: x")}, stuckCompileMinRecur); stuck {
+		t.Error("one turn must not be stuck")
+	}
+
+	// Deterministic line choice: most-recurring wins.
+	pick := []string{sig("err A", "err B"), sig("err A"), sig("err A", "err B")}
+	if line, _ := stuckCompileErr(pick, 2); line != "err A" {
+		t.Errorf("expected the most-recurring line 'err A', got %q", line)
+	}
+}
+
+func TestStuckCompileSummary(t *testing.T) {
+	out := "./handlers_test.go:18:14: cannot use InitTemplates() ... in assignment"
+	withErr := stuckCompileSummary("some error line", out)
+	if !strings.HasPrefix(withErr, stuckCompileSummaryPrefix) {
+		t.Errorf("summary must start with the stable prefix Commit keys off; got %q", withErr)
+	}
+	// Hypothesis, not verdict: both possible causes are named, and the compile
+	// output is included for the human to judge.
+	if !strings.Contains(withErr, "some error line") ||
+		!strings.Contains(withErr, "non-test source file") ||
+		!strings.Contains(withErr, "within the test file") ||
+		!strings.Contains(withErr, out) {
+		t.Errorf("summary missing expected content: %q", withErr)
+	}
+	if strings.Contains(stuckCompileSummary("", out), "`") {
+		t.Error("with no persistent error line, the summary must not emit an empty backtick pair")
+	}
+}
+
 func TestMissingVerificationCases(t *testing.T) {
 	allCases := map[string][]string{
 		"TestHandlers": {"HandleIndex", "HandleEval_Success", "HandleEval_CompileError"},

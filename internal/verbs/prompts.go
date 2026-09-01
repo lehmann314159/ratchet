@@ -698,6 +698,18 @@ decision:
                       and reads the real result, rather than reasoning about it from memory. If
                       the real output doesn't match what the assertion expects, that is
                       conclusive, not merely suggestive — use re_refine.
+                      SCOPE CHECK before choosing re_refine: the fix you prescribe in
+                      re_refine_guidance must be an edit that lives entirely in a *_test.go file
+                      (a changed expected value, an added setup line, a corrected fixture). If the
+                      failure is a type or import conflict between two non-test source files —
+                      e.g. one declares "var t *text/template.Template" and another a
+                      "func InitT() *html/template.Template" assigned to it, so no assignment
+                      between them compiles — no *_test.go edit can fix that. Use execute_revised
+                      with the implementation change that makes the types agree (name the file and
+                      the exact type/import), or full_stop if the conflicting declaration is in a
+                      file this bead does not own. The orchestrator compiles your prescribed test
+                      edit against the real package and re-routes a re_refine that fails to
+                      type-check.
 
 Guidance on choosing between execute_as_is and execute_revised when bead_spec_fit is
 "execution_capability_problem":

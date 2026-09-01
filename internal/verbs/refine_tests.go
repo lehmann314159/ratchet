@@ -97,6 +97,93 @@ func normalizeCompileErrors(out string) string {
 	return strings.Join(msgs, "\n")
 }
 
+// compileErrSigLines splits a normalizeCompileErrors signature back into its
+// individual normalized error lines (the signature is a sorted, newline-joined
+// set). Empty signature -> nil.
+func compileErrSigLines(sig string) []string {
+	if sig == "" {
+		return nil
+	}
+	return strings.Split(sig, "\n")
+}
+
+// stuckCompileErr reports whether any single normalized compile-error line
+// recurs in at least minRecur of the given recent per-turn signatures. Unlike a
+// whole-signature equality check between consecutive turns, this tolerates a
+// model that thrashes a different secondary error each turn while the real
+// blocker — typically a type or import conflict in a non-test source file this
+// verb cannot touch — persists unchanged. The returned line is chosen
+// deterministically (most recurrences, ties broken lexically) for logging and
+// the escalation summary.
+func stuckCompileErr(recentSigs []string, minRecur int) (string, bool) {
+	counts := map[string]int{}
+	for _, sig := range recentSigs {
+		for _, line := range compileErrSigLines(sig) {
+			counts[line]++
+		}
+	}
+	best, bestN := "", 0
+	for line, n := range counts {
+		if n > bestN || (n == bestN && line < best) {
+			best, bestN = line, n
+		}
+	}
+	if bestN >= minRecur {
+		return best, true
+	}
+	return "", false
+}
+
+// stuckCompileWindow / stuckCompileMinRecur define when a REFINE_TESTS_WRITE
+// turn loop is treated as wedged on a compile error no test-file edit can
+// clear: one normalized error line recurring across at least
+// stuckCompileMinRecur of the last stuckCompileWindow compile-failed turns.
+//
+// minRecur is 2, not 3: a line that appears, is "fixed" (a different error
+// next turn), then comes back is already conclusive that the model can't
+// clear it — and with the whole check gated behind turn >= refinementWriteAttempts,
+// that recurrence only counts from the 4th rewrite attempt on. A live run
+// (exprvm-web-baseline-5 bead 264, 2026-09-01) showed minRecur=3 never firing
+// on a real wedge: the model thrashed one turn (a wrapper-func attempt →
+// "undefined: text") between two turns of the real `cannot use InitTemplates()
+// … as … value` conflict, so the conflict only reached count 2 within the
+// 4-turn budget and the post-loop Commit gate had to catch it instead.
+const (
+	stuckCompileWindow   = 4
+	stuckCompileMinRecur = 2
+)
+
+// stuckCompileSummary is the shared REFINE_TESTS_WRITE escalation message for a
+// compile failure the write loop could not clear from the test file — used both
+// by Run's in-loop early-bail and Commit's post-loop compile gate so the
+// escalation detail always ends with the same explanation regardless of which
+// path tripped. persistentErr, when non-empty, names the specific recurring
+// error line.
+//
+// The wording is a hypothesis, not a verdict: a persistent compile error here
+// is most often a conflicting type/import declaration in a non-test source file
+// this verb cannot touch, but it can also be an error entirely within the test
+// file that the write model simply keeps failing to correct (exprvm-web-baseline-5
+// bead 264 run 2, 2026-09-01: `url.Values is not a type`, a shadowed import — a
+// test-only bug). Either way the right move is a human look, so the message
+// points at both possibilities rather than asserting one.
+// stuckCompileSummaryPrefix is the stable leading text of stuckCompileSummary's
+// output — Commit checks it to avoid inserting a duplicate refinement row when
+// Run's early-bail already recorded this cycle's summary.
+const stuckCompileSummaryPrefix = "REFINE_TESTS_WRITE could not get the test file to compile:"
+
+func stuckCompileSummary(persistentErr, compileOut string) string {
+	detail := "the same compile error persisted across several rewrite attempts"
+	if persistentErr != "" {
+		detail = "the error `" + persistentErr + "` kept recurring across rewrite attempts"
+	}
+	return stuckCompileSummaryPrefix + " " + detail + ". The write " +
+		"model was unable to resolve it from the test file alone. This usually means the fix needs a " +
+		"change to a non-test source file (e.g. a conflicting type or import declaration between two " +
+		"implementation files), but it can also be an error within the test file that the model kept " +
+		"failing to correct — check the compile output below. Last compile output:\n" + compileOut
+}
+
 // refinementCycleCap is the maximum number of write-critique-judge cycles
 // per bead before escalating to the user.
 const refinementCycleCap = 5
@@ -376,9 +463,10 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	// CRITIQUE.
 	requiredCases := make(map[string][]string)
 	coveredCases := map[string]bool{}
-	// Tracks a turn loop stuck on an unchanging compile error — see the
-	// early-bail in the compile-failed branch below.
-	var prevCompileErrSig string
+	// Ring buffer of the last stuckCompileWindow compile-failed turns' error
+	// signatures — feeds stuckCompileErr's recurrence check in the early-bail
+	// below. Reset whenever a compile succeeds.
+	var recentCompileSigs []string
 	turn := 0
 	for {
 		turn++
@@ -534,7 +622,7 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 
 		ok, compileOut := runCompile(ctx, folderPath)
 		if ok {
-			prevCompileErrSig = ""
+			recentCompileSigs = nil
 			// Completeness check: verify all required Test* functions are present.
 			if missing := missingRequiredFuncs(testPath, requiredFuncs); len(missing) > 0 && turn < maxTurns {
 				slog.Warn("REFINE_TESTS_WRITE: compile passed but required functions missing",
@@ -567,27 +655,30 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		}
 		slog.Error("REFINE_TESTS_WRITE: compile failed", "bead_id", beadID, "turn", turn, "output", compileOut)
 
-		// Early-bail: if the same compile error survives consecutive turns despite
-		// fresh write_function attempts, the fix almost certainly needs a non-test
-		// source file this verb cannot touch — a conflicting type or import
-		// declaration in an implementation file, say. Detect the stall and stop;
-		// Commit still escalates on the non-compiling file, just far sooner and
-		// with a clearer signal than grinding every remaining turn identically
-		// (exprvm-web-baseline-3 bead 246, 2026-09-01: a text/template vs
-		// html/template mismatch between main.go and templates.go burned ~11
-		// turns / ~2h, every turn failing the same way). Gated past
-		// refinementWriteAttempts so genuine multi-error iteration isn't cut off.
-		sig := normalizeCompileErrors(compileOut)
-		if sig != "" && sig == prevCompileErrSig && turn >= refinementWriteAttempts {
-			slog.Error("REFINE_TESTS_WRITE: identical compile error across consecutive turns — "+
-				"fix likely requires a non-test source file; bailing early",
-				"bead_id", beadID, "turn", turn, "output", compileOut)
-			summary = "Compile could not be fixed from the test file: the same error persisted across " +
-				"consecutive rewrite attempts, which indicates the fix requires a change to a non-test " +
-				"source file (e.g. a conflicting type or import declaration). Last compile output:\n" + compileOut
+		// Early-bail: if one compile error keeps recurring despite fresh
+		// write_function attempts, the write loop is wedged — most often on a
+		// conflicting type/import declaration in a non-test source file this verb
+		// cannot touch, sometimes on a test-file error the model just can't
+		// correct. Either way, stop and escalate instead of grinding every
+		// remaining turn identically (exprvm-web-baseline-3 bead 246, 2026-09-01:
+		// a text/template vs html/template mismatch between main.go and
+		// templates.go burned ~11 turns / ~2h). The recurrence window (rather
+		// than consecutive-turn equality) tolerates a model that thrashes a
+		// different secondary error on some turns while the real blocker
+		// persists. Gated past refinementWriteAttempts so genuine multi-error
+		// iteration isn't cut off.
+		if sig := normalizeCompileErrors(compileOut); sig != "" {
+			recentCompileSigs = append(recentCompileSigs, sig)
+			if len(recentCompileSigs) > stuckCompileWindow {
+				recentCompileSigs = recentCompileSigs[1:]
+			}
+		}
+		if line, stuck := stuckCompileErr(recentCompileSigs, stuckCompileMinRecur); stuck && turn >= refinementWriteAttempts {
+			slog.Error("REFINE_TESTS_WRITE: compile error recurring across turns — write loop wedged; bailing early",
+				"bead_id", beadID, "turn", turn, "recurring_error", line, "output", compileOut)
+			summary = stuckCompileSummary(line, compileOut)
 			break
 		}
-		prevCompileErrSig = sig
 
 		if turn < maxTurns {
 			messages = append(messages, ollama.Message{
@@ -758,8 +849,18 @@ func (h *RefineTestsWrite) Commit(ctx context.Context, tx *sql.Tx, job *db.Hando
 	// Check compile state of what's now on disk.
 	ok, compileOut := runCompile(ctx, folderPath)
 	if !ok {
-		slog.Error("REFINE_TESTS_WRITE: compile still failing after all attempts — escalating",
+		slog.Error("REFINE_TESTS_WRITE: compile still failing after all attempts — write loop wedged; escalating",
 			"bead_id", beadID, "cycle_id", cid, "output", compileOut)
+		// Record the explanation as a refinement row (unless Run's early-bail
+		// already wrote it as this cycle's summary) so the escalation detail
+		// ends with the wedged-compile message and the failing compile output,
+		// not the model's stale last words.
+		if !strings.HasPrefix(out.Summary, stuckCompileSummaryPrefix) {
+			if err := insertRefinement(ctx, tx, job.ProjectID, beadID, cid, h.Verb(),
+				stuckCompileSummary("", compileOut), ""); err != nil {
+				return fmt.Errorf("insert stuck-compile refinement: %w", err)
+			}
+		}
 		_, err := tx.ExecContext(ctx,
 			`UPDATE handoff_jobs SET status = 'escalated', updated_at = ? WHERE id = ?`, now, job.ID)
 		return err

@@ -22,6 +22,7 @@ import (
 	"ratchet/internal/guidance"
 	"ratchet/internal/ollama"
 	"ratchet/internal/report"
+	"ratchet/internal/splice"
 	"ratchet/internal/trace"
 )
 
@@ -704,9 +705,125 @@ func implementationChangedBetweenAttempts(findingsA, findingsB string) bool {
 	return false
 }
 
+// --- re_refine scope probe ---
+//
+// When ADJUDICATE routes a REFINE_TESTS failure to decision=re_refine, the fix
+// it prescribes must be one REFINE_TESTS can actually make: an edit confined to
+// a *_test.go file. A conflict between two non-test source files — one file
+// declaring `var t *text/template.Template`, another a
+// `func InitT() *html/template.Template` assigned to it — type-checks nowhere
+// and no re_refine can fix it, yet REFINE_TESTS will grind an entire cycle on
+// it before its compile gate escalates (exprvm-web bead 246, 2026-09-01).
+// ADJUDICATE's run_go_snippet check can't catch this: it's stdlib-only and
+// standalone, with no access to the project package. probeReRefineEdit applies
+// the prescribed test-level change as a throwaway probe test and compiles the
+// real package; a type-conflict-class failure is mechanical proof the fix lives
+// outside re_refine's scope and the decision should have been execute_revised.
+
+// reGuidanceStmt recognizes a line/span that reads as a Go statement
+// (assignment or call) rather than a declaration or prose.
+var reGuidanceStmt = regexp.MustCompile(`^[\w.]+\s*(:?=[^=]|\()`)
+
+var reInlineCode = regexp.MustCompile("`([^`]+)`")
+
+// reCrossFileTypeConflict matches the go/types error families that mean two
+// declarations are structurally incompatible — the signature of a defect no
+// *_test.go edit can resolve. Deliberately excludes `undefined:` and syntax
+// errors: those usually mean the probe simply lacks a helper the real test file
+// defines, or the extracted fragment was imperfect, not that the prescribed fix
+// is genuinely out of scope.
+var reCrossFileTypeConflict = regexp.MustCompile(
+	`cannot use .+ as .+ value|mismatched types|does not implement |cannot convert |` +
+		`redeclared |previous declaration|ambiguous selector|incompatible type`)
+
+// extractGoStatements pulls candidate Go statements out of free-text
+// re_refine_guidance: lines inside fenced code blocks and inline `backtick`
+// spans that read as a statement rather than a declaration. Capped and
+// deduped; an empty result means the guidance named no concrete edit to probe.
+func extractGoStatements(guidance string) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		s = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(s), ";"))
+		if s == "" || len(s) > 200 || seen[s] || !reGuidanceStmt.MatchString(s) {
+			return
+		}
+		for _, p := range []string{"func ", "import ", "package ", "//", "type ", "return ", "var ", "const "} {
+			if strings.HasPrefix(s, p) {
+				return
+			}
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	inFence := false
+	for _, line := range strings.Split(guidance, "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			add(t)
+			continue
+		}
+		for _, m := range reInlineCode.FindAllStringSubmatch(line, -1) {
+			add(m[1])
+		}
+	}
+	if len(out) > 5 {
+		out = out[:5]
+	}
+	return out
+}
+
+// probeReRefineEdit returns the failing compile output when the statement(s)
+// ADJUDICATE prescribed in re_refine_guidance fail to type-check against the
+// bead's real package with a cross-file type conflict; "" otherwise (clean
+// compile, nothing concrete to probe, or an unrelated error kind).
+//
+// The finding is trusted only when the package compiles cleanly WITHOUT the
+// probe and breaks WITH it: that isolates the prescribed edit as the cause. If
+// the tree already fails to compile (a pre-existing broken test file is the
+// norm for a REFINE_TESTS bead at ADJUDICATE time), the probe can't attribute
+// anything, so it stays out of the way and lets the model's judgment plus the
+// recurring-failure machinery decide.
+func probeReRefineEdit(ctx context.Context, folderPath, guidance string) string {
+	stmts := extractGoStatements(guidance)
+	if len(stmts) == 0 || folderPath == "" {
+		return ""
+	}
+	probePath := filepath.Join(folderPath, "zz_ratchet_adjudicate_probe_test.go")
+	_ = os.Remove(probePath) // clear any stale probe from an interrupted run
+
+	if baseOK, _ := runCompile(ctx, folderPath); !baseOK {
+		return "" // can't attribute a failure to the probe if the tree is already broken
+	}
+
+	src := "package " + splice.DetectPackage(folderPath) + "\n\nimport \"testing\"\n\n" +
+		"func TestRatchetAdjudicateReRefineProbe(t *testing.T) {\n\t_ = t\n\t" +
+		strings.Join(stmts, "\n\t") + "\n}\n"
+	if os.WriteFile(probePath, []byte(src), 0o644) != nil {
+		return ""
+	}
+	defer os.Remove(probePath)
+	ok, compileOut := runCompile(ctx, folderPath)
+	if ok || !reCrossFileTypeConflict.MatchString(compileOut) {
+		return ""
+	}
+	return compileOut
+}
+
 type AdjudicateNextExecution struct {
 	budgetDefault int    // cached from Run for use in Commit
 	folderPath    string // cached from Run for use in Commit
+
+	// reRefineProbeFailed caches probeReRefineEdit's compile output when the
+	// re_refine fix the model prescribed does not type-check against the real
+	// package (a cross-file conflict no *_test.go edit can resolve). Set in Run
+	// after its in-loop nudge; consumed by Validate as a backstop that forces
+	// execute_revised if the model insisted on re_refine anyway.
+	reRefineProbeFailed string
 
 	// forcedReRefineNames/Text cache recurringTestFailureNote's "identical" tier
 	// (byte-identical failure across the last 2 genuinely-rewritten attempts) so
@@ -875,6 +992,7 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 	// particular call needs it, is what closes that gap.
 	var lastContent string
 	usedTool := false
+	reRefineProbed := false
 	for turn := 1; turn <= snippetVerificationTurns; turn++ {
 		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetTool}, nil, nil)
 		if toolErr != nil {
@@ -884,6 +1002,34 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 			lastContent = msg.Content
 		}
 		if len(msg.ToolCalls) == 0 {
+			// re_refine scope probe: if the model wants to route this to
+			// re_refine, verify the fix it prescribes actually type-checks as a
+			// test-file edit before accepting it. A cross-file type conflict
+			// can't be fixed from a *_test.go file — nudge the model to
+			// execute_revised/full_stop once, then let Validate enforce it.
+			if !reRefineProbed {
+				var tentative AdjudicateNextExecutionOutput
+				if json.Unmarshal([]byte(ollama.ExtractJSON(msg.Content)), &tentative) == nil &&
+					tentative.Decision == "re_refine" {
+					reRefineProbed = true
+					if probeOut := probeReRefineEdit(ctx, h.folderPath, tentative.ReRefineGuidance); probeOut != "" {
+						h.reRefineProbeFailed = probeOut
+						messages = append(messages, msg)
+						messages = append(messages, ollama.Message{Role: "user", Content: "You chose " +
+							"decision=re_refine, but the change your re_refine_guidance prescribes does not " +
+							"type-check. Applied to a *_test.go file and compiled against the real package, " +
+							"it fails:\n\n```\n" + probeOut + "\n```\n\nDuring EXECUTE_BEAD every *_test.go " +
+							"file is LOCKED, and re_refine can only change *_test.go files — so a conflict " +
+							"between non-test source files (two files declaring incompatible types, or " +
+							"importing different packages under the same name) cannot be resolved through " +
+							"re_refine. Choose execute_revised with the implementation change that makes the " +
+							"types agree — name the file and the exact type or import to change — or " +
+							"full_stop if that file is one this bead does not own. Then give your final " +
+							"JSON decision."})
+						continue
+					}
+				}
+			}
 			if usedTool || turn == snippetVerificationTurns {
 				if !usedTool {
 					slog.Warn("ADJUDICATE_NEXT_EXECUTION finalized without ever calling run_go_snippet",
@@ -1069,6 +1215,50 @@ func (h *AdjudicateNextExecution) Validate(raw string) (string, any) {
 		out.Decision = "re_refine"
 		out.ReRefineGuidance = g.String()
 		out.RevisedBead = nil
+	}
+
+	// Backstop for the re_refine scope probe (see reRefineProbeFailed's doc
+	// comment and Run's in-loop nudge): the test-level fix the model prescribed
+	// does not type-check against the real package with a cross-file type
+	// conflict, which no *_test.go edit can resolve. If the model still returned
+	// re_refine after being told this once, force execute_revised against the
+	// unmodified spec plus a diagnostic prefix. Skipped when forcedReRefine
+	// already fired — that path is a stronger, independent signal that the
+	// assertion itself is unsatisfiable.
+	if h.reRefineProbeFailed != "" && out.Decision == "re_refine" && len(h.forcedReRefineNames) == 0 {
+		slog.Warn("ADJUDICATE decision mechanically overridden to execute_revised — "+
+			"prescribed re_refine fix fails the cross-file type-check probe",
+			"bead_spec", h.currentBeadSpec.Title)
+		budget := h.budgetDefault
+		if budget <= 0 {
+			budget = h.currentBeadSpec.ExecutionBudget
+		}
+		out.Decision = "execute_revised"
+		out.ReRefineGuidance = ""
+		out.Trend = "same"
+		out.BeadSpecFit = "execution_capability_problem"
+		out.RevisedBead = &ParsedBead{
+			Title:           h.currentBeadSpec.Title,
+			OutputFiles:     h.currentBeadSpec.OutputFiles,
+			ExitCriteria:    h.currentBeadSpec.ExitCriteria,
+			ExecutionBudget: budget,
+			MonitorOverride: "honor",
+			FullText: "[Mechanically routed to execute_revised by the orchestrator] ADJUDICATE " +
+				"proposed fixing the failing test by editing the test file, but that change does not " +
+				"compile against the current sources:\n\n" + h.reRefineProbeFailed + "\n\nThis is a " +
+				"conflict between non-test source files — the test file is LOCKED and cannot resolve " +
+				"it. Fix the implementation so the types agree: read the affected file(s) first, then " +
+				"write the corrected file(s) with only the type/import change applied. Do not modify " +
+				"any *_test.go file.\n\n--- Original bead spec ---\n\n" + h.currentBeadSpec.FullText,
+		}
+		// Reasoning is replaced (not appended to) so it can't trip the
+		// execution_capability_problem consistency check with spec-referential
+		// phrasing carried over from the model's re_refine argument. The model's
+		// original output is preserved verbatim in handoff_attempts.raw_output.
+		out.Reasoning = "The re_refine fix ADJUDICATE prescribed does not type-check against the " +
+			"current sources — a cross-file type conflict that no *_test.go edit can resolve. The " +
+			"orchestrator routed this to execute_revised for an implementation fix. Probe compile " +
+			"output:\n" + h.reRefineProbeFailed
 	}
 
 	if out.Decision == "execute_revised" {
