@@ -688,6 +688,7 @@ func (s *server) handleBeadDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	if folder, ferr := queryBeadProjectFolder(r.Context(), s.db, id); ferr == nil {
 		d.RewindSnapshots = listRewindSnapshots(folder, id)
+		enrichRewindsFromSnapshots(folder, id, d.Rewinds)
 	}
 	d.baseData = s.base(r)
 	s.render(w, s.tmpl.beadDetail, d)
@@ -945,6 +946,71 @@ func listSnapshots(folder string, beadID int64, kind string) []int {
 // listRewindSnapshots is the rewind-specific shorthand used by the bead page.
 func listRewindSnapshots(folder string, beadID int64) []int {
 	return listSnapshots(folder, beadID, "rewind")
+}
+
+// enrichRewindsFromSnapshots fills each RewindEvent's Guidance and per-file
+// fate lists from its on-disk snapshot manifest (traces/_bead-{id}-rewind-{N}/
+// README.md, written by project.writeRewindManifest). Rewind N ↔ snapshot N.
+// A missing or unparseable manifest just leaves that event's fields empty
+// (HasSnapshot stays false) — the DB-derived fields are still shown.
+func enrichRewindsFromSnapshots(folder string, beadID int64, events []RewindEvent) {
+	for i := range events {
+		path := filepath.Join(folder, "traces",
+			fmt.Sprintf("_bead-%d-rewind-%d", beadID, events[i].Number), "README.md")
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		events[i].HasSnapshot = true
+		guidance, tests, stubbed, deleted := parseRewindManifest(string(b))
+		events[i].Guidance = guidance
+		events[i].TestsDeleted = tests
+		events[i].Stubbed = stubbed
+		events[i].Deleted = deleted
+	}
+}
+
+// parseRewindManifest extracts the human-relevant facts from a rewind
+// snapshot's README.md: the guidance note carried into the next attempt (empty
+// if none was given) and the filenames grouped by what the rewind did to them.
+// The format is project.writeRewindManifest's own output, not free text.
+func parseRewindManifest(md string) (guidance string, tests, stubbed, deleted []string) {
+	lines := strings.Split(md, "\n")
+	section := ""
+	var guidanceLines []string
+	for _, ln := range lines {
+		if strings.HasPrefix(ln, "## ") {
+			section = strings.TrimSpace(strings.TrimPrefix(ln, "## "))
+			continue
+		}
+		switch section {
+		case "Guidance for next attempt":
+			t := strings.TrimSpace(ln)
+			if t == "" || t == "(no new guidance note given)" || strings.HasPrefix(t, "Supersedes/retracts:") {
+				continue
+			}
+			guidanceLines = append(guidanceLines, t)
+		case "What happened to each file":
+			t := strings.TrimSpace(ln)
+			if !strings.HasPrefix(t, "- ") {
+				continue
+			}
+			t = strings.TrimPrefix(t, "- ")
+			name, fate, ok := strings.Cut(t, ": ")
+			if !ok {
+				continue
+			}
+			switch {
+			case strings.HasPrefix(fate, "deleted (test file"):
+				tests = append(tests, name)
+			case strings.HasPrefix(fate, "reset to scaffold stub"):
+				stubbed = append(stubbed, name)
+			case strings.HasPrefix(fate, "deleted"):
+				deleted = append(deleted, name)
+			}
+		}
+	}
+	return strings.Join(guidanceLines, "\n"), tests, stubbed, deleted
 }
 
 // renderSnapshotDir concatenates a rewind snapshot's README.md manifest and

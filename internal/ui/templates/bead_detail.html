@@ -23,6 +23,9 @@
     </thead>
     <tbody>
     {{range .Executions}}
+    {{range .RewindsBefore}}
+    <tr class="rewind-divider"><td colspan="8">⟲ {{.}} — bead reset, tests regenerated, fresh attempt budget</td></tr>
+    {{end}}
     <tr>
       <td class="meta">{{.AttemptNum}}</td>
       <td><span class="status {{.TerminationCause}}">{{.TerminationCause}}</span></td>
@@ -51,10 +54,16 @@
     </tr>
     {{end}}
     {{end}}
+    {{range .TrailingRewinds}}
+    <tr class="rewind-divider"><td colspan="8">⟲ {{.}} — bead reset; no execution since</td></tr>
+    {{end}}
     </tbody>
   </table>
   {{else}}
   <p class="empty">No executions yet.</p>
+  {{range .TrailingRewinds}}
+  <p class="rewind-divider" style="display:block;padding:6px 10px;border-radius:3px">⟲ {{.}} — bead reset; awaiting first execution</p>
+  {{end}}
   {{end}}
 </div>
 
@@ -125,7 +134,44 @@
   {{end}}
 </div>
 
-{{if .RewindSnapshots}}
+{{if .Rewinds}}
+<div class="section">
+  <h2>Rewind History</h2>
+  <p class="meta">
+    Each rewind rolls prose back to the last pre-ADJUDICATE revision, resets
+    test/impl files, grants a fresh attempt budget, and restarts at
+    REFINE_TESTS_WRITE. Pre-rewind file content is preserved in the snapshot.
+  </p>
+  <table>
+    <thead><tr><th>#</th><th>When</th><th>Budget</th><th>Files reset</th><th>Guidance for next attempt</th><th>Snapshot</th></tr></thead>
+    <tbody>
+    {{range .Rewinds}}
+    <tr>
+      <td class="meta">{{.Number}}</td>
+      <td class="meta">{{.At}}</td>
+      <td class="meta">{{if and .BudgetBefore (ne .BudgetBefore .BudgetAfter)}}{{.BudgetBefore}}s → {{.BudgetAfter}}s{{else}}{{.BudgetAfter}}s{{end}}</td>
+      <td class="meta">
+        {{if .HasSnapshot}}
+          {{len .TestsDeleted}} test{{if ne (len .TestsDeleted) 1}}s{{end}} deleted,
+          {{len .Stubbed}} stubbed{{if .Deleted}}, {{len .Deleted}} deleted{{end}}
+          {{if or .TestsDeleted .Stubbed .Deleted}}
+          <details><summary class="meta">files</summary>
+            <div class="meta" style="white-space:pre-wrap">{{range .TestsDeleted}}{{.}} — deleted (test)
+{{end}}{{range .Stubbed}}{{.}} — stubbed
+{{end}}{{range .Deleted}}{{.}} — deleted
+{{end}}</div>
+          </details>
+          {{end}}
+        {{else}}<span class="meta">—</span>{{end}}
+      </td>
+      <td class="meta" style="white-space:pre-wrap;max-width:28rem">{{if .Guidance}}{{.Guidance}}{{else}}<span class="meta">none</span>{{end}}</td>
+      <td>{{if .HasSnapshot}}<a href="/beads/{{$.BeadID}}/snapshot/{{.Number}}">snapshot {{.Number}}</a>{{else}}<span class="meta">—</span>{{end}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+</div>
+{{else if .RewindSnapshots}}
 <div class="section">
   <h2>Rewind Snapshots</h2>
   <p class="meta">Pre-rewind file content preserved before each rewind's destructive reset.</p>

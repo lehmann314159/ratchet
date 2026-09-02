@@ -88,6 +88,7 @@ type BeadRow struct {
 	InfraFailures  int    // executions with infra_failure=1 (orphans, SQLITE_BUSY crashes)
 	Budget         int    // execution_budget from current revision
 	ElapsedSeconds int    // seconds since execution started; 0 if not executing
+	Rewinds        int    // count of REWIND_BEAD revisions (0 = never rewound)
 }
 
 type JobRow struct {
@@ -573,7 +574,9 @@ func queryBeads(ctx context.Context, d *db.DB, projectID int64) ([]BeadRow, erro
 		         FROM executions e2
 		         WHERE e2.bead_id = b.id AND e2.termination_cause IS NULL
 		         ORDER BY e2.started_at DESC LIMIT 1
-		       ), 0)
+		       ), 0),
+		       (SELECT COUNT(*) FROM bead_revisions br2
+		        WHERE br2.bead_id = b.id AND br2.created_by_verb = 'REWIND_BEAD')
 		FROM beads b
 		JOIN projects p ON p.id = b.project_id
 		LEFT JOIN bead_revisions br ON br.id = b.current_revision_id
@@ -588,7 +591,7 @@ func queryBeads(ctx context.Context, d *db.DB, projectID int64) ([]BeadRow, erro
 	for rows.Next() {
 		var r BeadRow
 		var fullText string
-		if err := rows.Scan(&r.ID, &r.Status, &fullText, &r.Budget, &r.Attempts, &r.MaxAttempts, &r.InfraFailures, &r.ElapsedSeconds); err != nil {
+		if err := rows.Scan(&r.ID, &r.Status, &fullText, &r.Budget, &r.Attempts, &r.MaxAttempts, &r.InfraFailures, &r.ElapsedSeconds, &r.Rewinds); err != nil {
 			return nil, err
 		}
 		var parsed struct {
@@ -813,6 +816,11 @@ type ExecutionRow struct {
 	AttemptBudgetCost float64
 	MonitorEscalation bool
 	TracePath         string
+	// RewindsBefore holds the "Rewind N" labels of any rewinds whose revision
+	// was created after the previous execution's start and at or before this
+	// one's — i.e. rewinds that land immediately above this row in the
+	// execution-history table, rendered as a divider.
+	RewindsBefore []string
 }
 
 // HasAdjudication reports whether this execution was adjudicated yet.
@@ -826,6 +834,23 @@ type RevisionRow struct {
 	FullText        string
 }
 
+// RewindEvent is one rewind of a bead, assembled for the bead-detail page from
+// the REWIND_BEAD bead_revisions row plus its on-disk snapshot manifest. The
+// Nth REWIND_BEAD revision (by revision_number) corresponds to the Nth rewind
+// snapshot dir (traces/_bead-{id}-rewind-{N}), since SnapshotBeadFiles numbers
+// them sequentially in the same order rewindBead creates the revisions.
+type RewindEvent struct {
+	Number       int    // 1-based: Nth rewind of this bead; also the snapshot number
+	At           string // revision created_at
+	BudgetBefore int    // execution_budget of the revision just before this rewind
+	BudgetAfter  int    // execution_budget the rewind revision carries
+	Guidance     string // guidance note attached at rewind time; "" if none
+	TestsDeleted []string
+	Stubbed      []string
+	Deleted      []string
+	HasSnapshot  bool // the traces/_bead-{id}-rewind-{N} dir was found and parsed
+}
+
 type beadDetailData struct {
 	baseData
 	BeadID             int64
@@ -835,6 +860,8 @@ type beadDetailData struct {
 	Executions         []ExecutionRow
 	Revisions          []RevisionRow
 	RewindSnapshots    []int
+	Rewinds            []RewindEvent
+	TrailingRewinds    []string // rewind labels with no execution after them yet
 	GuidanceNotes      []project.GuidanceNote
 	RefinementCycles   []RefinementCycle
 	RefinementCycleCap int
@@ -955,7 +982,47 @@ func queryBeadDetail(ctx context.Context, d *db.DB, beadID int64) (*beadDetailDa
 		}
 		out.Revisions = append(out.Revisions, r)
 	}
-	return out, revRows.Err()
+	if err := revRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Rewind skeleton: one RewindEvent per REWIND_BEAD revision, numbered in
+	// revision order (== snapshot-dir order). BudgetBefore is the previous
+	// revision's execution_budget. The handler fills Guidance / file fates
+	// from each rewind's on-disk snapshot manifest.
+	for i, rev := range out.Revisions {
+		if rev.CreatedByVerb != "REWIND_BEAD" {
+			continue
+		}
+		ev := RewindEvent{
+			Number:      len(out.Rewinds) + 1,
+			At:          rev.CreatedAt,
+			BudgetAfter: rev.ExecutionBudget,
+		}
+		if i > 0 {
+			ev.BudgetBefore = out.Revisions[i-1].ExecutionBudget
+		}
+		out.Rewinds = append(out.Rewinds, ev)
+	}
+
+	// Divider placement: attach each rewind's label to the first execution
+	// that started at or after it (or to a trailing pseudo-row the template
+	// renders when a rewind has no execution after it yet).
+	for _, ev := range out.Rewinds {
+		placed := false
+		for i := range out.Executions {
+			if out.Executions[i].StartedAt >= ev.At {
+				out.Executions[i].RewindsBefore = append(out.Executions[i].RewindsBefore, fmt.Sprintf("Rewind %d", ev.Number))
+				placed = true
+				break
+			}
+		}
+		if !placed {
+			out.TrailingRewinds = append(out.TrailingRewinds, fmt.Sprintf("Rewind %d", ev.Number))
+		}
+	}
+
+	return out, nil
 }
 
 func queryEscalatedCount(ctx context.Context, d *db.DB) int {
