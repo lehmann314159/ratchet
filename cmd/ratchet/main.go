@@ -62,6 +62,9 @@ func main() {
 		case "execute-bead":
 			execution.RunExecuteBeadMain(os.Args[2:])
 			return
+		case "exec-bakeoff":
+			execution.RunExecBakeoffMain(os.Args[2:])
+			return
 		}
 	}
 
