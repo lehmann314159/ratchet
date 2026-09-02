@@ -750,21 +750,26 @@ Budget guidance for execute_revised:
   - execution_budget and monitor_override must be explicitly stated, not inherited silently.
   - For non-timeout failures, copy the "Actual execution budget" value from Input 1 unchanged
     unless you have a specific reason to change it.
-  - On ANY timeout (termination_cause: timeout), the budget is a bottleneck: double the current
+  - On ANY timeout (termination_cause: timeout), the budget is the bottleneck: double the current
     execution_budget in the revised bead. The orchestrator ALSO raises it mechanically from the
     FIRST timeout on (double the last value each time, capped 900->1800->3600->7200), so your
     number is a floor, not the final word — a "[Fast path — first timeout]" / "[Fast path —
     repeated timeout]" note will say so. On that path never choose re_refine: a run that never
     finished cannot have reached the tests.
-  - A timeout is also usually a spec too thin for a one-turn implementation, so unlike other
-    "budget is the bottleneck" cases you SHOULD also rewrite the spec — but toward an
-    implementation guide (exact grammar/algorithm, function-by-function structure, specific
-    stdlib calls), not more prose. The fast-path note spells this out.
+  - Do NOT respond to a timeout by rewriting the spec into an implementation guide or adding a
+    "state your approach first" instruction — on a timeout retry, extra prescriptiveness tends to
+    make the agent fixate and spiral rather than converge. The only spec change on a timeout is to
+    prepend one sentence telling the agent to write each output file as a minimal compiling
+    skeleton first and flesh it out in later turns. The fast-path note spells this out.
 
 Pre-implementation commitment for persistent capability failures:
-  - When the agent has repeated the same mistake across multiple attempts, require it to state
-    its approach for the failing area before writing any code. This surfaces misunderstandings
-    in the trace early rather than after a full failed attempt.
+  - When the agent has repeated the same NON-timeout mistake across multiple attempts (wrong
+    algorithm, wrong types, same compile error), require it to state its approach for the failing
+    area before writing any code. This surfaces misunderstandings in the trace early rather than
+    after a full failed attempt.
+  - Do NOT apply this on a timeout retry: the agent ran out of wall-clock, and a "state your
+    approach first" preamble just consumes more of the budget it already lacked and tends to make
+    it spiral. On a timeout, the skeleton-first sentence is the only addition.
 
 Specificity ratchet for RECURRING failures:
   - For any failure class the compressed history tags RECURRING with 2 or more prior
@@ -772,10 +777,12 @@ Specificity ratchet for RECURRING failures:
     already read prose and failed. Escalate to verbatim code: include the exact function
     call, correct type, or a minimal working skeleton directly in the revised full_text.
     Write it literally so the agent can copy it without interpretation.
-  - Timeouts ratchet faster: escalate to a full implementation-guide spec on the FIRST
-    timeout, not the second — the thin spec is why the attempt ran out of time, and a second
-    thin-spec attempt just burns another budget.
-  - Apply this to every RECURRING failure class, not just the most recent one.
+  - Exception — timeouts: do NOT ratchet spec prescriptiveness on a timeout. The budget doubles
+    mechanically from the first timeout on, and added spec scaffolding on a timeout retry tends to
+    make the agent fixate and spiral. A timeout gets the bumped budget plus one skeleton-first
+    sentence, nothing more (see the "[Fast path — ... timeout]" note).
+  - Apply the verbatim-code ratchet to every RECURRING NON-timeout failure class, not just the
+    most recent one.
 
 Vacuous test pass: if the bead's exit_criteria include a test command and mechanical_findings
 report exit code 0 but no tests executed ("[no test files]" or "no tests to run"), do not

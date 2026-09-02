@@ -77,7 +77,7 @@ func SeedVerbModelAssignments(ctx context.Context, tx *sql.Tx, projectID int64) 
 		VerbDecomposeSpec:           "gemma4:31b",
 		VerbAuditDecomposition:      "qwen3:32b",
 		VerbReconcileDecomposition:  "gemma4:31b",
-		VerbExecuteBead:             "gemma4:31b",
+		VerbExecuteBead:             "muse-glimmer:30b-q8_0-dflash",
 		VerbMonitorExecution:        "mistral-small3.2:24b",
 		VerbAnalyzeExecution:        "qwen3:32b",
 		VerbCompressAnalysis:        "mistral-small3.2:24b",
@@ -132,10 +132,15 @@ func SeedVerbModelAssignmentsFromFleet(ctx context.Context, tx *sql.Tx, projectI
 			enriched[VerbRevisePending] = m
 		}
 	}
-	// REFINE_TESTS_WRITE/JUDGE: writer and judge → EXECUTE model (gemma4:31b in live fleet).
+	// REFINE_TESTS_WRITE/JUDGE fallback: DECOMPOSE model (gemma4:31b in the live
+	// fleet). These used to fall back to the EXECUTE model, but as of 2026-09-02
+	// EXECUTE_BEAD is muse-glimmer (whose test-writing is unvalidated) while
+	// REFINE_TESTS deliberately stays on gemma — so a fleet file that omits
+	// these must not inherit the EXECUTE model. DECOMPOSE_SPEC == gemma in the
+	// default fleet and is the intended writer/judge model.
 	// REFINE_TESTS_CRITIQUE: critic → AUDIT model (qwen3:32b in live fleet).
 	if _, ok := enriched[VerbRefineTestsWrite]; !ok {
-		if m, ok := enriched[VerbExecuteBead]; ok {
+		if m, ok := enriched[VerbDecomposeSpec]; ok {
 			enriched[VerbRefineTestsWrite] = m
 		}
 	}
@@ -145,7 +150,7 @@ func SeedVerbModelAssignmentsFromFleet(ctx context.Context, tx *sql.Tx, projectI
 		}
 	}
 	if _, ok := enriched[VerbRefineTestsJudge]; !ok {
-		if m, ok := enriched[VerbExecuteBead]; ok {
+		if m, ok := enriched[VerbDecomposeSpec]; ok {
 			enriched[VerbRefineTestsJudge] = m
 		}
 	}

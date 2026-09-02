@@ -269,14 +269,18 @@ func enforcedTimeoutBudget(priorBudget, budgetDefault int) int {
 
 // timeoutBudgetNote fires on the FIRST in-lineage timeout and every one after.
 // Fail-fast rationale: across the exprvm-web lineage the "parser"/"handlers-
-// templates" beads time out on their thin DECOMPOSE spec every run, then
-// ADJUDICATE spends TWO execute_revised rounds ratcheting prescriptiveness
-// before the ~2800-char implementation-guide spec finally converges (projects
-// 40/41/42: rev2 timeout -> rev3 timeout -> rev4 success). Collapsing that to
-// one round — go maximally prescriptive AND double the budget on timeout #1 —
-// saves a full ~900s timeout + ANALYZE + COMPRESS + ADJUDICATE cycle per big
-// bead. Not suppressed for REFINE_TESTS beads (a run that never reached the
-// tests can't be a test defect), and re_refine is never the answer here.
+// templates" beads time out on their thin DECOMPOSE spec, and a second thin-spec
+// attempt just burns another budget re-learning what the first timeout already
+// showed. So the budget doubles from timeout #1 (mechanically, in Commit).
+//
+// The note deliberately does NOT tell ADJUDICATE to rewrite full_text into an
+// implementation guide or to make the agent "state its approach" first: on this
+// box, escalating spec prescriptiveness on a timeout retry was found
+// counterproductive (models fixate on the added scaffolding and spiral —
+// exprvm-web bakeoff, 2026-09-02). The retry is just: bumped budget + one
+// skeleton-first directive, nothing more. Not suppressed for REFINE_TESTS beads
+// (a run that never reached the tests can't be a test defect), and re_refine is
+// never the answer here.
 func timeoutBudgetNote(run, currentBudget, enforcedBudget int) string {
 	if run < 1 {
 		return ""
@@ -285,31 +289,24 @@ func timeoutBudgetNote(run, currentBudget, enforcedBudget int) string {
 	if run == 1 {
 		fmt.Fprintf(&b, "[Fast path — first timeout] The previous attempt ended in "+
 			"termination_cause=timeout: the agent ran out of the %ds budget before reaching a "+
-			"terminal state (a completed write_file, a test run). A timeout is almost always a spec "+
-			"that is too thin or unstructured for a one-turn implementation, not merely a slow model.\n\n",
-			currentBudget)
+			"terminal state (a completed write_file, a test run). This is a wall-clock limit; treat "+
+			"the budget as the bottleneck, not the spec.\n\n", currentBudget)
 	} else {
 		fmt.Fprintf(&b, "[Fast path — repeated timeout] The last %d execution attempts all ended in "+
-			"termination_cause=timeout. A prose-level revision has already failed — the agent has read "+
-			"prose and still could not finish in time.\n\n", run)
+			"termination_cause=timeout. Still a wall-clock limit — the budget keeps climbing "+
+			"mechanically each time.\n\n", run)
 	}
 	fmt.Fprintf(&b, "Action: issue execute_revised with trend=same, "+
 		"bead_spec_fit=execution_capability_problem. The orchestrator sets execution_budget to %ds "+
 		"mechanically regardless of what you put in revised_bead — do not spend the revision on the "+
 		"budget number, and do NOT choose re_refine (the tests were never reached).\n\n", enforcedBudget)
-	if run == 1 {
-		b.WriteString("Rewrite full_text as an implementation guide, not a description: the exact " +
-			"grammar / algorithm / state-transition rules, the function-by-function structure the agent " +
-			"should produce, and the specific standard-library calls to use. Also prepend one sentence " +
-			"telling the agent to write each output file with a minimal compiling skeleton FIRST and " +
-			"flesh it out in later turns rather than composing the whole file before the first " +
-			"write_file call.")
-	} else {
-		b.WriteString("Prose is no longer enough: put a verbatim minimal code skeleton for the failing " +
-			"area directly in full_text — the exact function signatures and body structure the agent can " +
-			"copy without interpretation. Keep the skeleton-first sentence if already present; do not " +
-			"duplicate it.")
-	}
+	b.WriteString("Do not rewrite full_text into an implementation guide and do not add a " +
+		"\"state your approach before writing code\" instruction — added prescriptiveness on a timeout " +
+		"retry tends to make the agent spiral. Make exactly one change to the spec: prepend a single " +
+		"sentence telling the agent to write each output file as a minimal compiling skeleton FIRST " +
+		"and flesh it out in later turns, rather than composing the whole file before the first " +
+		"write_file call. If that sentence is already present, do not add it again and make no other " +
+		"changes.")
 	return b.String()
 }
 

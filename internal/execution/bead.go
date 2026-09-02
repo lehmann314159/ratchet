@@ -181,7 +181,13 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	// bead 242, execs 198/199: content_chars=0 throughout, thinking_chars
 	// climbing to the budget wall, one [TURN] marker). See
 	// docs/format-json-tool-turn.md.
-	execOpts := &ollama.Options{OmitFormat: true}
+	// NumPredict: raise the per-turn generated-token cap from the 8192 default.
+	// EXECUTE_BEAD is now muse-glimmer:30b-q8_0-dflash, which on its passing
+	// parser-bead runs emitted ~32K chars (~8K tokens) of content in a single
+	// turn plus thinking — the 8192 cap clips a legitimate one-shot
+	// implementation mid-file. 16384 gives headroom while still bounding a
+	// degenerate non-terminating thinking stream (exprvm-web bakeoff, 2026-09-02).
+	execOpts := &ollama.Options{OmitFormat: true, NumPredict: 16384}
 	messages := []ollama.Message{
 		{Role: "system", Content: guidance.InjectForVerbPath(executeBeadSystemPrompt, folderPath, db.VerbExecuteBead, "")},
 		{Role: "user", Content: buildBeadUserMsg(parsedBead.FullText, parsedBead.OutputFiles, parsedBead.ExitCriteria, contextFiles, priorHistory, resumeNote, folderPath)},
