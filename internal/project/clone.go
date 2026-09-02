@@ -522,8 +522,9 @@ func cloneBeads(ctx context.Context, tx *sql.Tx, fromID, newID int64) (beadIDs i
 // clean rather than carrying forward whatever partial state it was in when
 // the source project stopped. Mirrors rewind-bead's own reset shape (delete
 // test files, restore impl files to their scaffold stub, clear
-// test_refinements/compressed_history) rather than inventing a new one —
-// same problem, same fix, just triggered by a clone instead of a rewind.
+// test_refinements/compressed_history, drop the execution history) rather
+// than inventing a new one — same problem, same fix, just triggered by a
+// clone instead of a rewind.
 func reviveFullStoppedBeads(ctx context.Context, tx *sql.Tx, projectID int64, beadIDs []int64, folderPath string) error {
 	for _, beadID := range beadIDs {
 		var outputFilesJSON string
@@ -558,6 +559,47 @@ func reviveFullStoppedBeads(ctx context.Context, tx *sql.Tx, projectID int64, be
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM compressed_history WHERE bead_id = ?`, beadID); err != nil {
 			return fmt.Errorf("clear compressed_history for revived bead %d: %w", beadID, err)
+		}
+
+		// Drop the cloned execution history. A revived bead re-runs every
+		// attempt from scratch, so the source's attempts would otherwise
+		// (a) count toward atExecutionCap — starting the bead partway to its
+		// escalation cap — and (b) feed buildDiffSignal / trailingTimeoutRun a
+		// stale "already failed N times" signal against a spec/fleet the clone
+		// is deliberately re-testing. Delete children first: analyses and
+		// adjudications both hold a NOT NULL REFERENCES executions(id), and FK
+		// enforcement is on.
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM analyses WHERE execution_id IN
+			  (SELECT id FROM executions WHERE bead_id = ?)`, beadID); err != nil {
+			return fmt.Errorf("clear analyses for revived bead %d: %w", beadID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM adjudications WHERE bead_id = ?`, beadID); err != nil {
+			return fmt.Errorf("clear adjudications for revived bead %d: %w", beadID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM executions WHERE bead_id = ?`, beadID); err != nil {
+			return fmt.Errorf("clear executions for revived bead %d: %w", beadID, err)
+		}
+
+		// Every non-complete job cloned for a revived bead is about an attempt
+		// that no longer exists — a mid-ANALYZE job whose execution was just
+		// cleared above, a REFINE_TESTS job at a now-deleted cycle, an
+		// escalation raised on one of those. Left in place a pending/running/
+		// failed_retry job escalates on the dangling reference (and, while
+		// merely present, suppresses the fresh EnqueueBeadExecution dispatch
+		// below — its guard counts exactly those statuses), and a carried-over
+		// escalated/cancelled row is misleading history about work that was
+		// wiped. Keep only 'complete' rows; drop the rest and their attempts.
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM handoff_attempts WHERE job_id IN
+			  (SELECT id FROM handoff_jobs
+			   WHERE project_id = ? AND bead_id = ? AND status != 'complete')`, projectID, beadID); err != nil {
+			return fmt.Errorf("clear stale job attempts for revived bead %d: %w", beadID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM handoff_jobs
+			WHERE project_id = ? AND bead_id = ? AND status != 'complete'`, projectID, beadID); err != nil {
+			return fmt.Errorf("clear stale jobs for revived bead %d: %w", beadID, err)
 		}
 	}
 	return nil

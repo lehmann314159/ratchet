@@ -215,6 +215,83 @@ func orientationOnlyNote(ctx context.Context, d *db.DB, beadID int64) string {
 		"If that sentence is already present, do not prepend it again. Make no other changes to the spec."
 }
 
+// countTrailingTimeouts returns how many of the most recent consecutive
+// executions for beadID (current lineage, real attempts only) ended with
+// termination_cause='timeout'. monitor_terminated is deliberately excluded:
+// that is MONITOR stopping a misbehaving agent, where more wall-clock makes
+// things worse, not a steady generator that ran out of time.
+func countTrailingTimeouts(ctx context.Context, d *db.DB, beadID int64) int {
+	lineageIDs, err := currentLineageRevisionIDs(ctx, d, beadID)
+	if err != nil {
+		return 0
+	}
+	rows, err := d.QueryContext(ctx, `
+		SELECT termination_cause, bead_revision_id
+		FROM executions
+		WHERE bead_id = ? AND infra_failure = 0 AND test_first_attempt = 0
+		  AND termination_cause IS NOT NULL
+		ORDER BY id DESC`, beadID)
+	if err != nil {
+		return 0
+	}
+	defer rows.Close()
+	run := 0
+	for rows.Next() {
+		var cause string
+		var revID int64
+		if err := rows.Scan(&cause, &revID); err != nil {
+			return run
+		}
+		if !lineageIDs[revID] {
+			continue // pre-rewind attempt — not part of the current lineage
+		}
+		if cause != "timeout" {
+			break
+		}
+		run++
+	}
+	return run
+}
+
+// enforcedTimeoutBudget is the execution_budget a retry gets after a run of
+// >=2 consecutive timeouts: double the just-executed revision's value, capped
+// at 8x the project default (900s default -> 7200s ceiling). Compounds
+// naturally across attempts because priorBudget is itself the last enforced
+// value.
+func enforcedTimeoutBudget(priorBudget, budgetDefault int) int {
+	enforced := priorBudget * 2
+	if ceiling := budgetDefault * 8; enforced > ceiling {
+		enforced = ceiling
+	}
+	return enforced
+}
+
+// recurringTimeoutNote fires when the last >=2 in-lineage executions all ended
+// termination_cause='timeout'. Unlike orientationOnlyNote it is NOT suppressed
+// for REFINE_TESTS beads — a single-turn timeout is orthogonal to whether the
+// locked tests are correct, and re_refine is never the right answer for a run
+// that never reached the tests. It tells ADJUDICATE the budget will be raised
+// mechanically in Commit no matter what it returns, so the revision should go
+// toward making the implementation reachable within a turn rather than toward
+// spec prose or re_refine.
+func recurringTimeoutNote(run, currentBudget, enforcedBudget int) string {
+	if run < 2 {
+		return ""
+	}
+	return fmt.Sprintf("[Fast path — repeated timeout] The last %d execution attempts all ended in "+
+		"termination_cause=timeout. The agent is generating output but cannot reach a terminal state "+
+		"(a completed write_file, a test run) within the %ds budget — this is a wall-clock limit, not "+
+		"a spec defect and not a test defect.\n\n"+
+		"Action: issue execute_revised with trend=same, bead_spec_fit=execution_capability_problem. "+
+		"The orchestrator will set execution_budget to %ds mechanically regardless of what you put in "+
+		"revised_bead — do not spend the revision on the budget number, and do NOT choose re_refine "+
+		"(the tests were never reached). Prepend exactly one sentence to the existing full_text telling "+
+		"the agent to write each output file with a minimal compiling skeleton FIRST and flesh it out "+
+		"in later turns, rather than composing the whole file before the first write_file call. If that "+
+		"sentence is already present, do not add it again. Make no other changes to the spec.",
+		run, currentBudget, enforcedBudget)
+}
+
 // partialProgressNote checks whether some (but not all) output_files for the
 // bead already exist on disk. When partial state is present, ADJUDICATE must
 // know which files are done and which remain — otherwise it misreads the
@@ -849,6 +926,20 @@ type AdjudicateNextExecution struct {
 	// revised spec is internally consistent and that ADJUDICATE didn't invent a
 	// new required test function (which is re_refine's job, not execute_revised's).
 	currentBeadSpec ParsedBead
+
+	// trailingTimeouts caches, from Run, how many of the most recent
+	// consecutive in-lineage executions ended termination_cause='timeout'. A run
+	// of >=2 means wall-clock, not the spec, is the bottleneck; Commit's retry
+	// paths then force execution_budget up regardless of the value the model
+	// returned (recurringTimeoutNote warns the model this is coming). Born from
+	// the exprvm-web-baseline-6 bead 269 incident: gemma4:31b streamed a whole
+	// recursive-descent parser in one turn, got killed before the first
+	// write_file across 3 attempts, and ADJUDICATE kept reading "stub file +
+	// panicking test" as execution_capability_problem and rewriting spec prose
+	// while leaving the budget at 900. orientationOnlyNote's budget-double fast
+	// path is suppressed for REFINE_TESTS beads, so this one had no timeout
+	// handling at all — hence a mechanical enforcement independent of that note.
+	trailingTimeouts int
 }
 
 func (h *AdjudicateNextExecution) Verb() string { return db.VerbAdjudicateNextExecution }
@@ -877,6 +968,7 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 	h.currentBeadSpec = ParsedBead{
 		Title: currentBead.Title, FullText: currentBead.FullText,
 		OutputFiles: currentBead.OutputFiles, ExitCriteria: currentBead.ExitCriteria,
+		ExecutionBudget: currentBead.ExecutionBudget,
 	}
 
 	// Input 2: revision log.
@@ -910,6 +1002,7 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 	}
 	h.budgetDefault = project.ExecutionBudgetDefault
 	h.folderPath = project.FolderPath
+	h.trailingTimeouts = countTrailingTimeouts(ctx, d, beadID)
 
 	model, err := loadVerbModel(ctx, d, job.ProjectID, db.VerbAdjudicateNextExecution)
 	if err != nil {
@@ -935,6 +1028,10 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 	}
 	if note := orientationOnlyNote(ctx, d, beadID); note != "" {
 		findings += "\n\n" + note
+	}
+	if h.trailingTimeouts >= 2 {
+		findings += "\n\n" + recurringTimeoutNote(h.trailingTimeouts, h.currentBeadSpec.ExecutionBudget,
+			enforcedTimeoutBudget(h.currentBeadSpec.ExecutionBudget, h.budgetDefault))
 	}
 	if note := missingPathNote(ctx, d, beadID); note != "" {
 		findings += "\n\n" + note
@@ -1359,6 +1456,19 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 		if atCap, err := h.atExecutionCap(ctx, tx, job.ProjectID, beadID, now, job.ID); err != nil || atCap {
 			return err
 		}
+		// Same trailing-timeout escalation as execute_revised, but execute_as_is
+		// makes no new revision — bump the current revision's budget in place so
+		// the identical retry isn't handed the same wall clock that already
+		// killed it twice.
+		if h.trailingTimeouts >= 2 {
+			enforced := enforcedTimeoutBudget(h.currentBeadSpec.ExecutionBudget, h.budgetDefault)
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE bead_revisions SET execution_budget = ?
+				WHERE id = (SELECT current_revision_id FROM beads WHERE id = ?)
+				  AND execution_budget < ?`, enforced, beadID, enforced); err != nil {
+				return fmt.Errorf("escalate budget on repeated timeout: %w", err)
+			}
+		}
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE beads SET status = 'pending' WHERE id = ?`, beadID); err != nil {
 			return fmt.Errorf("reset bead to pending: %w", err)
@@ -1393,6 +1503,22 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 		// next round and would otherwise anchor to the unclamped value.
 		if out.RevisedBead.ExecutionBudget < h.budgetDefault {
 			out.RevisedBead.ExecutionBudget = h.budgetDefault
+		}
+		// Mechanical trailing-timeout escalation: when the last >=2 in-lineage
+		// executions all timed out, wall-clock is the bottleneck. Force the
+		// budget to double the just-executed revision's value (capped), over
+		// whatever the model returned — the prompt's prose "double the budget"
+		// rule depends on the model classifying a stub-file timeout correctly
+		// and a weak model does not (see h.trailingTimeouts).
+		if h.trailingTimeouts >= 2 {
+			enforced := enforcedTimeoutBudget(h.currentBeadSpec.ExecutionBudget, h.budgetDefault)
+			if out.RevisedBead.ExecutionBudget < enforced {
+				slog.Warn("ADJUDICATE budget mechanically escalated on repeated timeout",
+					"bead_id", beadID, "trailing_timeouts", h.trailingTimeouts,
+					"prior_budget", h.currentBeadSpec.ExecutionBudget,
+					"model_budget", out.RevisedBead.ExecutionBudget, "enforced_budget", enforced)
+				out.RevisedBead.ExecutionBudget = enforced
+			}
 		}
 		budget := out.RevisedBead.ExecutionBudget
 

@@ -754,6 +754,10 @@ Budget guidance for execute_revised:
     no new spec-related errors, the budget is the bottleneck — the spec is not the problem.
     Double the current execution_budget in the revised bead. Do not spend the revision on spec
     changes when the only observable failure is running out of time.
+  - After 2 or more consecutive timeouts the orchestrator ALSO raises execution_budget
+    mechanically (to double the last value, capped), so your number is a floor, not the final
+    word — a "[Fast path — repeated timeout]" note will say so when this applies. On that path
+    do not choose re_refine: a run that never finished cannot have reached the tests.
 
 Pre-implementation commitment for persistent capability failures:
   - When the agent has repeated the same mistake across multiple attempts, require it to state

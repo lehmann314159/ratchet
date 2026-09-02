@@ -894,6 +894,61 @@ func TestCloneProject_RevivesFullStoppedBead(t *testing.T) {
 		VALUES (?, ?, 'stale narration', '2026-01-01T00:00:00Z')`,
 		beadID, projectID)
 
+	// Two failed attempts from before the source stopped: a revived bead must
+	// not carry these forward — atExecutionCap counts executions rows, and
+	// buildDiffSignal/trailingTimeoutRun read the termination causes.
+	execRes, err := d.ExecContext(ctx, `
+		INSERT INTO executions
+		  (project_id, bead_id, bead_revision_id, trace_path, termination_cause, started_at, ended_at)
+		VALUES (?, ?, ?, 'traces/x.log', 'timeout', '2026-01-01T00:00:00Z', '2026-01-01T00:15:00Z')`,
+		projectID, beadID, revID)
+	if err != nil {
+		t.Fatalf("seed execution: %v", err)
+	}
+	execID, _ := execRes.LastInsertId()
+	mustExecFixture(t, d, `
+		INSERT INTO executions
+		  (project_id, bead_id, bead_revision_id, trace_path, termination_cause, started_at, ended_at)
+		VALUES (?, ?, ?, 'traces/y.log', 'timeout', '2026-01-01T00:20:00Z', '2026-01-01T00:35:00Z')`,
+		projectID, beadID, revID)
+	mustExecFixture(t, d, `
+		INSERT INTO analyses (project_id, execution_id, mechanical_findings, analyzer_interpretation, created_at)
+		VALUES (?, ?, 'stub only', 'timed out', '2026-01-01T00:16:00Z')`,
+		projectID, execID)
+	mustExecFixture(t, d, `
+		INSERT INTO adjudications
+		  (project_id, bead_id, execution_id, trend, bead_spec_fit, reasoning_text,
+		   attempt_budget_cost, monitor_escalation_status, decision, created_at)
+		VALUES (?, ?, ?, 'same', 'execution_capability_problem', 'retry', 900, 0, 'execute_revised', '2026-01-01T00:17:00Z')`,
+		projectID, beadID, execID)
+
+	// A job that was mid-flight when the source stopped — its execution is
+	// about to be cleared, so a revived bead must not carry it forward (it
+	// would escalate on a dangling reference, and while present it suppresses
+	// the fresh dispatch).
+	staleJobRes, err := d.ExecContext(ctx, `
+		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
+		VALUES (?, 'ANALYZE_EXECUTION', ?, 'failed_retry', '2026-01-01T00:18:00Z', '2026-01-01T00:18:00Z')`,
+		projectID, beadID)
+	if err != nil {
+		t.Fatalf("seed stale job: %v", err)
+	}
+	staleJobID, _ := staleJobRes.LastInsertId()
+	mustExecFixture(t, d, `
+		INSERT INTO handoff_attempts (job_id, attempt_number, raw_output, validation_result, created_at)
+		VALUES (?, 1, 'partial', 'invalid', '2026-01-01T00:18:00Z')`, staleJobID)
+	// An escalation raised on that same dead attempt — also stale, must not
+	// carry forward as if a human still needs to look at it.
+	mustExecFixture(t, d, `
+		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
+		VALUES (?, 'EXECUTE_BEAD', ?, 'escalated', '2026-01-01T00:19:00Z', '2026-01-01T00:19:00Z')`,
+		projectID, beadID)
+	// A completed job from before the stop — kept as audit history.
+	mustExecFixture(t, d, `
+		INSERT INTO handoff_jobs (project_id, verb, bead_id, status, created_at, updated_at)
+		VALUES (?, 'REFINE_TESTS_WRITE', ?, 'complete', '2026-01-01T00:10:00Z', '2026-01-01T00:12:00Z')`,
+		projectID, beadID)
+
 	newFolder := filepath.Join(t.TempDir(), "clone")
 	newID, _, _, err := cloneProject(ctx, d, projectID, "revived-clone", newFolder, "")
 	if err != nil {
@@ -931,13 +986,59 @@ func TestCloneProject_RevivesFullStoppedBead(t *testing.T) {
 		t.Errorf("compressed_history for revived bead = %d rows, want 0 (stale narration must be cleared)", historyCount)
 	}
 
+	for _, tc := range []struct {
+		table string
+		query string
+	}{
+		{"executions", `SELECT COUNT(*) FROM executions WHERE bead_id = ?`},
+		{"analyses", `SELECT COUNT(*) FROM analyses WHERE execution_id IN (SELECT id FROM executions WHERE bead_id = ?)`},
+		{"adjudications", `SELECT COUNT(*) FROM adjudications WHERE bead_id = ?`},
+	} {
+		var n int
+		if err := d.QueryRowContext(ctx, tc.query, newBeadID).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", tc.table, err)
+		}
+		if n != 0 {
+			t.Errorf("%s for revived bead = %d rows, want 0 (stale attempt history must be cleared)", tc.table, n)
+		}
+	}
+
+	// The stale mid-flight ANALYZE_EXECUTION job and the stale escalation must
+	// not survive the clone — only the completed history row plus the fresh
+	// dispatch below should remain for the revived bead.
+	var staleCount, nonTerminalCount, completeCount int
+	if err := d.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM handoff_jobs WHERE project_id = ? AND bead_id = ? AND status IN ('escalated','cancelled','failed_retry','running')`,
+		newID, newBeadID).Scan(&staleCount); err != nil {
+		t.Fatalf("count stale jobs: %v", err)
+	}
+	if staleCount != 0 {
+		t.Errorf("stale (non-complete, non-fresh) jobs for revived bead = %d rows, want 0", staleCount)
+	}
+	if err := d.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM handoff_jobs WHERE project_id = ? AND bead_id = ? AND status IN ('pending','running','failed_retry')`,
+		newID, newBeadID).Scan(&nonTerminalCount); err != nil {
+		t.Fatalf("count non-terminal jobs: %v", err)
+	}
+	if nonTerminalCount != 1 {
+		t.Errorf("non-terminal jobs for revived bead = %d, want exactly 1 (the fresh dispatch)", nonTerminalCount)
+	}
+	if err := d.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM handoff_jobs WHERE project_id = ? AND bead_id = ? AND status = 'complete'`,
+		newID, newBeadID).Scan(&completeCount); err != nil {
+		t.Fatalf("count complete jobs: %v", err)
+	}
+	if completeCount != 1 {
+		t.Errorf("completed history jobs for revived bead = %d, want 1 (kept as audit history)", completeCount)
+	}
+
 	// Resetting the bead's status alone doesn't get it dispatched — nothing
 	// enqueues a job for it outside the normal "previous bead just
 	// succeeded" REVISE_PENDING chain. A plain clone with nothing else
 	// queued must dispatch it itself.
 	var jobVerb, jobStatus string
 	if err := d.QueryRowContext(ctx,
-		`SELECT verb, status FROM handoff_jobs WHERE project_id = ? AND bead_id = ?`,
+		`SELECT verb, status FROM handoff_jobs WHERE project_id = ? AND bead_id = ? AND status = 'pending'`,
 		newID, newBeadID,
 	).Scan(&jobVerb, &jobStatus); err != nil {
 		t.Fatalf("expected a dispatched job for the revived bead, query failed: %v", err)

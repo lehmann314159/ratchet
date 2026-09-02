@@ -2,11 +2,14 @@ package verbs
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"ratchet/internal/db"
 )
 
 // writeCrossFileMismatchPkg lays out a minimal buildable package with the same
@@ -178,5 +181,95 @@ func RealWork() float64 { x := 2.0; return x * x }
 				t.Errorf("%s must not be flagged as a stub (not a zero-value return): %v", notWant, stubs)
 			}
 		}
+	}
+}
+
+func TestEnforcedTimeoutBudget(t *testing.T) {
+	cases := []struct{ prior, def, want int }{
+		{900, 900, 1800},  // first escalation
+		{1800, 900, 3600}, // compounds
+		{3600, 900, 7200}, // reaches ceiling (8x default)
+		{7200, 900, 7200}, // clamped at ceiling
+		{5000, 900, 7200}, // clamped from below the doubled value
+	}
+	for _, c := range cases {
+		if got := enforcedTimeoutBudget(c.prior, c.def); got != c.want {
+			t.Errorf("enforcedTimeoutBudget(%d, %d) = %d, want %d", c.prior, c.def, got, c.want)
+		}
+	}
+}
+
+func TestCountTrailingTimeouts(t *testing.T) {
+	d := openTestDB(t)
+	seedProject(t, d, -1, "fixture: trailing-timeout counting for ADJUDICATE budget escalation")
+	beadID, revID := seedBead(t, d, -1, "parser")
+
+	// Not a timeout most-recently → run is 0 even with an earlier timeout.
+	seedExecution(t, d, -1, beadID, revID, "timeout", nil)
+	seedExecution(t, d, -1, beadID, revID, "success", nil)
+	if got := countTrailingTimeouts(context.Background(), d, beadID); got != 0 {
+		t.Fatalf("after [timeout, success] trailing count = %d, want 0", got)
+	}
+
+	// Two more timeouts on top → run is 2 (monitor_terminated does not extend it).
+	seedExecution(t, d, -1, beadID, revID, "timeout", nil)
+	seedExecution(t, d, -1, beadID, revID, "timeout", nil)
+	if got := countTrailingTimeouts(context.Background(), d, beadID); got != 2 {
+		t.Fatalf("after [...timeout, timeout] trailing count = %d, want 2", got)
+	}
+
+	seedExecution(t, d, -1, beadID, revID, "monitor_terminated", nil)
+	if got := countTrailingTimeouts(context.Background(), d, beadID); got != 0 {
+		t.Fatalf("monitor_terminated must not count as a timeout; got %d, want 0", got)
+	}
+}
+
+// TestAdjudicateCommit_RepeatedTimeoutEscalatesBudget locks in the fix for the
+// exprvm-web-baseline-6 bead 269 incident: a REFINE_TESTS bead timed out three
+// times in one-turn generation and ADJUDICATE left execution_budget at 900 each
+// round. Commit must now double it mechanically regardless of the model's value.
+func TestAdjudicateCommit_RepeatedTimeoutEscalatesBudget(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "fixture: ADJUDICATE mechanical budget escalation on repeated timeout")
+	beadID, revID := seedBead(t, d, -1, "parser")
+	seedExecution(t, d, -1, beadID, revID, "timeout", nil)
+	seedExecution(t, d, -1, beadID, revID, "timeout", nil)
+
+	job := seedJob(t, d, -1, db.VerbAdjudicateNextExecution, sql.NullInt64{Int64: beadID, Valid: true})
+
+	h := &AdjudicateNextExecution{
+		budgetDefault:    900,
+		folderPath:       t.TempDir(),
+		trailingTimeouts: 2,
+		currentBeadSpec: ParsedBead{
+			Title: "parser", FullText: "spec for parser",
+			OutputFiles: []string{"parser.go"}, ExitCriteria: []string{"go test ./..."},
+			ExecutionBudget: 900,
+		},
+	}
+	parsed := AdjudicateNextExecutionOutput{
+		Trend: "same", BeadSpecFit: "execution_capability_problem",
+		Reasoning: "timed out again; the agent runs out of time before writing",
+		Decision:  "execute_revised",
+		RevisedBead: &ParsedBead{
+			Title: "parser", FullText: "Write parser.go with a compiling skeleton first.",
+			OutputFiles: []string{"parser.go"}, ExitCriteria: []string{"go test ./..."},
+			ExecutionBudget: 900, // model left it unchanged — Commit must override
+			MonitorOverride: "honor",
+		},
+	}
+
+	inTx(t, d, func(tx *sql.Tx) error { return h.Commit(ctx, tx, job, parsed) })
+
+	var budget int
+	if err := d.QueryRowContext(ctx, `
+		SELECT br.execution_budget
+		FROM beads b JOIN bead_revisions br ON br.id = b.current_revision_id
+		WHERE b.id = ?`, beadID).Scan(&budget); err != nil {
+		t.Fatalf("read revised revision budget: %v", err)
+	}
+	if budget != 1800 {
+		t.Errorf("revised execution_budget = %d, want 1800 (mechanical 2x escalation)", budget)
 	}
 }
