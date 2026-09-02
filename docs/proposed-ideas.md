@@ -201,9 +201,11 @@ of "what should ratchet work on next" should weigh against new-feature work:
 
 ---
 
-## 6. Third-model decider in the produce→critique→decide cycles (proposed 2026-09-02)
+## 6. Independent producer in the produce→critique→decide cycles (proposed 2026-09-02)
 
-**Status: proposed, not designed.**
+**Status: execute-cycle version decided (lands with the EXECUTE_BEAD→muse-glimmer
+swap — see the exprvm-web-baseline-6 handoff); refine-tests version proposed,
+gated on validating muse test-writing; decompose version open.**
 
 Every three-verb cycle currently has the *decider* run on the *producer's*
 model:
@@ -225,27 +227,33 @@ progressively re-asserted a fabricated code-level defect, overriding the
 self-certification on a brittle tie-break (`project_reconcile_self_certification`);
 `feedback_dont_assume_bad_verdict_propagates`.
 
-**Options, cheapest → most robust:**
-1. Decider ≠ producer using existing models: RECONCILE → qwen3:32b, JUDGE →
-   qwen3:32b. No new model load. Weak spot: critic and decider become one
-   model (rubber-stamp risk), but strictly better than producer-decides.
-2. Third distinct model as decider: produce=gemma, critique=qwen3, decide=X.
-   Genuinely independent. Costs a third model load per cycle (box loads one
-   at a time — minutes).
+**The fix is to move the PRODUCER to a different model, not the decider.**
+Keep gemma4:31b as the decider (JUDGE/ADJUDICATE/RECONCILE are schema-mode
+JSON decision verbs and gemma is a known-adequate quantity there); put a
+different model in the WRITE/EXECUTE seat. ADJUDICATE is also *more* useful
+judging a different model's output — it can't wave a problem away with "I'd
+have done it this way" when it didn't produce the code.
 
-**muse-glimmer is a poor fit for the decider role** despite being the fresh
-candidate: the decider verbs are schema-mode JSON, and the 2026-08-31 fleet
-session found muse produces degenerate/malformed schema output
-(`project_model_qualification_harness`: "muse DECOMPOSE-bare-json degenerate +
-RECONCILE-schema malformed"), plus the ATEM tool-call parse error seen
-2026-09-02. Its structured-output reliability is below average, which is
-disqualifying for an arbiter until proven otherwise.
+- **execute cycle**: EXECUTE_BEAD → muse-glimmer, ANALYZE → qwen3,
+  ADJUDICATE → gemma. This falls out **for free** of the EXECUTE_BEAD model
+  swap decided in `model-qualification-harness.md` follow-up / the
+  exprvm-web-baseline-6 handoff — no extra work, the cycle just stops being
+  self-grading.
+- **refine-tests cycle**: REFINE_TESTS_WRITE → muse, CRITIQUE → qwen3,
+  JUDGE → gemma. Same shape, gated on validating muse's *test*-writing
+  (currently untested — staying on gemma for the next baseline).
+- **decompose cycle**: can't move the producer — DECOMPOSE_SPEC emits
+  schema-mode `beads[]` JSON, which is muse's known weak spot (2026-08-31
+  fleet session: "muse DECOMPOSE-bare-json degenerate"). Leave as-is or find
+  a third schema-capable producer.
 
-**Gate:** needs the replay+Validate qualification harness (§ `model-qualification-harness.md`)
-run against recorded RECONCILE / JUDGE / ADJUDICATE inputs for any candidate
-decider model — check malformed-output rate first, decision quality second —
-before wiring anything in. Separate initiative from EXECUTE_BEAD model
-selection; don't couple them.
+**Do NOT put muse in the decider seat** — the malformed-schema history +
+2026-09-02 ATEM tool-parse error make it below-average at exactly the
+structured output an arbiter must produce.
+
+Not a separate initiative for the execute cycle (it's a side effect of the
+model swap). For refine-tests it needs muse test-writing validated first via
+the bakeoff harness.
 
 ---
 
