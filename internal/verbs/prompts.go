@@ -750,14 +750,16 @@ Budget guidance for execute_revised:
   - execution_budget and monitor_override must be explicitly stated, not inherited silently.
   - For non-timeout failures, copy the "Actual execution budget" value from Input 1 unchanged
     unless you have a specific reason to change it.
-  - If the primary failure across recent attempts is timeout (termination_cause: timeout) with
-    no new spec-related errors, the budget is the bottleneck — the spec is not the problem.
-    Double the current execution_budget in the revised bead. Do not spend the revision on spec
-    changes when the only observable failure is running out of time.
-  - After 2 or more consecutive timeouts the orchestrator ALSO raises execution_budget
-    mechanically (to double the last value, capped), so your number is a floor, not the final
-    word — a "[Fast path — repeated timeout]" note will say so when this applies. On that path
-    do not choose re_refine: a run that never finished cannot have reached the tests.
+  - On ANY timeout (termination_cause: timeout), the budget is a bottleneck: double the current
+    execution_budget in the revised bead. The orchestrator ALSO raises it mechanically from the
+    FIRST timeout on (double the last value each time, capped 900->1800->3600->7200), so your
+    number is a floor, not the final word — a "[Fast path — first timeout]" / "[Fast path —
+    repeated timeout]" note will say so. On that path never choose re_refine: a run that never
+    finished cannot have reached the tests.
+  - A timeout is also usually a spec too thin for a one-turn implementation, so unlike other
+    "budget is the bottleneck" cases you SHOULD also rewrite the spec — but toward an
+    implementation guide (exact grammar/algorithm, function-by-function structure, specific
+    stdlib calls), not more prose. The fast-path note spells this out.
 
 Pre-implementation commitment for persistent capability failures:
   - When the agent has repeated the same mistake across multiple attempts, require it to state
@@ -770,6 +772,9 @@ Specificity ratchet for RECURRING failures:
     already read prose and failed. Escalate to verbatim code: include the exact function
     call, correct type, or a minimal working skeleton directly in the revised full_text.
     Write it literally so the agent can copy it without interpretation.
+  - Timeouts ratchet faster: escalate to a full implementation-guide spec on the FIRST
+    timeout, not the second — the thin spec is why the attempt ran out of time, and a second
+    thin-spec attempt just burns another budget.
   - Apply this to every RECURRING failure class, not just the most recent one.
 
 Vacuous test pass: if the bead's exit_criteria include a test command and mechanical_findings

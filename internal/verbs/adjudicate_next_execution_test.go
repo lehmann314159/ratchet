@@ -224,52 +224,67 @@ func TestCountTrailingTimeouts(t *testing.T) {
 	}
 }
 
-// TestAdjudicateCommit_RepeatedTimeoutEscalatesBudget locks in the fix for the
-// exprvm-web-baseline-6 bead 269 incident: a REFINE_TESTS bead timed out three
-// times in one-turn generation and ADJUDICATE left execution_budget at 900 each
-// round. Commit must now double it mechanically regardless of the model's value.
-func TestAdjudicateCommit_RepeatedTimeoutEscalatesBudget(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	seedProject(t, d, -1, "fixture: ADJUDICATE mechanical budget escalation on repeated timeout")
-	beadID, revID := seedBead(t, d, -1, "parser")
-	seedExecution(t, d, -1, beadID, revID, "timeout", nil)
-	seedExecution(t, d, -1, beadID, revID, "timeout", nil)
+// TestAdjudicateCommit_TimeoutEscalatesBudget locks in the fail-fast fix born
+// from the exprvm-web-baseline-6 parser beads: a one-turn-generation timeout
+// where ADJUDICATE left execution_budget at 900 and ratcheted spec prose over
+// two rounds. Commit must now double the budget mechanically from the FIRST
+// timeout, regardless of the model's value, and compound on the next.
+func TestAdjudicateCommit_TimeoutEscalatesBudget(t *testing.T) {
+	run := func(t *testing.T, trailing, priorBudget, wantBudget int, decision string) {
+		t.Helper()
+		d := openTestDB(t)
+		ctx := context.Background()
+		seedProject(t, d, -1, "fixture: ADJUDICATE mechanical budget escalation on timeout")
+		beadID, revID := seedBead(t, d, -1, "parser")
+		for i := 0; i < trailing; i++ {
+			seedExecution(t, d, -1, beadID, revID, "timeout", nil)
+		}
+		// Put the just-executed revision's budget where the test wants it.
+		if _, err := d.ExecContext(ctx, `UPDATE bead_revisions SET execution_budget = ? WHERE id = ?`,
+			priorBudget, revID); err != nil {
+			t.Fatalf("set prior budget: %v", err)
+		}
+		job := seedJob(t, d, -1, db.VerbAdjudicateNextExecution, sql.NullInt64{Int64: beadID, Valid: true})
 
-	job := seedJob(t, d, -1, db.VerbAdjudicateNextExecution, sql.NullInt64{Int64: beadID, Valid: true})
+		h := &AdjudicateNextExecution{
+			budgetDefault:    900,
+			folderPath:       t.TempDir(),
+			trailingTimeouts: trailing,
+			currentBeadSpec: ParsedBead{
+				Title: "parser", FullText: "spec for parser",
+				OutputFiles: []string{"parser.go"}, ExitCriteria: []string{"go test ./..."},
+				ExecutionBudget: priorBudget,
+			},
+		}
+		parsed := AdjudicateNextExecutionOutput{
+			Trend: "same", BeadSpecFit: "execution_capability_problem",
+			Reasoning: "timed out; the agent runs out of time before writing",
+			Decision:  decision,
+		}
+		if decision == "execute_revised" {
+			parsed.RevisedBead = &ParsedBead{
+				Title: "parser", FullText: "Write parser.go with a compiling skeleton first.",
+				OutputFiles: []string{"parser.go"}, ExitCriteria: []string{"go test ./..."},
+				ExecutionBudget: priorBudget, // model left it unchanged — Commit must override
+				MonitorOverride: "honor",
+			}
+		}
 
-	h := &AdjudicateNextExecution{
-		budgetDefault:    900,
-		folderPath:       t.TempDir(),
-		trailingTimeouts: 2,
-		currentBeadSpec: ParsedBead{
-			Title: "parser", FullText: "spec for parser",
-			OutputFiles: []string{"parser.go"}, ExitCriteria: []string{"go test ./..."},
-			ExecutionBudget: 900,
-		},
-	}
-	parsed := AdjudicateNextExecutionOutput{
-		Trend: "same", BeadSpecFit: "execution_capability_problem",
-		Reasoning: "timed out again; the agent runs out of time before writing",
-		Decision:  "execute_revised",
-		RevisedBead: &ParsedBead{
-			Title: "parser", FullText: "Write parser.go with a compiling skeleton first.",
-			OutputFiles: []string{"parser.go"}, ExitCriteria: []string{"go test ./..."},
-			ExecutionBudget: 900, // model left it unchanged — Commit must override
-			MonitorOverride: "honor",
-		},
+		inTx(t, d, func(tx *sql.Tx) error { return h.Commit(ctx, tx, job, parsed) })
+
+		var budget int
+		if err := d.QueryRowContext(ctx, `
+			SELECT br.execution_budget
+			FROM beads b JOIN bead_revisions br ON br.id = b.current_revision_id
+			WHERE b.id = ?`, beadID).Scan(&budget); err != nil {
+			t.Fatalf("read current revision budget: %v", err)
+		}
+		if budget != wantBudget {
+			t.Errorf("execution_budget = %d, want %d", budget, wantBudget)
+		}
 	}
 
-	inTx(t, d, func(tx *sql.Tx) error { return h.Commit(ctx, tx, job, parsed) })
-
-	var budget int
-	if err := d.QueryRowContext(ctx, `
-		SELECT br.execution_budget
-		FROM beads b JOIN bead_revisions br ON br.id = b.current_revision_id
-		WHERE b.id = ?`, beadID).Scan(&budget); err != nil {
-		t.Fatalf("read revised revision budget: %v", err)
-	}
-	if budget != 1800 {
-		t.Errorf("revised execution_budget = %d, want 1800 (mechanical 2x escalation)", budget)
-	}
+	t.Run("first timeout, execute_revised", func(t *testing.T) { run(t, 1, 900, 1800, "execute_revised") })
+	t.Run("second timeout compounds", func(t *testing.T) { run(t, 2, 1800, 3600, "execute_revised") })
+	t.Run("first timeout, execute_as_is bumps in place", func(t *testing.T) { run(t, 1, 900, 1800, "execute_as_is") })
 }
