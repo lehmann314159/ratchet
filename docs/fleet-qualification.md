@@ -105,19 +105,24 @@ stale against `refine-bakeoff` HEAD.
 
 ### REFINE_TESTS_WRITE
 
-| model | case | wall | turns | tok/s | compiles | coverage | passes good | kills mutant | rubric |
-|-------|------|------|-------|-------|----------|----------|-------------|--------------|--------|
-| qwen3.6:35b-a3b | b313-c1 | 3m34s | 10 | 68 | yes | 1/1 | **no** | — | ✗ |
-| gemma4:31b | b313-c1 | killed >25m | — | — | — | — | — | — | spiral |
+b313 (lexer) only — the one bead with authored mutants. n=3.
 
-- **qwen3.6** is fast and covers the required funcs but wrote a semantically
-  wrong test: it calls `Next()` twice to "skip whitespace" then asserts on the
-  second token, not knowing `Next()` auto-skips leading whitespace. Fails against
-  the correct impl. The mutation grader catches this — a fast test that doesn't
-  actually test is worse than useless.
-- **gemma4:31b** hit its known single-giant-thinking-stream pathology on turn 1
-  (8k+ chars, no `write_function` call, `num_predict`-bound grind) and did not
-  finish. This is the same failure shape EXECUTE_BEAD was moved off gemma for.
+| model | rubric | lat p50 / p90 | turns | tok/s | dead-turn rate | notes |
+|-------|--------|---------------|-------|-------|----------------|-------|
+| **muse-glimmer:30b-q8_0-dflash** | **3/3** | 243s / 273s | 2 | 18 | 0 | compiles, covers, passes good, kills 3/3 mutants — every run |
+| qwen3.6:35b-a3b | 2/3 | 245s / **807s** | 3 | 64 | **0.67** | 1/3 runs wrote a test that fails vs the correct impl; 2/3 runs hit a `done_reason=length` dead turn; one run spiralled to 13 min |
+| gemma4:31b | — | — | — | — | — | (`write-gemma` section) turn-1 thinking spiral, 8k+ chars, no `write_function`, did not finish in 25 min — same shape EXECUTE_BEAD was moved off gemma for |
+
+- **muse-glimmer wins WRITE** on this bead: correct, covering, mutation-killing
+  tests on all 3 runs, stable 2-turn loop, no dead turns. Notably it also
+  answers the plan's open "test quality unknown" question for muse — the tests
+  are good, not just syntactically valid.
+- **qwen3.6** is fast *when it works* but has a ~33% wrong-test rate here (the
+  recurring bug: it doesn't know `Next()` auto-skips leading whitespace, so it
+  calls `Next()` twice and asserts on the wrong token) plus a real spiral risk.
+- Caveat: b313 is the simplest bead. b314–b318 need mutants before this
+  generalizes — but the muse/qwen3.6 split is consistent with the EXECUTE_BEAD
+  bakeoff.
 
 ### REFINE_TESTS_CRITIQUE
 
