@@ -93,28 +93,61 @@ full matrix, mostly CRITIQUE.
 
 ## Results
 
-_TBD — filled as matrix runs complete._
+Matrix launched 2026-09-03 05:05 MT → `~/Documents/ratchet-projects/qual-results/`.
+Sections below fill in as it completes. Harness-validation ("thin") runs from
+before the matrix are recorded inline.
 
 ### Fidelity
 
-_TBD_
+Every replay so far (`CRITIQUE`, `WRITE`, `JUDGE`, `ADJUDICATE`) rebuilt a
+byte-identical prompt to its capture — `fidelity match=true`. The corpus is not
+stale against `refine-bakeoff` HEAD.
 
 ### REFINE_TESTS_WRITE
 
-_TBD_
+| model | case | wall | turns | tok/s | compiles | coverage | passes good | kills mutant | rubric |
+|-------|------|------|-------|-------|----------|----------|-------------|--------------|--------|
+| qwen3.6:35b-a3b | b313-c1 | 3m34s | 10 | 68 | yes | 1/1 | **no** | — | ✗ |
+| gemma4:31b | b313-c1 | killed >25m | — | — | — | — | — | — | spiral |
+
+- **qwen3.6** is fast and covers the required funcs but wrote a semantically
+  wrong test: it calls `Next()` twice to "skip whitespace" then asserts on the
+  second token, not knowing `Next()` auto-skips leading whitespace. Fails against
+  the correct impl. The mutation grader catches this — a fast test that doesn't
+  actually test is worse than useless.
+- **gemma4:31b** hit its known single-giant-thinking-stream pathology on turn 1
+  (8k+ chars, no `write_function` call, `num_predict`-bound grind) and did not
+  finish. This is the same failure shape EXECUTE_BEAD was moved off gemma for.
 
 ### REFINE_TESTS_CRITIQUE
 
-_TBD_
+| model | case | label | wall | turns | verdict | outcome |
+|-------|------|-------|------|-------|---------|---------|
+| mistral-small3.2:24b | b314-c1 | bad | 2m30s | 6 | malformed (empty summary) | ✗ |
+
+Full matrix (3 models × {json, omit-format} × 3 cases) in progress.
 
 ### REFINE_TESTS_JUDGE
 
-_TBD_
+| model | case | baseline | verdict | agree | wall |
+|-------|------|----------|---------|-------|------|
+| qwen3.6:35b-a3b | b314-c1 | revise | approved | **no** | 85s |
+
+qwen3.6 approved a test gemma sent back for revision — flagged for manual review,
+not scored wrong outright. Full matrix in progress.
 
 ### ADJUDICATE_NEXT_EXECUTION
 
-_TBD_
+| model | case | baseline | verdict | agree | dead turns | wall |
+|-------|------|----------|---------|-------|-----------|------|
+| qwen3.6:35b-a3b | b314.0 / b314.1 | execute_revised | execute_revised | yes | 0 | ~80s |
+
+Full matrix in progress.
 
 ## Recommendations
 
-_TBD_
+_TBD — pending matrix completion._
+
+Early reads: gemma4:31b's thinking-spiral pathology is not WRITE-specific
+(reproduced here on the first WRITE turn); qwen3.6:35b-a3b is fast on every verb
+but its judgment needs the full matrix before trusting it anywhere.
