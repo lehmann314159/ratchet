@@ -26,7 +26,7 @@ func activeProject(ctx context.Context, d *db.DB) (*db.Project, error) {
 		SELECT id, label, folder_path, design_doc_path, status,
 		       recovered_from_project_id,
 		       monitor_override_default, execution_budget_default,
-		       audit_reconcile_round_cap, created_at, updated_at
+		       audit_reconcile_round_cap, language, created_at, updated_at
 		FROM projects WHERE status = 'active'
 		ORDER BY id LIMIT 1`)
 	p := &db.Project{}
@@ -35,7 +35,7 @@ func activeProject(ctx context.Context, d *db.DB) (*db.Project, error) {
 		&p.ID, &p.Label, &p.FolderPath, &p.DesignDocPath, &p.Status,
 		&p.RecoveredFromProjectID,
 		&p.MonitorOverrideDefault, &p.ExecutionBudgetDefault,
-		&p.AuditReconcileRoundCap, &createdAt, &updatedAt,
+		&p.AuditReconcileRoundCap, &p.Language, &createdAt, &updatedAt,
 	); err != nil {
 		return nil, fmt.Errorf("active project: %w", err)
 	}
