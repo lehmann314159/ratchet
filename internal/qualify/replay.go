@@ -3,6 +3,7 @@ package qualify
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -296,9 +297,64 @@ func (rp *Replayer) Replay(ctx context.Context, c Case, model string, run int) R
 	res.RawOutput = raw
 	res.ValidationResult, res.Parsed = handler.Validate(raw)
 
-	// Persist the trace for post-hoc inspection.
+	// Persist the trace + a machine-readable result for post-hoc re-grading
+	// (so a labelling fix doesn't require re-running the model).
 	writeTrace(runDir, res)
+	writeResultRecord(runDir, c, res)
 	return res
+}
+
+// resultRecord is the persisted, re-gradable form of a ReplayResult: enough to
+// re-run Validate + the graders without the model. The per-run folder/ +
+// grade/ dirs stay on disk alongside it for the WRITE grader.
+type resultRecord struct {
+	Case      string     `json:"case"`
+	CaseName  string     `json:"case_name"`
+	Verb      string     `json:"verb"`
+	Model     string     `json:"model"`
+	Run       int        `json:"run"`
+	Ordinal   int        `json:"ordinal"`
+	BeadID    *int64     `json:"bead_id"`
+	Cycle     *int64     `json:"cycle_id"`
+	WallMS    int64      `json:"wall_ms"`
+	RunErr    string     `json:"run_err,omitempty"`
+	Raw       string     `json:"raw_output"`
+	Validation string    `json:"validation_result"`
+	Fidelity  FidelityResult `json:"fidelity"`
+	Calls     []callLite `json:"calls"`
+}
+
+type callLite struct {
+	DoneReason      string `json:"done_reason"`
+	EvalCount       int64  `json:"eval_count"`
+	EvalDuration    int64  `json:"eval_duration"`
+	PromptEvalCount int64  `json:"prompt_eval_count"`
+	ContentLen      int    `json:"content_len"`
+	ThinkingLen     int    `json:"thinking_len"`
+	ToolCalls       int    `json:"tool_calls"`
+	WallMS          int64  `json:"wall_ms"`
+}
+
+func writeResultRecord(runDir string, c Case, res ReplayResult) {
+	rr := resultRecord{
+		Case: res.Case, CaseName: c.Name, Verb: c.Meta.Verb, Model: res.Model,
+		Run: res.Run, Ordinal: res.Ordinal, BeadID: c.Meta.BeadID, Cycle: c.Meta.RefinementCycle,
+		WallMS: res.Wall.Milliseconds(), Raw: res.RawOutput,
+		Validation: res.ValidationResult, Fidelity: res.Fidelity,
+	}
+	if res.RunErr != nil {
+		rr.RunErr = res.RunErr.Error()
+	}
+	for _, cl := range res.Calls {
+		rr.Calls = append(rr.Calls, callLite{
+			DoneReason: cl.DoneReason, EvalCount: cl.Stats.EvalCount,
+			EvalDuration: cl.Stats.EvalDuration, PromptEvalCount: cl.Stats.PromptEvalCount,
+			ContentLen: len(cl.Response.Content), ThinkingLen: len(cl.Response.Thinking),
+			ToolCalls: len(cl.Response.ToolCalls), WallMS: cl.WallMillis,
+		})
+	}
+	b, _ := json.MarshalIndent(rr, "", "  ")
+	_ = os.WriteFile(filepath.Join(runDir, "result.json"), b, 0o644)
 }
 
 func loadJob(ctx context.Context, d *db.DB, jobID int64) (*db.HandoffJob, error) {

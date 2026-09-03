@@ -30,6 +30,10 @@ func RunQualifyModelMain(args []string) {
 		runScaffoldMutants(args[1:])
 		return
 	}
+	if len(args) > 0 && args[0] == "regrade" {
+		runRegrade(args[1:])
+		return
+	}
 
 	fs := flag.NewFlagSet("qualify-model", flag.ExitOnError)
 	corpus := fs.String("corpus", "", "capture-verb-io output dir (required)")

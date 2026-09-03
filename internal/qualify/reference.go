@@ -3,7 +3,9 @@ package qualify
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -45,18 +47,67 @@ func (r *ReferenceDB) JudgeDecision(ctx context.Context, beadID, cycle int64) (s
 	return d, err
 }
 
-// CritiqueLabel classifies a corpus CRITIQUE case as "good" or "bad" by what
-// the real JUDGE decided next that cycle: approved => the test file was good,
-// revise => it had a real defect CRITIQUE should have caught.
+// CritiqueLabel classifies a corpus CRITIQUE case for grading a candidate:
+//
+//	"bad"       — the reference CRITIQUE flagged it (all_correct=false) AND the
+//	              next JUDGE agreed (revise): a real defect a good CRITIQUE catches.
+//	"good"      — reference CRITIQUE clean (all_correct=true) AND JUDGE approved:
+//	              a clean test a good CRITIQUE leaves alone.
+//	"ambiguous" — the two disagree: reference CRITIQUE flagged but JUDGE overrode
+//	              (finding was minor/wrong), or reference CRITIQUE missed what only
+//	              JUDGE caught. Not a fair CRITIQUE bar either way — recorded but
+//	              not scored.
+//
+// Earlier this keyed on the JUDGE decision alone; that mislabelled b316-c1 (only
+// JUDGE caught it — the incumbent CRITIQUE missed it too) as a CRITIQUE "miss",
+// and b313-c1 (CRITIQUE flagged, JUDGE overrode) as a clean "good".
 func (r *ReferenceDB) CritiqueLabel(ctx context.Context, beadID, cycle int64) (string, error) {
 	jd, err := r.JudgeDecision(ctx, beadID, cycle)
 	if err != nil {
 		return "", err
 	}
-	if jd == "approved" {
-		return "good", nil
+	critiqueFlagged, err := r.critiqueFlagged(ctx, beadID, cycle)
+	if err != nil {
+		return "", err
 	}
-	return "bad", nil
+	switch {
+	case critiqueFlagged && jd == "revise":
+		return "bad", nil
+	case !critiqueFlagged && jd == "approved":
+		return "good", nil
+	default:
+		return "ambiguous", nil
+	}
+}
+
+// critiqueFlagged reports whether the reference REFINE_TESTS_CRITIQUE for this
+// bead+cycle returned all_correct=false (or any findings).
+func (r *ReferenceDB) critiqueFlagged(ctx context.Context, beadID, cycle int64) (bool, error) {
+	var raw string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT ha.raw_output FROM handoff_attempts ha
+		JOIN handoff_jobs hj ON hj.id = ha.job_id
+		WHERE hj.verb = 'REFINE_TESTS_CRITIQUE' AND hj.bead_id = ? AND hj.refinement_cycle_id = ?
+		  AND ha.validation_result = 'valid'
+		ORDER BY ha.id DESC LIMIT 1`, beadID, cycle).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return false, fmt.Errorf("no reference CRITIQUE for bead %d cycle %d", beadID, cycle)
+	}
+	if err != nil {
+		return false, err
+	}
+	lo, hi := strings.Index(raw, "{"), strings.LastIndex(raw, "}")
+	if lo < 0 || hi <= lo {
+		return false, fmt.Errorf("reference CRITIQUE bead %d cycle %d: no JSON object", beadID, cycle)
+	}
+	var out struct {
+		AllCorrect bool  `json:"all_correct"`
+		Findings   []any `json:"findings"`
+	}
+	if err := json.Unmarshal([]byte(raw[lo:hi+1]), &out); err != nil {
+		return false, fmt.Errorf("reference CRITIQUE bead %d cycle %d: %w", beadID, cycle, err)
+	}
+	return !out.AllCorrect || len(out.Findings) > 0, nil
 }
 
 // AdjudicationDecisions returns every committed adjudication decision for a

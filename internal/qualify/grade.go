@@ -209,8 +209,17 @@ func gradeCritique(ctx context.Context, ref *ReferenceDB, c Case, res ReplayResu
 	if err != nil {
 		return RunGrade{Note: err.Error()}
 	}
+	if label == "ambiguous" {
+		v := "clear"
+		if res.ValidationResult != "valid" {
+			v = "malformed"
+		} else if !res.Parsed.(verbs.RefineTestsCritiqueOutput).AllCorrect {
+			v = "flagged"
+		}
+		return RunGrade{Cols: nil, Note: "[ambiguous label — not scored] verdict=" + v}
+	}
 	if res.ValidationResult != "valid" {
-		return RunGrade{Cols: col("label", label, "verdict", "malformed", "flag", "?"),
+		return RunGrade{Cols: col("label", label, "verdict", "malformed", "outcome", "malformed"),
 			Note: res.ValidationResult}
 	}
 	out := res.Parsed.(verbs.RefineTestsCritiqueOutput)
@@ -219,6 +228,8 @@ func gradeCritique(ctx context.Context, ref *ReferenceDB, c Case, res ReplayResu
 	// findings on a test the JUDGE then approves, so "any finding == flagged"
 	// would score the incumbent itself as a false positive.
 	flagged := !out.AllCorrect
+	verdictCols := col("label", label, "all_correct", b2s(out.AllCorrect),
+		"findings", fmt.Sprintf("%d", len(out.Findings)))
 	// good -> should NOT flag (flagged == false-positive)
 	// bad  -> should flag     (not flagged == miss)
 	var pass bool
@@ -227,14 +238,18 @@ func gradeCritique(ctx context.Context, ref *ReferenceDB, c Case, res ReplayResu
 	case "good":
 		pass = !flagged
 		kind = map[bool]string{true: "false_positive", false: "correct_clear"}[flagged]
-	default: // bad
+	case "bad":
 		pass = flagged
 		kind = map[bool]string{true: "caught", false: "missed"}[flagged]
+	default: // ambiguous — record verdict + latency, don't score
+		verdictCols["outcome"] = map[bool]string{true: "flagged", false: "clear"}[flagged]
+		return RunGrade{Cols: nil, Note: "[ambiguous label — not scored] " +
+			kvString(verdictCols) + " :: " + firstLine(out.Summary)}
 	}
+	verdictCols["outcome"] = kind
 	return RunGrade{
 		Pass: pass,
-		Cols: col("label", label, "all_correct", b2s(out.AllCorrect),
-			"findings", fmt.Sprintf("%d", len(out.Findings)), "outcome", kind),
+		Cols: verdictCols,
 		Note: firstLine(out.Summary),
 	}
 }
