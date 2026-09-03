@@ -11,10 +11,12 @@ Four diagrams, from outermost to innermost:
 4. **Generic job status** — the low-level `handoff_jobs.status` FSM that every verb call goes through underneath diagrams 2 and 3.
 
 Render with a Mermaid-capable viewer (VS Code preview, GitHub, mermaid.live). The
-`diagrams/*.png` images were last regenerated 2026-08-30 from the Mermaid source below
-via `npx @mermaid-js/mermaid-cli@11.16.0 -i X.mmd -o X.png -b white -s 3`. Keep edge
-labels free of `;` and free of `{ }` — mermaid 11.16.0 mis-parses both inside a
-stateDiagram label.
+`diagrams/*.png` images were last regenerated 2026-09-03 from the Mermaid source
+below (extracted block-by-block into `X.mmd`) via
+`npx @mermaid-js/mermaid-cli@11.16.0 -i X.mmd -o X.png -b white -s 3`, and
+`docs/state-machine.pdf` is built from this file with those images inlined
+(`scripts/build-state-machine-pdf.sh`). Keep edge labels free of `;` and free of
+`{ }` — mermaid 11.16.0 mis-parses both inside a stateDiagram label.
 
 See `docs/fixtures.md` for the `fixture` status, the three pause knobs, and the
 `save-fixture`/`clone-project` workflow. See the **Cascade iterations** section at the
@@ -36,7 +38,7 @@ stateDiagram-v2
     [*] --> active : new-project, or<br/>clone-project (from any status)
     active --> paused : a pause knob matches<br/>(pause_after_reconcile,<br/>pause_after_verb, or<br/>pause_after_bead_id —<br/>see docs/fixtures.md)
     paused --> active : resume-project CLI<br/>(pure status flip — the next job was<br/>already enqueued before pausing,<br/>resume.go:65)
-    active --> full_stopped : full_stop decision on any bead (Diagram 3),<br/>or 5 consecutive CERTIFY_MANIFEST rejections,<br/>or DECOMPOSE_SPEC bead-ordering violations past cap,<br/>or full-stop-project CLI
+    active --> full_stopped : full_stop decision on any bead (Diagram 3),<br/>or 5 total CERTIFY_MANIFEST rejections,<br/>or DECOMPOSE_SPEC bead-ordering violations past cap,<br/>or full-stop-project CLI
     active --> complete : declare_success on the last<br/>remaining pending bead (Diagram 3),<br/>or a zero-diff cascade iteration<br/>(CASCADE_REVIEW finds nothing changed)
     active --> fixture : save-fixture CLI<br/>(in-place renumber to a negative id,<br/>never dispatched again — fixture.go:80)
     paused --> fixture : save-fixture CLI<br/>(also allowed — the paused project's<br/>inert pending job moves with it)
@@ -136,7 +138,7 @@ stateDiagram-v2
         [*] --> EXECUTE_BEAD : test-first mode
 
         REFINE_TESTS_WRITE --> REFINE_TESTS_CRITIQUE : compiles OK
-        REFINE_TESTS_WRITE --> ESCALATED : still fails to compile<br/>after internal retries (refine_tests.go:~679)
+        REFINE_TESTS_WRITE --> ESCALATED : test file won't compile after retries<br/>(early-bail once one error keeps recurring),<br/>or required test functions never written
         REFINE_TESTS_CRITIQUE --> REFINE_TESTS_JUDGE
         REFINE_TESTS_JUDGE --> EXECUTE_BEAD : decision = approved
         REFINE_TESTS_JUDGE --> REFINE_TESTS_WRITE : decision = revise<br/>(next cycle <= refinementCycleCap, 5)
@@ -153,9 +155,10 @@ stateDiagram-v2
         ADJUDICATE_NEXT_EXECUTION --> EXECUTE_BEAD : execute_revised<br/>(new bead_revision, under attempt cap)
         ADJUDICATE_NEXT_EXECUTION --> EXECUTE_BEAD : test_reject<br/>(test-first mode only:<br/>deletes test files, revises spec,<br/>under attempt cap)
         ADJUDICATE_NEXT_EXECUTION --> REFINE_TESTS_JUDGE : re_refine<br/>(REFINE_TESTS mode only: injects<br/>guidance as CRITIQUE input, grants a<br/>fresh attempt budget, bypasses attempt cap)
-        ADJUDICATE_NEXT_EXECUTION --> ESCALATED : execute_as_is / execute_revised /<br/>test_reject, attempts >= max_execution_attempts
+        ADJUDICATE_NEXT_EXECUTION --> EXECUTE_BEAD : declare_success but the mechanical<br/>exit-criteria check fails on disk<br/>(retry EXECUTE, under attempt cap)
+        ADJUDICATE_NEXT_EXECUTION --> ESCALATED : execute_as_is / execute_revised /<br/>test_reject / failed declare_success gate,<br/>attempts >= max_execution_attempts
         ADJUDICATE_NEXT_EXECUTION --> ESCALATED : re_refine, next cycle > refinementCycleCap
-        ADJUDICATE_NEXT_EXECUTION --> [*] : declare_success
+        ADJUDICATE_NEXT_EXECUTION --> [*] : declare_success<br/>(exit-criteria check passed)
         ADJUDICATE_NEXT_EXECUTION --> [*] : full_stop
     }
 
@@ -169,6 +172,36 @@ stateDiagram-v2
 ```
 
 ![Per-bead pipeline diagram](diagrams/3_bead_pipeline.png)
+
+**Mechanical gates on ADJUDICATE's decisions.** The model's decision is not taken
+on trust — three of them pass through a ground-truth check first:
+- `declare_success` runs `execcheck.VerifyExitCriteria` against the files on
+  disk. If the bead's exit-criteria command doesn't actually pass, the success
+  is rejected: the bead goes back to `pending` for another `EXECUTE_BEAD` (or
+  escalates if already at `max_execution_attempts`)
+  (`adjudicate_next_execution.go`, `declare_success` case).
+- `execute_revised` runs a source-side gate on the proposed spec (orphan `-run`
+  name, grep guard for a file the bead doesn't own, a newly-invented required
+  test function — that last one is `re_refine`'s job). On a violation it
+  **downgrades to `execute_as_is`**: retry against the current unmodified spec
+  rather than commit a broken revision.
+- `applyMechanicalBeadFixes` normalizes the revised spec (e.g. `go test` with no
+  test file) the same way DECOMPOSE/RECONCILE do at decomposition time.
+
+**Trailing-timeout budget escalation (fail-fast).** On the **first** in-lineage
+execution that ends `termination_cause = timeout` and every one after, an
+`execute_as_is` / `execute_revised` retry has its `execution_budget`
+**mechanically doubled** (capped at 8× the project default: 900 → 1800 → 3600 →
+7200), regardless of the budget the model returned — a weak model can't be
+relied on to classify a stub-file timeout correctly. ADJUDICATE is also handed a
+"Fast path" note telling it to issue `execute_revised` with `trend = same`,
+`bead_spec_fit = execution_capability_problem`, and to prepend exactly one
+"write a compiling skeleton first" sentence — deliberately *not* a full spec
+rewrite (added prescriptiveness on a timeout retry was found to make the agent
+spiral). `monitor_terminated` is excluded: there, more wall-clock makes things
+worse. `re_refine` is never chosen for a timeout (the tests were never reached).
+See `countTrailingTimeouts` / `enforcedTimeoutBudget` / `timeoutBudgetNote` in
+`adjudicate_next_execution.go`.
 
 **`MONITOR_EXECUTION` is not in this chain.** It's a parallel watchdog subprocess (`ratchet monitor`, spawned alongside `execute-bead` by `RunExecutionWindow`, `internal/execution/window.go:149`) that polls the trace file, asks its own model FIRE/NO_FIRE, and can SIGTERM/SIGKILL the running `EXECUTE_BEAD` process — which is how `termination_cause` becomes `monitor_terminated` or `monitor_force_killed`. It has no `handoff_jobs` row of its own.
 
@@ -200,20 +233,22 @@ stateDiagram-v2
 
 `EXECUTE_BEAD` is special-cased in `dispatch.go:~45`: it doesn't go through `Run`/`Validate`/`Commit` like other verbs, it calls `RunExecutionWindow` directly, and it doesn't accumulate strikes the same way — its own retry/escalation logic (infra-failure cap, monitor kill) lives inside `internal/execution/window.go` and is drawn separately in Diagram 3. `VERIFY_MANIFEST` is the only other verb skipped for model warmup (it's model-free). The strike tolerance is a flat `2` for every verb (`verbTolerance`, `queue.go:19`).
 
+**Capture instrumentation** (`ratchet start --capture-verb-io <dir>`, `internal/capture`) wraps each non-`EXECUTE_BEAD` dispatch: it records the verb's messages, tools, options, response, `done_reason`, and Ollama token/timing stats to disk (one dir per dispatch) for the model-qualification harness. It is inert without the flag and degrades to an uninstrumented dispatch on any capture error — it never changes the FSM above.
+
 ## Escalation points (every way a job reaches `escalated` / a project reaches `full_stopped` outside a normal decision)
 
 | # | Where | Trigger | Result | File:line |
 |---|---|---|---|---|
-| 1 | `RECONCILE_DECOMPOSITION` | audit/reconcile round cap reached with an unresolved disagreement (`outcome = escalated`) | job escalated | `reconcile_decomposition.go:~300` |
-| 2 | `CERTIFY_MANIFEST` | 5 rejections total | project full_stopped | `certify_manifest.go:~211` |
-| 3 | `REFINE_TESTS_WRITE` | test file still fails to compile after internal retries | job escalated | `refine_tests.go:~679` |
-| 4 | `REFINE_TESTS_JUDGE` | revise requested after `refinementCycleCap` (5) reached | job escalated | `refine_tests.go:~1284` |
+| 1 | `RECONCILE_DECOMPOSITION` | audit/reconcile round cap reached with an unresolved disagreement (`outcome = escalated`) | job escalated | `reconcile_decomposition.go:~314` |
+| 2 | `CERTIFY_MANIFEST` | 5 rejections total (`COUNT(*) … final_decision = 'reject'`) | project full_stopped | `certify_manifest.go:~211` |
+| 3 | `REFINE_TESTS_WRITE` | test file won't compile — one error recurs across turns (early-bail) or it's still broken after every write attempt; **or** a required test function is never written | job escalated | `refine_tests.go:~676` / `~852` / `~891` |
+| 4 | `REFINE_TESTS_JUDGE` | revise requested after `refinementCycleCap` (5) reached | job escalated | `refine_tests.go:~1513` |
 | 5 | `EXECUTE_BEAD` (via execution window) | `infraFailureCap` (3) consecutive startup crashes | job escalated | `internal/execution/window.go:293` |
-| 6 | `ADJUDICATE_NEXT_EXECUTION` | `execute_as_is`/`execute_revised`/`test_reject` at `max_execution_attempts` (`atExecutionCap`) | job escalated | `adjudicate_next_execution.go:~1469` |
-| 7 | `ADJUDICATE_NEXT_EXECUTION` | `re_refine` past `refinementCycleCap` | job escalated | `adjudicate_next_execution.go:~1293` |
+| 6 | `ADJUDICATE_NEXT_EXECUTION` | `execute_as_is` / `execute_revised` / `test_reject` / a `declare_success` whose exit-criteria gate failed, at `max_execution_attempts` (`atExecutionCap`) | job escalated | `adjudicate_next_execution.go:~1835` |
+| 7 | `ADJUDICATE_NEXT_EXECUTION` | `re_refine` past `refinementCycleCap` | job escalated | `adjudicate_next_execution.go:~1674` |
 | 8 | any verb (generic) | strikes exceed flat tolerance of 2 on malformed/invalid output | job escalated | `orchestrator/dispatch.go:~113` |
-| 9 | `DECOMPOSE_SPEC` | bead-ordering / forward-file-reference violations persist to `decomposeRedecomposeCap` (3) | project full_stopped | `decompose_spec.go:~259` |
-| 10 | `RECONCILE_DECOMPOSITION` | its own proposed fix keeps reintroducing an ordering violation to `reconcileRejectCap` (3) | job escalated | `reconcile_decomposition.go:~464` |
+| 9 | `DECOMPOSE_SPEC` | bead-ordering / forward-file-reference violations persist to `decomposeRedecomposeCap` (3) | project full_stopped | `decompose_spec.go:~264` |
+| 10 | `RECONCILE_DECOMPOSITION` | its own proposed fix keeps reintroducing an ordering violation to `reconcileRejectCap` (3) | job escalated | `reconcile_decomposition.go:~476` |
 
 `rewind-bead` is the sanctioned recovery path for any of the per-bead escalations while the bead hasn't succeeded — it resets to `REFINE_TESTS_WRITE` cycle 1 and stubs impl files, so it always discards whatever implementation exists on disk. `resume-project` only ever re-dispatches bead 1 (or, for a cascade project, re-enters through `enqueueDecompositionApproved`). `full-stop-project` is the manual equivalent of a project-wide escalation.
 
