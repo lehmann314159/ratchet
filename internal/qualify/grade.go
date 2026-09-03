@@ -216,7 +216,7 @@ func gradeCritique(ctx context.Context, ref *ReferenceDB, c Case, res ReplayResu
 	prepass := "?"
 	if spec, serr := caseBeadSpec(ctx, filepath.Join(c.Dir, "db.sqlite"), *c.Meta.BeadID); serr == nil {
 		seeds, notes := verbs.CritiquePrepassProfile(ctx, filepath.Join(c.Dir, "folder"),
-			spec.TestFiles(), spec.ImplFiles(), spec.RequiredTestFuncs(), spec.FullText)
+			spec.TestFiles(), spec.ImplFiles(), spec.RequiredTestFuncs())
 		prepass = fmt.Sprintf("%ds+%dn", len(seeds), notes)
 		if len(seeds) > 0 {
 			prepass += "(" + strings.Join(seeds, ",") + ")"

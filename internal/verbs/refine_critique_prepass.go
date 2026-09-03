@@ -94,10 +94,8 @@ var stackFrameRe = regexp.MustCompile(`^\s+(/\S+\.go):(\d+)(?:\s|$)`)
 // runCritiquePrepass compiles and runs the test file against the folder as it
 // exists at CRITIQUE dispatch and returns the classified report. It never
 // mutates the folder. currentImplFiles are this bead's (stubbed) non-test
-// output files; requiredFuncs are the Test* names the exit criteria pin;
-// specText is the bead full_text plus any design-doc excerpt, used by the
-// conservative spec cross-check.
-func runCritiquePrepass(ctx context.Context, folderPath string, testFiles, currentImplFiles, requiredFuncs []string, specText string) critiquePrepassReport {
+// output files; requiredFuncs are the Test* names the exit criteria pin.
+func runCritiquePrepass(ctx context.Context, folderPath string, testFiles, currentImplFiles, requiredFuncs []string) critiquePrepassReport {
 	var rep critiquePrepassReport
 
 	testBase := baseSet(testFiles)
@@ -213,20 +211,17 @@ func runCritiquePrepass(ctx context.Context, folderPath string, testFiles, curre
 		}
 	}
 
-	// --- static checks (phase 3) ---
+	// --- static checks ---
 	//
 	// Setup-consistency IS a seed: it is gated on an actual panic plus a
 	// structural asymmetry between sibling subtests, so its precision is high.
 	//
-	// The spec cross-check is a NOTE, not a seed. On the validated p48 corpus it
-	// caught none of the labelled defects (they are behavioral / over-spec, not
-	// "asserted constant absent from the spec text") and produced a few
-	// false positives on values the design document pins but the excerpt this
-	// pass sees didn't happen to quote. A note nudges the model's attention
-	// during its own spec-contradiction pass without forcing a verdict cycle.
-	// See docs/critique-redesign.md.
+	// A conservative spec cross-check (flag asserted string literals absent from
+	// the spec text) was tried and removed: on the validated p48 corpus it
+	// caught none of the labelled defects and directly caused a false positive
+	// (b318-c1, the "htmx.org" URL — a value the design doc pins but the excerpt
+	// this pass saw did not quote). See docs/critique-redesign.md.
 	rep.Seeds = append(rep.Seeds, setupInconsistencySeeds(folderPath, testFiles, subs, curSymbolRe)...)
-	rep.Notes = append(rep.Notes, specCrossCheckNotes(folderPath, testFiles, specText)...)
 
 	return rep
 }
@@ -234,198 +229,12 @@ func runCritiquePrepass(ctx context.Context, folderPath string, testFiles, curre
 // CritiquePrepassProfile re-runs the deterministic pre-pass against a folder
 // and returns a compact "kind/confidence" list plus the note count. Harness
 // helper for `ratchet qualify-model` grading — not used by the pipeline.
-func CritiquePrepassProfile(ctx context.Context, folderPath string, testFiles, currentImplFiles, requiredFuncs []string, specText string) (seeds []string, notes int) {
-	rep := runCritiquePrepass(ctx, folderPath, testFiles, currentImplFiles, requiredFuncs, specText)
+func CritiquePrepassProfile(ctx context.Context, folderPath string, testFiles, currentImplFiles, requiredFuncs []string) (seeds []string, notes int) {
+	rep := runCritiquePrepass(ctx, folderPath, testFiles, currentImplFiles, requiredFuncs)
 	for _, s := range rep.Seeds {
 		seeds = append(seeds, s.Kind+"/"+string(s.Confidence))
 	}
 	return seeds, len(rep.Notes)
-}
-
-// --- spec cross-check (conservative) ---
-
-// wellKnownAssertString is the set of string literals that show up in assertion
-// position across nearly every Go test and carry no spec meaning.
-var wellKnownAssertString = map[string]bool{
-	"true": true, "false": true, "nil": true, "error": true, "ok": true,
-	"test": true, "GET": true, "POST": true, "PUT": true, "DELETE": true,
-	"application/json": true, "text/plain": true, "text/html": true,
-	"main": true, "localhost": true,
-}
-
-// specTokenRe splits a candidate string into comparable alphanumeric tokens.
-var specTokenRe = regexp.MustCompile(`[A-Za-z0-9]+`)
-
-// alphaTokenRe matches a run of >=3 letters — a candidate literal needs one to
-// be considered a "named constant" rather than a computed number/output.
-var alphaTokenRe = regexp.MustCompile(`[A-Za-z]{3,}`)
-
-// normalizeForSpecMatch lowercases and keeps only alphanumerics and single
-// spaces, so "PUSH_CONST 10" and "push const  10" compare equal.
-func normalizeForSpecMatch(s string) string {
-	return strings.Join(specTokenRe.FindAllString(strings.ToLower(s), -1), " ")
-}
-
-// specCrossCheckNotes lists string literals the test asserts as an exact
-// expected value (an == / != operand, a strings.Contains/HasPrefix/HasSuffix
-// argument, or an element of an expected/want composite literal) that appear
-// NOWHERE in the bead spec or design-doc excerpt. Emitted as non-seed notes:
-// conservative by construction, but on validated data a fair fraction are
-// values the design document pins that this pass's spec text didn't quote, so
-// they steer the model's own spec-contradiction pass rather than assert a
-// defect.
-func specCrossCheckNotes(folderPath string, testFiles []string, specText string) []string {
-	if strings.TrimSpace(specText) == "" {
-		return nil
-	}
-	normSpec := normalizeForSpecMatch(specText)
-	var notes []string
-	seen := map[string]bool{}
-	for _, a := range assertedStringLiterals(folderPath, testFiles) {
-		v := a.value
-		if len(v) < 4 || !alphaTokenRe.MatchString(v) || seen[v] {
-			continue // too short, or no >=3-letter run (a computed number/output, not a named constant)
-		}
-		if wellKnownAssertString[v] || wellKnownAssertString[strings.ToLower(v)] {
-			continue
-		}
-		nv := normalizeForSpecMatch(v)
-		if nv == "" || strings.Contains(normSpec, nv) {
-			continue
-		}
-		// Token-wise fallback: every alphanumeric token of the literal is
-		// somewhere in the spec (the spec names the parts, the test just
-		// composes them) -> not a contradiction.
-		allTokens := true
-		for _, tok := range specTokenRe.FindAllString(strings.ToLower(v), -1) {
-			if len(tok) >= 2 && !strings.Contains(normSpec, tok) {
-				allTokens = false
-				break
-			}
-		}
-		if allTokens {
-			continue
-		}
-		seen[v] = true
-		where := ""
-		if a.subtest != "" {
-			where = " (" + a.subtest + ")"
-		}
-		notes = append(notes, fmt.Sprintf("the test asserts the exact string %q%s, which appears nowhere in "+
-			"the bead spec or design-doc excerpt — confirm the spec pins it (even implicitly), or derive the "+
-			"correct value from the spec's stated rule.", v, where))
-		if len(notes) >= 5 {
-			break
-		}
-	}
-	return notes
-}
-
-type assertedStr struct {
-	value   string
-	subtest string
-	line    int
-}
-
-// assertedStringLiterals walks testFiles' ASTs and collects string literals in
-// assertion position.
-func assertedStringLiterals(folderPath string, testFiles []string) []assertedStr {
-	var out []assertedStr
-	for _, f := range testFiles {
-		src, err := os.ReadFile(filepath.Join(folderPath, f))
-		if err != nil {
-			continue
-		}
-		fset := token.NewFileSet()
-		file, err := parser.ParseFile(fset, "", src, 0)
-		if err != nil {
-			continue
-		}
-		// Track the nearest enclosing t.Run("name", ...) for attribution.
-		var runStack []string
-		var visit func(n ast.Node)
-		record := func(expr ast.Expr) {
-			bl, ok := expr.(*ast.BasicLit)
-			if !ok || bl.Kind != token.STRING {
-				return
-			}
-			s, uerr := strconv.Unquote(bl.Value)
-			if uerr != nil {
-				return
-			}
-			sub := ""
-			if len(runStack) > 0 {
-				sub = strings.Join(runStack, "/")
-			}
-			out = append(out, assertedStr{value: s, subtest: sub, line: fset.Position(bl.Pos()).Line})
-		}
-		visit = func(n ast.Node) {
-			if n == nil {
-				return
-			}
-			pushed := false
-			if call, ok := n.(*ast.CallExpr); ok {
-				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-					switch sel.Sel.Name {
-					case "Run":
-						if len(call.Args) > 0 {
-							if bl, ok := call.Args[0].(*ast.BasicLit); ok && bl.Kind == token.STRING {
-								if name, e := strconv.Unquote(bl.Value); e == nil {
-									runStack = append(runStack, name)
-									pushed = true
-								}
-							}
-						}
-					case "Contains", "HasPrefix", "HasSuffix", "EqualFold", "Equal":
-						for _, arg := range call.Args {
-							record(arg)
-						}
-					}
-				}
-			}
-			if bin, ok := n.(*ast.BinaryExpr); ok && (bin.Op == token.EQL || bin.Op == token.NEQ) {
-				record(bin.X)
-				record(bin.Y)
-			}
-			if as, ok := n.(*ast.AssignStmt); ok {
-				expected := false
-				for _, lhs := range as.Lhs {
-					if id, ok := lhs.(*ast.Ident); ok {
-						l := strings.ToLower(id.Name)
-						if strings.Contains(l, "expect") || strings.Contains(l, "want") {
-							expected = true
-						}
-					}
-				}
-				if expected {
-					for _, rhs := range as.Rhs {
-						ast.Inspect(rhs, func(m ast.Node) bool {
-							if bl, ok := m.(*ast.BasicLit); ok {
-								record(bl)
-							}
-							return true
-						})
-					}
-				}
-			}
-			ast.Inspect(n, func(c ast.Node) bool {
-				if c == nil || c == n {
-					return true
-				}
-				visit(c)
-				return false
-			})
-			if pushed {
-				runStack = runStack[:len(runStack)-1]
-			}
-		}
-		for _, decl := range file.Decls {
-			if fd, ok := decl.(*ast.FuncDecl); ok && fd.Body != nil {
-				visit(fd.Body)
-			}
-		}
-	}
-	return out
 }
 
 // --- setup consistency ---

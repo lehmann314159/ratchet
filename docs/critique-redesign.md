@@ -159,26 +159,37 @@ Fidelity assert **disabled for CRITIQUE** — the prompt legitimately changes.
 **Phase 1 + 2 shipped** (`internal/verbs/refine_critique_prepass.go`,
 `RefineTestsCritique.Run`). Seed kinds: `compile_error` (test-file build error,
 `high`), `panic` / `hang` (`stub_explained` when the panicking value flows from
-this bead's own stub, else `review`), `setup_inconsistency` (phase 3). One panic
-aborts the test binary, so only the first panicking subtest is observed; the run
-table shows the rest as "did not finish". Loop: `OmitFormat`, 3-turn budget,
-`run_go_snippet` optional. Phase-2 gate met — b314-c1 / b316-c1 replay valid in
-~2 min each (vs 13.4 min baseline), 1 turn, panic seed correctly resolved.
+this bead's own stub, else `review`), `setup_inconsistency`. One panic aborts
+the test binary, so only the first panicking subtest is observed; the run table
+shows the rest as "did not finish". Loop: `OmitFormat`.
 
-**Phase 3 outcome — the spec cross-check is a NOTE, not a seed.**
+**Phase 3 — setup-consistency kept as a seed; spec cross-check tried and removed.**
 - *Setup-consistency* is a seed: gated on an actual panic **plus** a structural
   asymmetry between sibling subtests exercising the same bead function (one does
   package-level state setup the panicking one omits). High precision; 0 hits on
   p48 (no panic-before-assertion case there), validated by a fixture.
-- *Spec cross-check* flags string literals the test asserts (== / != operand,
-  `strings.Contains`/`HasPrefix`/`HasSuffix` arg, or an `expected`/`want`
-  composite element) with a ≥3-letter run that appear **nowhere** — normalized,
-  token-wise — in the bead spec + design-doc excerpt. On the validated p48
-  corpus it caught **none** of the labelled defects and produced 3 flags across
-  12 cases, all on values the design document pins that the excerpt this pass
-  saw didn't quote (`runtime error: division by zero`, `class="error"`,
-  `htmx.org`). So it is emitted as a non-seed note that steers the model's own
-  spec-contradiction pass, not an assertion the model must adjudicate.
+- *Spec cross-check* (flag asserted string literals absent from the spec text)
+  was implemented, demoted to a note, then **removed**. On p48 it caught none of
+  the labelled defects and, even as a note, caused a false positive: the model
+  turned the `htmx.org` note into an over-specification finding on b318-c1, a
+  case the incumbent + JUDGE both left clean. The value was design-doc-pinned;
+  the excerpt this pass saw didn't quote it. Net negative.
+
+**Phase 4 — first bakeoff was a NEGATIVE result; verb hardened, re-bakeoff.**
+The reshaped verb (qwen3:32b, 12 p48 cases × 2) ran valid 24/24 in ~1m45s p50
+(vs 804s baseline, ~7.5×) but real-defect catch fell **4/6 → 1/6** and false
+positives rose **0/4 → 2/4** (both from the spec-cross-check note). Root cause:
+zero forced verification + a clean mechanical report primes the model to
+rubber-stamp `all_correct: true`. Hardening (2026-09-03):
+- spec cross-check removed (above);
+- PART 2 of the prompt is now a *full independent review* with a **completeness**
+  class — "is any required behavior not covered by an assertion, or covered too
+  loosely" — targeting the b320-c1 (unasserted happy-path status) and b321-c1
+  (loose error substring) misses; plus explicit "a clean pre-pass runs against
+  stubs and proves nothing";
+- one **mandatory** `run_go_snippet` before the verdict is accepted (turn budget
+  3 → 4) — restores the friction the 6-forced-turn loop had, at ~1 extra turn.
+Re-bakeoff pending.
 
 **b314-c1's class is not reachable by either static check, by construction.**
 The defect — "the test asserts an error for single-newline input, but the spec

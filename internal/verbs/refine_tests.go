@@ -1046,10 +1046,11 @@ const snippetVerificationTurns = 6
 // exists to catch (docs/critique-redesign.md, the CRITIQUE bakeoff). The
 // mechanical pre-pass now runs the tests once, deterministically, and hands the
 // model seed findings with evidence; the model's job shrinks to confirm/refute
-// each seed plus one spec-contradiction pass, and run_go_snippet is optional
-// rather than mandatory-per-subtest. A small budget (an optional snippet check
-// or two, then the verdict) is enough.
-const critiquePrepassTurns = 3
+// each seed plus a full spec-contradiction / coverage pass, with one mandatory
+// run_go_snippet verification (not per-subtest). 4 turns covers: one snippet
+// round-trip, the mandatory-verification nudge if the model tries to finalize
+// early, and the verdict.
+const critiquePrepassTurns = 4
 
 type RefineTestsCritique struct{}
 
@@ -1081,11 +1082,7 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 	// Mechanical pre-pass: compile + run the locked test file against the folder
 	// as-is, classify each failure, emit seed findings with evidence. See
 	// refine_critique_prepass.go and docs/critique-redesign.md.
-	specText := bead.FullText
-	if docExcerpt != "" {
-		specText += "\n\n" + docExcerpt
-	}
-	prepass := runCritiquePrepass(ctx, folderPath, testFilePaths, currentImplFiles, requiredFuncs, specText)
+	prepass := runCritiquePrepass(ctx, folderPath, testFilePaths, currentImplFiles, requiredFuncs)
 	slog.Info("REFINE_TESTS_CRITIQUE pre-pass",
 		"bead_id", job.BeadID.Int64, "compiled", prepass.Compiled, "ran", prepass.Ran,
 		"seeds", len(prepass.Seeds), "notes", len(prepass.Notes))
@@ -1107,10 +1104,15 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 	}
 
 	// Bounded tool loop. The pre-pass already ran the tests, so run_go_snippet
-	// is optional here (a runtime-behavior claim the model wants to nail down),
-	// not a mandatory per-subtest gate. A zero-tool-call turn is the final
-	// verdict.
+	// is not a per-subtest gate — but the model must call it at least once
+	// before its final verdict is accepted. This restores the friction the
+	// original 6-forced-turn loop provided without the cost: the first
+	// qualification of the reshaped verb (2026-09-03) showed that with zero
+	// forced verification the model, led by a clean mechanical result, rubber-
+	// stamps `all_correct: true` — catch rate on real defects fell from 4/6 to
+	// 1/6. One mandatory verification turn is the middle ground.
 	var lastContent string
+	usedSnippet := false
 	for turn := 1; turn <= critiquePrepassTurns; turn++ {
 		// OmitFormat: CRITIQUE's output (findings[] + summary + all_correct) is
 		// low-risk for the JSON-escaping corruption the "json" grammar was added
@@ -1127,7 +1129,16 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 			lastContent = msg.Content
 		}
 		if len(msg.ToolCalls) == 0 {
-			return msg.Content, nil
+			if usedSnippet || turn == critiquePrepassTurns {
+				return msg.Content, nil
+			}
+			messages = append(messages, msg)
+			messages = append(messages, ollama.Message{Role: "user", Content: "Before your verdict is " +
+				"accepted, call run_go_snippet at least once to check a concrete claim about Go/stdlib runtime " +
+				"behavior that one of these assertions depends on — even if the file looks correct and the " +
+				"mechanical pre-pass was clean. A clean pre-pass runs against unimplemented stubs and does not " +
+				"tell you the assertions are right. Then give your final JSON verdict."})
+			continue
 		}
 
 		messages = append(messages, msg)
@@ -1139,10 +1150,13 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 				result = "error: source is empty"
 			} else if out, rerr := runGoSnippet(ctx, src); rerr != nil {
 				result = fmt.Sprintf("error: %v", rerr)
-			} else if out == "" {
-				result = "(snippet ran with no output — add a print statement to see a result)"
 			} else {
-				result = out
+				usedSnippet = true
+				if out == "" {
+					result = "(snippet ran with no output — add a print statement to see a result)"
+				} else {
+					result = out
+				}
 			}
 			messages = append(messages, ollama.Message{Role: "tool", Content: result})
 		}
