@@ -166,25 +166,96 @@ grammar change.
 
 ### REFINE_TESTS_JUDGE
 
-| model | case | baseline | verdict | agree | wall |
-|-------|------|----------|---------|-------|------|
-| qwen3.6:35b-a3b | b314-c1 | revise | approved | **no** | 85s |
+Cases b313-c1 (approve), b314-c1 / b316-c1 / b320-c1 (revise). n=2. The grammar
+sweep ran the two fast models × {schema, omit-format}; gemma × {schema,
+omit-format}.
 
-qwen3.6 approved a test gemma sent back for revision — flagged for manual review,
-not scored wrong outright. Full matrix in progress.
+| config | agreement | dead-turn | wall p50 |
+|--------|-----------|-----------|----------|
+| gemma4:31b + schema (incumbent) | **62%** | 0% | 9 min |
+| gemma4:31b + omit-format | 50% | 0% | 9 min |
+| qwen3.6:35b-a3b + schema | 50% | **12%** | 1.5 min |
+| **qwen3.6:35b-a3b + omit-format** | **62%** | 0% | **1.7 min** |
+| mistral + schema | 0/8 (never calls run_go_snippet → hard Run error) | — | — |
+| mistral + omit-format | 50% | 0% | 1.2 min |
+
+- **The grammar's effect is model-specific.** gemma *needs* the field-presence
+  schema (+12 pts — it omits `summary` without one). qwen3.6 *fights* it (−12
+  pts, 12% dead turns). mistral is *blocked* by it (can't emit the tool call).
+- **qwen3.6 + omit-format = gemma + schema quality (62%) at 5× the speed**, 0
+  dead turns.
+- **JUDGE is unreliable regardless of model.** gemma-replay disagreed with
+  gemma-*baseline* (same model) — b316-c1 approved 2× vs baseline `revise`;
+  b314-c1 split. b316-c1 is one of only 3 corpus cases where JUDGE independently
+  caught what CRITIQUE missed — **no model reproduces it, in any config.** JUDGE's
+  independent-detection value is ≈ noise.
+- b320-c1 (large integration test file): gemma malformed at the turn cap 2×
+  under the schema — the loop returns non-verdict `lastContent`. Verb robustness
+  gap, tracked separately.
 
 ### ADJUDICATE_NEXT_EXECUTION
 
-| model | case | baseline | verdict | agree | dead turns | wall |
-|-------|------|----------|---------|-------|-----------|------|
-| qwen3.6:35b-a3b | b314.0 / b314.1 | execute_revised | execute_revised | yes | 0 | ~80s |
+Cases: p48's 6 adjudication dispatches (b313, b314×2, b315–b317). n=2.
 
-Full matrix in progress.
+| model | agreement | dead-turn | wall p50 |
+|-------|-----------|-----------|----------|
+| gemma4:31b (incumbent) | **12/12** | 0% | 230s |
+| **qwen3.6:35b-a3b** | **12/12** | 0% | **48s** |
+| mistral-small3.2:24b | 0/12 (malformed — empty `trend`) | 0% | 118s |
+
+- **gemma and qwen3.6 agree perfectly** — with the baseline and each other, every
+  case, both runs, exact on decision *and* trend. qwen3.6 4–5× faster, and its
+  reasoning is genuine (runs `run_go_snippet`, reasons about the result), not
+  rubber-stamped.
+- **This is the "evidence makes the model's job easy" pattern.** ADJUDICATE is
+  handed ANALYZE's `mechanical_findings` + execution termination causes; 5 of 6
+  cases are nearly mechanically determined (`declare_success`), 1 is a clear
+  `execute_revised`. Contrast CRITIQUE (open-ended detection, no mechanical input)
+  where the fast models collapse.
+- **Big gap: all 6 cases are easy.** p48 was a clean run — no `re_refine`, no
+  `full_stop`, no spirals (the 29-min baseline-7 case). This corpus can't test
+  ADJUDICATE's hard decisions. Needs a messy-EXECUTE capture (gemma-EXECUTE
+  baseline) for a follow-up bakeoff.
+- mistral out for ADJUDICATE too — same empty-required-field malformation.
 
 ## Recommendations
 
-_TBD — pending matrix completion._
+### Applied to the default fleet (`internal/db/assignments.go`, 2026-09-03)
 
-Early reads: gemma4:31b's thinking-spiral pathology is not WRITE-specific
-(reproduced here on the first WRITE turn); qwen3.6:35b-a3b is fast on every verb
-but its judgment needs the full matrix before trusting it anywhere.
+| verb | change | why |
+|------|--------|-----|
+| `ADJUDICATE_NEXT_EXECUTION` | gemma4:31b → **qwen3.6:35b-a3b** | 12/12 agreement, 4–5× faster. Hard cases unvalidated — confirm on the next baseline. |
+| `REFINE_TESTS_JUDGE` | gemma4:31b → **qwen3.6:35b-a3b**, and drop the format schema (`OmitFormat`) | 62% (= gemma) at 5× speed, only without the grammar. |
+
+### Not changed
+
+- **`REFINE_TESTS_CRITIQUE` stays qwen3:32b.** Nothing beat it (67% catch, 0
+  false-pos); qwen3.6 got 0/6, mistral malformed. **This is a negative result —
+  CRITIQUE's problem is not the model.** The 13-min cost is 6 forced
+  verification turns × a long reasoning stream each. The fix is the
+  mechanical-pre-pass redesign (see `docs/` / the CRITIQUE redesign work), not a
+  swap.
+- **`REFINE_TESTS_WRITE` stays gemma4:31b for now.** muse-glimmer went 3/3 on
+  b313 with genuinely thorough tests (vs gemma 0/1, qwen3.6 2/3 + a 13-min
+  spiral), but: (a) only one bead has mutants, (b) moving WRITE to muse makes
+  WRITE == EXECUTE, collapsing the test/impl independence. Blocked on
+  b314–b318 mutants + a WRITE→CRITIQUE→JUDGE independence check.
+
+### Cross-cutting findings
+
+- **qwen3.6:35b-a3b is a strong fast substitute for the well-evidenced decision
+  verbs (JUDGE, ADJUDICATE) — but useless for the detection verb (CRITIQUE).**
+  Give a model mechanical evidence and a fast MoE suffices; ask it to find bugs
+  open-ended and it rubber-stamps.
+- **mistral-small3.2:24b fails every tool-loop verb** — empty required fields
+  (JUDGE/ADJUDICATE) or never calls the mandatory tool (JUDGE/CRITIQUE under the
+  grammar).
+- **gemma4:31b's single-giant-thinking-stream pathology is not WRITE-specific** —
+  it burned the whole `num_predict` budget thinking on turn 1 of a WRITE, and
+  spends ~5 min thinking on a JUDGE approve/revise.
+- **Ollama reuses the KV cache across tool-loop turns** (`prompt_eval` stays flat
+  as history grows) — the tool-loop cost is reasoning generation, not prompt
+  re-eval. Weakens the case for an llama.cpp migration.
+- **`eval_count`/`eval_duration` count only answer tokens**, not a reasoning
+  model's thinking stream (visible only in `total_duration`). The harness now
+  derives `thinking_secs` from the difference.

@@ -81,11 +81,11 @@ func SeedVerbModelAssignments(ctx context.Context, tx *sql.Tx, projectID int64) 
 		VerbMonitorExecution:        "mistral-small3.2:24b",
 		VerbAnalyzeExecution:        "qwen3:32b",
 		VerbCompressAnalysis:        "mistral-small3.2:24b",
-		VerbAdjudicateNextExecution: "gemma4:31b",
+		VerbAdjudicateNextExecution: "qwen3.6:35b-a3b",
 		VerbRevisePending:           "qwen3:32b",
 		VerbRefineTestsWrite:        "gemma4:31b",
 		VerbRefineTestsCritique:     "qwen3:32b",
-		VerbRefineTestsJudge:        "gemma4:31b",
+		VerbRefineTestsJudge:        "qwen3.6:35b-a3b",
 	}
 
 	// Validate constraints before writing anything.

@@ -202,8 +202,10 @@ var ReconcileDecompositionSchema = orderedObject{
 // schema-mode. Both run the ChatWithTools (run_go_snippet) loop, and the
 // tool loop is where schema-mode broke (REFINE_TESTS_WRITE, project 36).
 // Reverted pending a deliberate tool-loop re-approach. See
-// docs/schema-mode-reasoning-field.md. JUDGE keeps its flat, field-presence-
-// only refineTestsJudgeFormatSchema (predates this session).
+// docs/schema-mode-reasoning-field.md. CRITIQUE passes bare "json"; JUDGE
+// passes no `format` at all (OmitFormat) — the 2026-09-03 bakeoff showed the
+// grammar helps gemma but hurts the current JUDGE model qwen3.6:35b-a3b. See
+// docs/fleet-qualification.md.
 
 // --- Phase 3 verbs ---
 
