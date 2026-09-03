@@ -135,21 +135,34 @@ agree with JUDGE:
 - **good** = both clean → b317-c1, b314-c2, …
 - **ambiguous** = they disagree (b313-c1: CRITIQUE flagged, JUDGE overrode; b316-c1: only JUDGE caught) — recorded, not scored.
 
-First pass (cases b313/b314/b316, before the fix — only b314-c1 is scoreable):
+**`format:json` config, corrected labels** — bad: b314-c1, b320-c1, b321-c1;
+good: b317-c1, b314-c2. n=2 each.
 
-| model | b314-c1 (bad) | lat p50 / p90 | turns | tok/s | dead-turn | notes |
-|-------|---------------|---------------|-------|-------|-----------|-------|
-| qwen3:32b | **1/2 caught** | 664s / 1002s | **6 (cap, every run)** | 9 | 0 | cost is ~all prompt re-eval across 6 forced turns; generates <1k tokens/run |
-| qwen3.6:35b-a3b | 0/2 missed | 231s / 320s | 3.5 | 66 | **0.5** | resolves before the cap; fast; missed the defect both times |
-| mistral-small3.2:24b | 0/2 malformed | 121s / 134s | 6 | 13 | 0 | **every run malformed (empty summary) with `format:json`** |
+| model | catch (real defects) | false-pos | rubric | lat p50 | **thinking/turn** | turns | dead-turn |
+|-------|----------------------|-----------|--------|---------|-------------------|-------|-----------|
+| **qwen3:32b** (incumbent) | **4/6** — b320 2/2, b321 2/2, b314-c1 0/2 | **0/4** | 80% | **804s (13.4 min)** | 40–230s | 6 (cap, every run) | 0 |
+| qwen3.6:35b-a3b | **0/6** (one self-contradicting output) | 0/4 (+1 malformed) | 40% | 173s | shorter | 3.5 | **30%** |
+| mistral-small3.2:24b | 0/6 | — | 0% | 128s | ~none | 6 | 0 |
 
-n is far too thin for a verdict — the corrected matrix reruns with b314-c1 +
-b320-c1 + b321-c1 (bad) + b317-c1 + b314-c2 (good), ×{json, omit-format}.
+**Read:**
+- **qwen3:32b actually catches ~67% of real defects with zero false positives** —
+  better than the incumbent's reputation. Its one blind spot is b314-c1, a parser
+  *spec-interpretation* defect ("test asserts an error for single-newline input,
+  but the spec allows it") — it verified the runtime behavior and still concluded
+  the assertion was fine. That class needs judgment no model in the pool has.
+- **qwen3.6 is disqualified on judgment** — 0/6 on real defects, 30% dead-turn
+  rate, occasionally emits `all_correct:true` with "1 problem found" in the same
+  summary. Fast and useless.
+- **mistral is unusable with `format:json`** — 10/10 malformed (empty summary).
+  The `--omit-format` run tests whether the grammar is the cause.
 
-Structural finding independent of the model: **qwen3:32b hits the 6-turn
-snippet-verification cap on every run** and spends its ~11 min almost entirely on
-prompt re-evaluation of a growing history, not generation. The CRITIQUE
-bottleneck is at least as much loop structure as model choice.
+**Cost is the reasoning stream, not the loop mechanics.** `eval_count` only
+counts answer tokens; the corpus per-turn stats show qwen3:32b thinks 40–230s per
+turn (1.5k–9.7k chars) then emits ~130 answer tokens in ~14s. Ollama's KV cache
+*is* reused across turns (prompt_eval stays ~1–3s as history grows). So the
+13-min cost = 6 forced verification turns × a long think each. The lever is
+**fewer forced turns** (the mechanical-pre-pass redesign), not a model swap or a
+grammar change.
 
 ### REFINE_TESTS_JUDGE
 
