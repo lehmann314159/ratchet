@@ -346,6 +346,16 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 		think = opts.Think
 	}
 
+	// Harness-only override (cmd/qualify-model); no-op in the pipeline.
+	if ov, ok := chatOverrideFrom(ctx); ok {
+		if ov.ForceOmitFormat {
+			format = nil
+		}
+		if ov.Think != nil {
+			think = ov.Think
+		}
+	}
+
 	reqOptions := map[string]any{"temperature": temp, "num_ctx": numCtx}
 	if numPredict > 0 {
 		reqOptions["num_predict"] = numPredict
@@ -467,6 +477,17 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 			omitFormat = true
 		}
 		think = opts.Think
+	}
+
+	// Harness-only override (cmd/qualify-model); no-op in the pipeline.
+	if ov, ok := chatOverrideFrom(ctx); ok {
+		if ov.ForceOmitFormat {
+			format = nil
+			omitFormat = true
+		}
+		if ov.Think != nil {
+			think = ov.Think
+		}
 	}
 
 	req := struct {

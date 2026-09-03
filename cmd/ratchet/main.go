@@ -15,6 +15,7 @@ import (
 	"ratchet/internal/ollama"
 	"ratchet/internal/orchestrator"
 	"ratchet/internal/project"
+	"ratchet/internal/qualify"
 	"ratchet/internal/ui"
 )
 
@@ -65,6 +66,9 @@ func main() {
 			return
 		case "exec-bakeoff":
 			execution.RunExecBakeoffMain(os.Args[2:])
+			return
+		case "qualify-model":
+			qualify.RunQualifyModelMain(os.Args[2:])
 			return
 		}
 	}
