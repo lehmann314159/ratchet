@@ -127,11 +127,29 @@ b313 (lexer) only — the one bead with authored mutants. n=3.
 
 ### REFINE_TESTS_CRITIQUE
 
-| model | case | label | wall | turns | verdict | outcome |
-|-------|------|-------|------|-------|---------|---------|
-| mistral-small3.2:24b | b314-c1 | bad | 2m30s | 6 | malformed (empty summary) | ✗ |
+**Labelling correction (2026-09-03):** the grader first keyed the good/bad label
+on the *next JUDGE* decision. That's wrong — JUDGE catches things CRITIQUE
+doesn't. `CritiqueLabel` now needs the baseline CRITIQUE's own `all_correct` to
+agree with JUDGE:
+- **bad** = baseline CRITIQUE flagged ∧ JUDGE revised — a real defect CRITIQUE catches → b314-c1, b320-c1, b321-c1
+- **good** = both clean → b317-c1, b314-c2, …
+- **ambiguous** = they disagree (b313-c1: CRITIQUE flagged, JUDGE overrode; b316-c1: only JUDGE caught) — recorded, not scored.
 
-Full matrix (3 models × {json, omit-format} × 3 cases) in progress.
+First pass (cases b313/b314/b316, before the fix — only b314-c1 is scoreable):
+
+| model | b314-c1 (bad) | lat p50 / p90 | turns | tok/s | dead-turn | notes |
+|-------|---------------|---------------|-------|-------|-----------|-------|
+| qwen3:32b | **1/2 caught** | 664s / 1002s | **6 (cap, every run)** | 9 | 0 | cost is ~all prompt re-eval across 6 forced turns; generates <1k tokens/run |
+| qwen3.6:35b-a3b | 0/2 missed | 231s / 320s | 3.5 | 66 | **0.5** | resolves before the cap; fast; missed the defect both times |
+| mistral-small3.2:24b | 0/2 malformed | 121s / 134s | 6 | 13 | 0 | **every run malformed (empty summary) with `format:json`** |
+
+n is far too thin for a verdict — the corrected matrix reruns with b314-c1 +
+b320-c1 + b321-c1 (bad) + b317-c1 + b314-c2 (good), ×{json, omit-format}.
+
+Structural finding independent of the model: **qwen3:32b hits the 6-turn
+snippet-verification cap on every run** and spends its ~11 min almost entirely on
+prompt re-evaluation of a growing history, not generation. The CRITIQUE
+bottleneck is at least as much loop structure as model choice.
 
 ### REFINE_TESTS_JUDGE
 
