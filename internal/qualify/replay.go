@@ -322,6 +322,11 @@ func (rp *Replayer) Replay(ctx context.Context, c Case, model string, run int) R
 			return res // expected abort; RunErr left nil
 		}
 		res.RunErr = runErr
+		// Persist the trace even on a Run() error — the calls made before the
+		// failure are exactly what's needed to see whether a doomed loop had an
+		// early-curtail signature (no tool call, done=length, no content).
+		writeTrace(runDir, res)
+		writeResultRecord(runDir, c, res)
 		return res
 	}
 	res.RawOutput = raw
@@ -471,6 +476,9 @@ func writeTrace(runDir string, res ReplayResult) {
 	}
 	defer f.Close()
 	fmt.Fprintf(f, "case=%s model=%s run=%d\n", res.Case, res.Model, res.Run)
+	if res.RunErr != nil {
+		fmt.Fprintf(f, "RUN ERROR: %v\n", res.RunErr)
+	}
 	fmt.Fprintf(f, "wall=%s validation=%q fidelity_match=%t %s\n",
 		res.Wall.Round(time.Millisecond), res.ValidationResult, res.Fidelity.Match, res.Fidelity.Detail)
 	fmt.Fprintf(f, "calls=%d answer_tok=%d prompt_tok=%d answer_tok/s=%.1f thinking_s=%.0f thinking_chars=%d dead_turns=%d\n",

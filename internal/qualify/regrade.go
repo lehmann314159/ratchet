@@ -198,6 +198,9 @@ func parseReplayTxt(path string, byName map[string]Case) (resultRecord, error) {
 	if m := reValidation.FindStringSubmatch(text); m != nil {
 		rr.Validation = m[1]
 	}
+	if m := reRunErr.FindStringSubmatch(text); m != nil {
+		rr.RunErr = strings.TrimSpace(m[1])
+	}
 	rr.Fidelity = FidelityResult{Checked: true, Match: strings.Contains(text, "fidelity_match=true")}
 
 	for _, m := range reCall.FindAllStringSubmatch(text, -1) {
@@ -239,6 +242,7 @@ var (
 	reField      = regexp.MustCompile(`case=\S+ model=(\S+) run=(\d+)`)
 	reWall       = regexp.MustCompile(`wall=(\S+) validation=`)
 	reValidation = regexp.MustCompile(`validation="([^"]*)"`)
+	reRunErr     = regexp.MustCompile(`RUN ERROR: (.+)`)
 	reCall       = regexp.MustCompile(`--- call \d+: done="([^"]*)" eval=(\d+) thinking=(\d+) content=(\d+) tools=(\d+)(?: total_dur=(\d+) prompt_eval_dur=(\d+) eval_dur=(\d+))?`)
 	reAgg        = regexp.MustCompile(`calls=\d+ (?:gen_tok|answer_tok)=(\d+) prompt_tok=\d+ (?:tok/s|answer_tok/s)=([\d.]+)`)
 )
