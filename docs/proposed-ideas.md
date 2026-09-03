@@ -203,9 +203,11 @@ of "what should ratchet work on next" should weigh against new-feature work:
 
 ## 6. Independent producer in the produce→critique→decide cycles (proposed 2026-09-02)
 
-**Status: execute-cycle version decided (lands with the EXECUTE_BEAD→muse-glimmer
-swap — see the exprvm-web-baseline-6 handoff); refine-tests version proposed,
-gated on validating muse test-writing; decompose version open.**
+**Status: execute-cycle version SHIPPED + VALIDATED (commit `9814a08`;
+EXECUTE_BEAD→muse-glimmer, ADJUDICATE stays gemma — exprvm-web-baseline-7 /
+project 47 reached COMPLETE 9/9, the first baseline in the lineage to finish);
+refine-tests version proposed, gated on validating muse test-writing; decompose
+version open.**
 
 Every three-verb cycle currently has the *decider* run on the *producer's*
 model:
@@ -254,6 +256,68 @@ structured output an arbiter must produce.
 Not a separate initiative for the execute cycle (it's a side effect of the
 model swap). For refine-tests it needs muse test-writing validated first via
 the bakeoff harness.
+
+---
+
+## 7. REFINE_TESTS is now the pipeline bottleneck — optimize the loop + generalize the bakeoff harness (proposed 2026-09-02)
+
+**Status: measured on a full run; not designed. Gated on nothing except doing
+the EXECUTE_BEAD→muse work first (done). Do this in a framework-only session,
+not interleaved with a live project run.**
+
+With EXECUTE_BEAD on muse-glimmer, EXECUTE is no longer the slow phase.
+Measured over the full exprvm-web-baseline-7 run (project 47, 9.4h wall-clock,
+9 beads, 11 executions):
+
+| phase | total | share |
+|-------|-------|-------|
+| REFINE_TESTS (write + critique + judge) | 349 min | **62%** |
+| EXECUTE_BEAD | 88 min | 16% |
+| ADJUDICATE_NEXT_EXECUTION | 85 min | 15% |
+| everything else | ~35 min | 6% |
+
+Worst single line: **REFINE_TESTS_CRITIQUE, ~15 min/run** (qwen3:32b running the
+mandatory `run_go_snippet` verification loop). REFINE_TESTS_WRITE ~12 min
+(gemma4:31b). One re_refine happened for ~half the beads.
+
+Second finding, same run: **ADJUDICATE-on-gemma spiral.** One verdict
+(bead 309 rev 1) took **29 min**, including a `done_reason=length` turn that
+produced neither content nor a tool call — the loop tolerated the dead turn and
+advanced. Same "one giant thinking stream hits the generation cap" pathology
+that motivated moving EXECUTE off gemma. n=1 (other ~10 ADJUDICATE runs in the
+project were 4–13 min); quantify frequency before building. Verdict *quality*
+was fine — it caught two real gaps the locked tests missed.
+
+**The work, as one initiative:**
+
+- **Generalize `internal/execution/bakeoff.go`** (`ratchet exec-bakeoff`,
+  commit `6fae86a`) into the verb-qualification harness sketched in
+  `docs/model-qualification-harness.md`: replay recorded verb inputs against a
+  candidate model N×, score speed / stability / output-validity.
+- **Run role bakeoffs** for REFINE_TESTS_WRITE / CRITIQUE / JUDGE and
+  ADJUDICATE_NEXT_EXECUTION. Candidate pools (from the EXECUTE bakeoff
+  evidence): WRITE — muse-glimmer, gemma4:31b, qwen3.6:35b-a3b; CRITIQUE (must
+  differ from WRITE) — qwen3:32b (incumbent = latency target), qwen3.6:35b-a3b
+  (3B active — the potential big speed win), mistral-small3.2:24b; JUDGE /
+  ADJUDICATE — gemma4:31b, qwen3.6:35b-a3b, mistral-small3.2:24b (not muse —
+  schema-mode JSON is its weak spot).
+- **Grading is harder than exec-bakeoff's locked oracle.** WRITE: mutation-
+  style — generated tests must pass a known-good impl and fail a seeded-bad one;
+  plus compile-against-real-package and exit-criteria coverage. CRITIQUE: a
+  labelled good/bad test-file set (baseline runs produce it) → catch rate on
+  bad, false-positive rate on good, latency. JUDGE / ADJUDICATE: replay recorded
+  inputs → agreement with a reference verdict + schema validity + latency.
+- **"Fail-fast for ADJUDICATE"** — note it's the *opposite* lever from EXECUTE
+  fail-fast (EXECUTE adds wall-clock; ADJUDICATE needs to *cut* deliberation).
+  Options: treat 1–2 `done_reason=length` dead turns as a hard stop → bounded
+  fallback verdict or escalate; add a wall-clock cap on the verb (none today);
+  or the parked mid-stream circuit breaker (§5's `NewUnbounded` watchdog).
+- **Also fold in**: whether every bead needs the full write→critique→judge
+  round-trip (skip on a clean first pass?), tightening the re_refine trigger,
+  schema-mode for the CRITIQUE turn, and giving REFINE_TESTS_JUDGE a rationale
+  field (its flat schema makes revise verdicts illegible — bead 309 cycles 1–2).
+- Connects to §6: if muse's test-writing qualifies here, REFINE_TESTS_WRITE→muse
+  gives the refine-tests cycle its independent-producer property too.
 
 ---
 
