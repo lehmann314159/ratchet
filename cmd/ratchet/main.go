@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"ratchet/internal/capture"
 	"ratchet/internal/db"
 	"ratchet/internal/execution"
 	"ratchet/internal/ollama"
@@ -99,7 +100,20 @@ func runStart(args []string) {
 	dbPath := flags.String("db", "ratchet.db", "path to the SQLite database")
 	ollamaURL := flags.String("ollama", "http://192.168.50.241:11434", "Ollama base URL")
 	addr := flags.String("addr", "localhost:7474", "UI listen address")
+	captureDir := flags.String("capture-verb-io", "", "if set, snapshot every non-EXECUTE_BEAD verb dispatch (DB + folder + job + model calls) under this dir, for cmd/qualify-model replay")
 	_ = flags.Parse(args)
+
+	// Resolve the capturer before opening the DB so a bad --capture-verb-io
+	// path fails without creating a stray database file.
+	var runOpts []orchestrator.Option
+	if *captureDir != "" {
+		capturer, err := capture.New(*captureDir)
+		if err != nil {
+			log.Fatalf("capture-verb-io: %v", err)
+		}
+		runOpts = append(runOpts, orchestrator.WithCapturer(capturer))
+		slog.Info("verb-IO capture enabled", "dir", *captureDir)
+	}
 
 	database, err := db.Open(*dbPath)
 	if err != nil {
@@ -117,7 +131,7 @@ func runStart(args []string) {
 	uiDone := make(chan error, 1)
 	go func() { uiDone <- ui.Run(ctx, database, *addr) }()
 
-	if err := orchestrator.Run(ctx, database, oc); err != nil {
+	if err := orchestrator.Run(ctx, database, oc, runOpts...); err != nil {
 		log.Fatalf("orchestrator: %v", err)
 	}
 	if err := <-uiDone; err != nil {
