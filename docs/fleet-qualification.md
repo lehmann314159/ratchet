@@ -111,12 +111,13 @@ b313 (lexer) only — the one bead with authored mutants. n=3.
 |-------|--------|---------------|-------|-------|----------------|-------|
 | **muse-glimmer:30b-q8_0-dflash** | **3/3** | 243s / 273s | 2 | 18 | 0 | compiles, covers, passes good, kills 3/3 mutants — every run |
 | qwen3.6:35b-a3b | 2/3 | 245s / **807s** | 3 | 64 | **0.67** | 1/3 runs wrote a test that fails vs the correct impl; 2/3 runs hit a `done_reason=length` dead turn; one run spiralled to 13 min |
-| gemma4:31b | — | — | — | — | — | (`write-gemma` section) turn-1 thinking spiral, 8k+ chars, no `write_function`, did not finish in 25 min — same shape EXECUTE_BEAD was moved off gemma for |
+| gemma4:31b | 0/1 | 592s | 2 | 9 | 0 | compiles + covers but **wrong assertions** (fails vs good impl); 9.9 min, 9 tok/s. An earlier ad-hoc run spiralled past 25 min without finishing — this one completed but still failed the rubric |
 
-- **muse-glimmer wins WRITE** on this bead: correct, covering, mutation-killing
-  tests on all 3 runs, stable 2-turn loop, no dead turns. Notably it also
-  answers the plan's open "test quality unknown" question for muse — the tests
-  are good, not just syntactically valid.
+- **muse-glimmer wins WRITE** on this bead: 3/3 correct, covering,
+  mutation-killing tests; stable 2-turn loop; no dead turns. It also answers the
+  plan's open "test quality unknown" for muse — the tests are genuinely good,
+  not just syntactically valid. On b313 the incumbent **gemma went 0/1** (wrong
+  assertions, 9.9 min) and qwen3.6 2/3.
 - **qwen3.6** is fast *when it works* but has a ~33% wrong-test rate here (the
   recurring bug: it doesn't know `Next()` auto-skips leading whitespace, so it
   calls `Next()` twice and asserts on the wrong token) plus a real spiral risk.
