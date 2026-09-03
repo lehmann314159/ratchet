@@ -1076,18 +1076,23 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 		}
 	}
 	requiredFuncs := extractRequiredTestFuncs(bead.ExitCriteria)
+	docExcerpt := loadDesignDocExcerptForBead(ctx, d, job.ProjectID, bead)
 
 	// Mechanical pre-pass: compile + run the locked test file against the folder
 	// as-is, classify each failure, emit seed findings with evidence. See
 	// refine_critique_prepass.go and docs/critique-redesign.md.
-	prepass := runCritiquePrepass(ctx, folderPath, testFilePaths, currentImplFiles, requiredFuncs)
+	specText := bead.FullText
+	if docExcerpt != "" {
+		specText += "\n\n" + docExcerpt
+	}
+	prepass := runCritiquePrepass(ctx, folderPath, testFilePaths, currentImplFiles, requiredFuncs, specText)
 	slog.Info("REFINE_TESTS_CRITIQUE pre-pass",
 		"bead_id", job.BeadID.Int64, "compiled", prepass.Compiled, "ran", prepass.Ran,
 		"seeds", len(prepass.Seeds), "notes", len(prepass.Notes))
 
 	userMsg := "## Bead Specification\n\n" + bead.FullText
-	if excerpt := loadDesignDocExcerptForBead(ctx, d, job.ProjectID, bead); excerpt != "" {
-		userMsg += "\n\n## Authoritative Design Document (excerpts)\n\n" + excerpt
+	if docExcerpt != "" {
+		userMsg += "\n\n## Authoritative Design Document (excerpts)\n\n" + docExcerpt
 	}
 	if implContext != "" {
 		userMsg += "\n\n## Implementation Files (prior beads — types and conventions)\n\n" +

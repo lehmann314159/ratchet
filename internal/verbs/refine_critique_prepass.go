@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -41,7 +42,7 @@ import (
 //	                 a correct implementation would violate.
 //	review         — the pre-pass found something worth the model's attention
 //	                 but cannot itself decide (a panic in prior-bead code, a
-//	                 spec-cross-check flag, a setup inconsistency).
+//	                 setup inconsistency).
 type critiqueSeedConfidence string
 
 const (
@@ -53,7 +54,7 @@ const (
 // critiqueSeed is one mechanically-detected concern handed to the model with
 // its evidence.
 type critiqueSeed struct {
-	Kind       string // "compile_error" | "panic" | "hang" | "spec_contradiction" | "setup_inconsistency"
+	Kind       string // "compile_error" | "panic" | "hang" | "setup_inconsistency"
 	Subtest    string // "TestParser/ExactlyOneStatement/OnlyNewline"; "" for file-level
 	Evidence   string // the compile-error line / panic message + stack + reasoning
 	Confidence critiqueSeedConfidence
@@ -93,8 +94,10 @@ var stackFrameRe = regexp.MustCompile(`^\s+(/\S+\.go):(\d+)(?:\s|$)`)
 // runCritiquePrepass compiles and runs the test file against the folder as it
 // exists at CRITIQUE dispatch and returns the classified report. It never
 // mutates the folder. currentImplFiles are this bead's (stubbed) non-test
-// output files; requiredFuncs are the Test* names the exit criteria pin.
-func runCritiquePrepass(ctx context.Context, folderPath string, testFiles, currentImplFiles, requiredFuncs []string) critiquePrepassReport {
+// output files; requiredFuncs are the Test* names the exit criteria pin;
+// specText is the bead full_text plus any design-doc excerpt, used by the
+// conservative spec cross-check.
+func runCritiquePrepass(ctx context.Context, folderPath string, testFiles, currentImplFiles, requiredFuncs []string, specText string) critiquePrepassReport {
 	var rep critiquePrepassReport
 
 	testBase := baseSet(testFiles)
@@ -189,6 +192,12 @@ func runCritiquePrepass(ctx context.Context, folderPath string, testFiles, curre
 			Evidence:   strings.TrimSpace(msg) + loc + "\n" + indentLines(stack, "    ") + reason,
 			Confidence: conf,
 		})
+		for i := range rep.Subtests {
+			if rep.Subtests[i].Name == culprit {
+				rep.Subtests[i].Panicked = true
+			}
+		}
+		subs = rep.Subtests
 	}
 
 	// Non-seed notes: a failing subtest whose "got" value is demonstrably NOT a
@@ -204,7 +213,369 @@ func runCritiquePrepass(ctx context.Context, folderPath string, testFiles, curre
 		}
 	}
 
+	// --- static checks (phase 3) ---
+	//
+	// Setup-consistency IS a seed: it is gated on an actual panic plus a
+	// structural asymmetry between sibling subtests, so its precision is high.
+	//
+	// The spec cross-check is a NOTE, not a seed. On the validated p48 corpus it
+	// caught none of the labelled defects (they are behavioral / over-spec, not
+	// "asserted constant absent from the spec text") and produced a few
+	// false positives on values the design document pins but the excerpt this
+	// pass sees didn't happen to quote. A note nudges the model's attention
+	// during its own spec-contradiction pass without forcing a verdict cycle.
+	// See docs/critique-redesign.md.
+	rep.Seeds = append(rep.Seeds, setupInconsistencySeeds(folderPath, testFiles, subs, curSymbolRe)...)
+	rep.Notes = append(rep.Notes, specCrossCheckNotes(folderPath, testFiles, specText)...)
+
 	return rep
+}
+
+// --- spec cross-check (conservative) ---
+
+// wellKnownAssertString is the set of string literals that show up in assertion
+// position across nearly every Go test and carry no spec meaning.
+var wellKnownAssertString = map[string]bool{
+	"true": true, "false": true, "nil": true, "error": true, "ok": true,
+	"test": true, "GET": true, "POST": true, "PUT": true, "DELETE": true,
+	"application/json": true, "text/plain": true, "text/html": true,
+	"main": true, "localhost": true,
+}
+
+// specTokenRe splits a candidate string into comparable alphanumeric tokens.
+var specTokenRe = regexp.MustCompile(`[A-Za-z0-9]+`)
+
+// alphaTokenRe matches a run of >=3 letters — a candidate literal needs one to
+// be considered a "named constant" rather than a computed number/output.
+var alphaTokenRe = regexp.MustCompile(`[A-Za-z]{3,}`)
+
+// normalizeForSpecMatch lowercases and keeps only alphanumerics and single
+// spaces, so "PUSH_CONST 10" and "push const  10" compare equal.
+func normalizeForSpecMatch(s string) string {
+	return strings.Join(specTokenRe.FindAllString(strings.ToLower(s), -1), " ")
+}
+
+// specCrossCheckNotes lists string literals the test asserts as an exact
+// expected value (an == / != operand, a strings.Contains/HasPrefix/HasSuffix
+// argument, or an element of an expected/want composite literal) that appear
+// NOWHERE in the bead spec or design-doc excerpt. Emitted as non-seed notes:
+// conservative by construction, but on validated data a fair fraction are
+// values the design document pins that this pass's spec text didn't quote, so
+// they steer the model's own spec-contradiction pass rather than assert a
+// defect.
+func specCrossCheckNotes(folderPath string, testFiles []string, specText string) []string {
+	if strings.TrimSpace(specText) == "" {
+		return nil
+	}
+	normSpec := normalizeForSpecMatch(specText)
+	var notes []string
+	seen := map[string]bool{}
+	for _, a := range assertedStringLiterals(folderPath, testFiles) {
+		v := a.value
+		if len(v) < 4 || !alphaTokenRe.MatchString(v) || seen[v] {
+			continue // too short, or no >=3-letter run (a computed number/output, not a named constant)
+		}
+		if wellKnownAssertString[v] || wellKnownAssertString[strings.ToLower(v)] {
+			continue
+		}
+		nv := normalizeForSpecMatch(v)
+		if nv == "" || strings.Contains(normSpec, nv) {
+			continue
+		}
+		// Token-wise fallback: every alphanumeric token of the literal is
+		// somewhere in the spec (the spec names the parts, the test just
+		// composes them) -> not a contradiction.
+		allTokens := true
+		for _, tok := range specTokenRe.FindAllString(strings.ToLower(v), -1) {
+			if len(tok) >= 2 && !strings.Contains(normSpec, tok) {
+				allTokens = false
+				break
+			}
+		}
+		if allTokens {
+			continue
+		}
+		seen[v] = true
+		where := ""
+		if a.subtest != "" {
+			where = " (" + a.subtest + ")"
+		}
+		notes = append(notes, fmt.Sprintf("the test asserts the exact string %q%s, which appears nowhere in "+
+			"the bead spec or design-doc excerpt — confirm the spec pins it (even implicitly), or derive the "+
+			"correct value from the spec's stated rule.", v, where))
+		if len(notes) >= 5 {
+			break
+		}
+	}
+	return notes
+}
+
+type assertedStr struct {
+	value   string
+	subtest string
+	line    int
+}
+
+// assertedStringLiterals walks testFiles' ASTs and collects string literals in
+// assertion position.
+func assertedStringLiterals(folderPath string, testFiles []string) []assertedStr {
+	var out []assertedStr
+	for _, f := range testFiles {
+		src, err := os.ReadFile(filepath.Join(folderPath, f))
+		if err != nil {
+			continue
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, "", src, 0)
+		if err != nil {
+			continue
+		}
+		// Track the nearest enclosing t.Run("name", ...) for attribution.
+		var runStack []string
+		var visit func(n ast.Node)
+		record := func(expr ast.Expr) {
+			bl, ok := expr.(*ast.BasicLit)
+			if !ok || bl.Kind != token.STRING {
+				return
+			}
+			s, uerr := strconv.Unquote(bl.Value)
+			if uerr != nil {
+				return
+			}
+			sub := ""
+			if len(runStack) > 0 {
+				sub = strings.Join(runStack, "/")
+			}
+			out = append(out, assertedStr{value: s, subtest: sub, line: fset.Position(bl.Pos()).Line})
+		}
+		visit = func(n ast.Node) {
+			if n == nil {
+				return
+			}
+			pushed := false
+			if call, ok := n.(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					switch sel.Sel.Name {
+					case "Run":
+						if len(call.Args) > 0 {
+							if bl, ok := call.Args[0].(*ast.BasicLit); ok && bl.Kind == token.STRING {
+								if name, e := strconv.Unquote(bl.Value); e == nil {
+									runStack = append(runStack, name)
+									pushed = true
+								}
+							}
+						}
+					case "Contains", "HasPrefix", "HasSuffix", "EqualFold", "Equal":
+						for _, arg := range call.Args {
+							record(arg)
+						}
+					}
+				}
+			}
+			if bin, ok := n.(*ast.BinaryExpr); ok && (bin.Op == token.EQL || bin.Op == token.NEQ) {
+				record(bin.X)
+				record(bin.Y)
+			}
+			if as, ok := n.(*ast.AssignStmt); ok {
+				expected := false
+				for _, lhs := range as.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok {
+						l := strings.ToLower(id.Name)
+						if strings.Contains(l, "expect") || strings.Contains(l, "want") {
+							expected = true
+						}
+					}
+				}
+				if expected {
+					for _, rhs := range as.Rhs {
+						ast.Inspect(rhs, func(m ast.Node) bool {
+							if bl, ok := m.(*ast.BasicLit); ok {
+								record(bl)
+							}
+							return true
+						})
+					}
+				}
+			}
+			ast.Inspect(n, func(c ast.Node) bool {
+				if c == nil || c == n {
+					return true
+				}
+				visit(c)
+				return false
+			})
+			if pushed {
+				runStack = runStack[:len(runStack)-1]
+			}
+		}
+		for _, decl := range file.Decls {
+			if fd, ok := decl.(*ast.FuncDecl); ok && fd.Body != nil {
+				visit(fd.Body)
+			}
+		}
+	}
+	return out
+}
+
+// --- setup consistency ---
+
+// nilOrIndexFailRe matches a failure message that reads like a missing-setup
+// symptom rather than a wrong expected value.
+var nilOrIndexFailRe = regexp.MustCompile(`(?i)nil pointer|invalid memory|index out of range|nil map|slice bounds`)
+
+// setupInconsistencySeeds flags the panic-before-assertion pattern: a subtest
+// that panicked (or failed with a nil/index symptom) while a sibling subtest
+// under the same Test function — one that exercises the same bead function —
+// performs package-level state setup the failing one omits.
+//
+// Gated on an actual failure symptom (not just "A has more setup than B"):
+// sibling subtests legitimately differ in setup (one registers a variable the
+// code under test creates, another pre-registers one it needs), so setup
+// asymmetry alone is far too noisy to seed.
+func setupInconsistencySeeds(folderPath string, testFiles []string, subs []subtestOutcome, curSymRe *regexp.Regexp) []critiqueSeed {
+	suspect := map[string]bool{}
+	for _, s := range subs {
+		if s.Panicked || (s.Action == "fail" && nilOrIndexFailRe.MatchString(s.Output)) {
+			suspect[s.Name] = true
+		}
+	}
+	if len(suspect) == 0 || curSymRe == nil {
+		return nil
+	}
+
+	type stInfo struct {
+		top      string
+		name     string
+		setupOps map[string]bool
+		callsCur map[string]bool
+	}
+	var infos []stInfo
+	for _, f := range testFiles {
+		src, err := os.ReadFile(filepath.Join(folderPath, f))
+		if err != nil {
+			continue
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, "", src, 0)
+		if err != nil {
+			continue
+		}
+		for _, decl := range file.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Body == nil || !strings.HasPrefix(fd.Name.Name, "Test") {
+				continue
+			}
+			top := fd.Name.Name
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "Run" || len(call.Args) < 2 {
+					return true
+				}
+				bl, ok := call.Args[0].(*ast.BasicLit)
+				if !ok || bl.Kind != token.STRING {
+					return true
+				}
+				name, e := strconv.Unquote(bl.Value)
+				if e != nil {
+					return true
+				}
+				fn, ok := call.Args[1].(*ast.FuncLit)
+				if !ok || fn.Body == nil {
+					return true
+				}
+				info := stInfo{top: top, name: name, setupOps: map[string]bool{}, callsCur: map[string]bool{}}
+				bodyStart := fset.Position(fn.Body.Pos()).Offset
+				bodyEnd := fset.Position(fn.Body.End()).Offset
+				if bodyStart >= 0 && bodyEnd <= len(src) {
+					for _, m := range curSymRe.FindAllString(string(src[bodyStart:bodyEnd]), -1) {
+						info.callsCur[m] = true
+					}
+				}
+				ast.Inspect(fn.Body, func(m ast.Node) bool {
+					as, ok := m.(*ast.AssignStmt)
+					if !ok {
+						return true
+					}
+					for _, lhs := range as.Lhs {
+						switch e := lhs.(type) {
+						case *ast.IndexExpr:
+							info.setupOps[exprString(e.X)+"[]="] = true
+						case *ast.SelectorExpr:
+							info.setupOps[exprString(e)+"="] = true
+						}
+					}
+					return true
+				})
+				infos = append(infos, info)
+				return true
+			})
+		}
+	}
+
+	var seeds []critiqueSeed
+	for _, b := range infos {
+		full := b.top + "/" + b.name
+		if !suspect[full] && !suspect[b.name] {
+			continue
+		}
+		for _, a := range infos {
+			if a.top != b.top || a.name == b.name {
+				continue
+			}
+			if suspect[a.top+"/"+a.name] || suspect[a.name] {
+				continue // both broken — not a useful contrast
+			}
+			if !shareKey(a.callsCur, b.callsCur) {
+				continue
+			}
+			var missing []string
+			for op := range a.setupOps {
+				if !b.setupOps[op] {
+					missing = append(missing, op)
+				}
+			}
+			if len(missing) == 0 {
+				continue
+			}
+			sort.Strings(missing)
+			seeds = append(seeds, critiqueSeed{
+				Kind: "setup_inconsistency", Subtest: full,
+				Evidence: fmt.Sprintf("%s failed with a missing-setup symptom while its sibling %s/%s — which exercises the same function — performs setup this one omits: %s. Check whether %s makes an assumption about pre-existing state that it never establishes.",
+					full, a.top, a.name, strings.Join(missing, ", "), b.name),
+				Confidence: seedReview,
+			})
+			if len(seeds) >= 3 {
+				return seeds
+			}
+			break
+		}
+	}
+	return seeds
+}
+
+func exprString(e ast.Expr) string {
+	switch x := e.(type) {
+	case *ast.Ident:
+		return x.Name
+	case *ast.SelectorExpr:
+		return exprString(x.X) + "." + x.Sel.Name
+	case *ast.IndexExpr:
+		return exprString(x.X) + "[]"
+	}
+	return "?"
+}
+
+func shareKey(a, b map[string]bool) bool {
+	for k := range a {
+		if b[k] {
+			return true
+		}
+	}
+	return false
 }
 
 // formatCritiquePrepass renders the report as the "Mechanical Pre-Pass Results"
@@ -399,7 +770,7 @@ func firstProjectFrame(stack, folderPath string) (string, int) {
 		if filepath.Dir(m[1]) != folderPath {
 			continue
 		}
-		n, _ := parseIntSafe(m[2])
+		n, _ := strconv.Atoi(m[2])
 		return m[1], n
 	}
 	return "", 0
@@ -431,6 +802,12 @@ func nonZeroGot(output string) (string, bool) {
 		}
 		// A bare "got []int{}" / "got []string(nil)" style — treat empty-ish.
 		if strings.HasSuffix(v, "(nil)") || strings.HasSuffix(v, "{}") {
+			return "", false
+		}
+		// A struct render ("{Type:0 Value: Pos:0}") is what a scaffold stub
+		// returns for a struct result — the fields are zero even though the
+		// text isn't literally "0". Too ambiguous to call a real value.
+		if strings.HasPrefix(v, "{") || strings.HasPrefix(v, "&{") {
 			return "", false
 		}
 		return v, true
@@ -540,15 +917,4 @@ func indentLines(s, prefix string) string {
 		lines[i] = prefix + l
 	}
 	return strings.Join(lines, "\n")
-}
-
-func parseIntSafe(s string) (int, error) {
-	n := 0
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return n, fmt.Errorf("not an int: %q", s)
-		}
-		n = n*10 + int(r-'0')
-	}
-	return n, nil
 }

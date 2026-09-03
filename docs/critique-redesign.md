@@ -153,3 +153,41 @@ Fidelity assert **disabled for CRITIQUE** — the prompt legitimately changes.
 | 3 | spec cross-check (conservative) + setup-consistency | catches b314-c1's class on ≥1 case, or documented why not |
 | 4 | re-bakeoff the model choice against the new verb | pick a model |
 | 5 | (with item 2 done) one fresh baseline capture — end-to-end `re_refine` leakage | leakage ≤ current, loop cost down |
+
+## Implementation notes (2026-09-03)
+
+**Phase 1 + 2 shipped** (`internal/verbs/refine_critique_prepass.go`,
+`RefineTestsCritique.Run`). Seed kinds: `compile_error` (test-file build error,
+`high`), `panic` / `hang` (`stub_explained` when the panicking value flows from
+this bead's own stub, else `review`), `setup_inconsistency` (phase 3). One panic
+aborts the test binary, so only the first panicking subtest is observed; the run
+table shows the rest as "did not finish". Loop: `OmitFormat`, 3-turn budget,
+`run_go_snippet` optional. Phase-2 gate met — b314-c1 / b316-c1 replay valid in
+~2 min each (vs 13.4 min baseline), 1 turn, panic seed correctly resolved.
+
+**Phase 3 outcome — the spec cross-check is a NOTE, not a seed.**
+- *Setup-consistency* is a seed: gated on an actual panic **plus** a structural
+  asymmetry between sibling subtests exercising the same bead function (one does
+  package-level state setup the panicking one omits). High precision; 0 hits on
+  p48 (no panic-before-assertion case there), validated by a fixture.
+- *Spec cross-check* flags string literals the test asserts (== / != operand,
+  `strings.Contains`/`HasPrefix`/`HasSuffix` arg, or an `expected`/`want`
+  composite element) with a ≥3-letter run that appear **nowhere** — normalized,
+  token-wise — in the bead spec + design-doc excerpt. On the validated p48
+  corpus it caught **none** of the labelled defects and produced 3 flags across
+  12 cases, all on values the design document pins that the excerpt this pass
+  saw didn't quote (`runtime error: division by zero`, `class="error"`,
+  `htmx.org`). So it is emitted as a non-seed note that steers the model's own
+  spec-contradiction pass, not an assertion the model must adjudicate.
+
+**b314-c1's class is not reachable by either static check, by construction.**
+The defect — "the test asserts an error for single-newline input, but the spec
+allows exactly one trailing newline" — is a *behavioral* disagreement between the
+test's notion of correct output and the spec's. It is not an asserted constant
+(the assertion is `(err != nil) != wantErr`, no literal), not a setup bug (the
+subtest is self-contained), and both the test and a plausible wrong reading of
+the spec are internally consistent. Detecting it mechanically would require
+deriving the correct behavior from the spec — i.e. redoing WRITE in verification
+mode, the oracle problem this redesign explicitly leaves with the model. It
+stays the model's PART 2 residual and is a target of the noise-tolerant
+`re_refine` loop (item 2), where execution is the oracle.
