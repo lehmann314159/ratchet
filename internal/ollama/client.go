@@ -223,6 +223,25 @@ type chatResponse struct {
 	Done       bool    `json:"done"`
 	DoneReason string  `json:"done_reason,omitempty"`
 	Error      string  `json:"error,omitempty"`
+	// Timing/token counters, present on the final (done:true) chunk. Nanoseconds
+	// for durations. Surfaced via CallRecorder; zero when Ollama omits them.
+	TotalDuration      int64 `json:"total_duration"`
+	LoadDuration       int64 `json:"load_duration"`
+	PromptEvalCount    int64 `json:"prompt_eval_count"`
+	PromptEvalDuration int64 `json:"prompt_eval_duration"`
+	EvalCount          int64 `json:"eval_count"`
+	EvalDuration       int64 `json:"eval_duration"`
+}
+
+func (r chatResponse) stats() Stats {
+	return Stats{
+		TotalDuration:      r.TotalDuration,
+		LoadDuration:       r.LoadDuration,
+		PromptEvalCount:    r.PromptEvalCount,
+		PromptEvalDuration: r.PromptEvalDuration,
+		EvalCount:          r.EvalCount,
+		EvalDuration:       r.EvalDuration,
+	}
 }
 
 // Warmup sends a trivial "hello" chat request to the given model with a
@@ -283,12 +302,34 @@ func (c *Client) Warmup(ctx context.Context, model string) error {
 // values instead of just failing loudly and retrying. format:"json" avoids
 // the ambiguity entirely by making the malformed byte sequence unreachable
 // during generation, rather than trying to disambiguate it after the fact.
-func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *Options) (string, error) {
+func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *Options) (content string, err error) {
 	temp := DefaultTemperature
 	numCtx := defaultNumCtx
 	numPredict := 0
 	var format any = "json"
 	var think *bool
+
+	// Per-call recording for the qualification harness / capture instrumentation.
+	// No-op unless a recorder is installed on ctx.
+	var recResp Message
+	var recStats Stats
+	var recDoneReason string
+	if rec := recorderFrom(ctx); rec != nil {
+		started := time.Now()
+		defer func() {
+			errStr := ""
+			if err != nil {
+				errStr = err.Error()
+			}
+			rec.RecordCall(CallRecord{
+				Kind: "chat", Turn: 1, Model: model, Messages: msgs,
+				NumPredict: numPredict, Format: format,
+				Response: recResp, DoneReason: recDoneReason, Stats: recStats,
+				WallMillis: time.Since(started).Milliseconds(), Err: errStr,
+			})
+		}()
+	}
+
 	if opts != nil {
 		if opts.Temperature > 0 {
 			temp = opts.Temperature
@@ -303,6 +344,16 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 			format = opts.Format
 		}
 		think = opts.Think
+	}
+
+	// Harness-only override (cmd/qualify-model); no-op in the pipeline.
+	if ov, ok := chatOverrideFrom(ctx); ok {
+		if ov.ForceOmitFormat {
+			format = nil
+		}
+		if ov.Think != nil {
+			think = ov.Think
+		}
 	}
 
 	reqOptions := map[string]any{"temperature": temp, "num_ctx": numCtx}
@@ -345,9 +396,10 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 	}
 
 	var cr chatResponse
-	if err := json.Unmarshal(raw, &cr); err != nil {
-		return "", fmt.Errorf("parse response: %w", err)
+	if uerr := json.Unmarshal(raw, &cr); uerr != nil {
+		return "", fmt.Errorf("parse response: %w", uerr)
 	}
+	recResp, recStats, recDoneReason = cr.Message, cr.stats(), cr.DoneReason
 	if cr.Error != "" {
 		return "", fmt.Errorf("ollama: %s", cr.Error)
 	}
@@ -379,12 +431,34 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 // tool_call (root-caused 2026-08-31, docs/format-json-tool-turn.md). A
 // tool-primary loop whose final turn is not parsed as model JSON should pass
 // Options.OmitFormat to drop the constraint — REFINE_TESTS_WRITE does.
-func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message, tools []Tool, opts *Options, tokenWriter io.Writer) (Message, error) {
+func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message, tools []Tool, opts *Options, tokenWriter io.Writer) (result Message, err error) {
 	temp := DefaultTemperature
 	numCtx := defaultNumCtx
 	numPredict := toolLoopNumPredict
 	var format any = "json"
 	var think *bool
+	omitFormat := false
+
+	// Per-call recording for the qualification harness / capture instrumentation.
+	// One record per ChatWithTools call (== one turn; the caller runs the loop).
+	var recStats Stats
+	var recDoneReason string
+	if rec := recorderFrom(ctx); rec != nil {
+		started := time.Now()
+		defer func() {
+			errStr := ""
+			if err != nil {
+				errStr = err.Error()
+			}
+			rec.RecordCall(CallRecord{
+				Kind: "tools", Turn: 1, Model: model, Messages: msgs, Tools: tools,
+				NumPredict: numPredict, Format: format, OmitFormat: omitFormat,
+				Response: result, DoneReason: recDoneReason, Stats: recStats,
+				WallMillis: time.Since(started).Milliseconds(), Err: errStr,
+			})
+		}()
+	}
+
 	if opts != nil {
 		if opts.Temperature > 0 {
 			temp = opts.Temperature
@@ -400,8 +474,20 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		}
 		if opts.OmitFormat {
 			format = nil
+			omitFormat = true
 		}
 		think = opts.Think
+	}
+
+	// Harness-only override (cmd/qualify-model); no-op in the pipeline.
+	if ov, ok := chatOverrideFrom(ctx); ok {
+		if ov.ForceOmitFormat {
+			format = nil
+			omitFormat = true
+		}
+		if ov.Think != nil {
+			think = ov.Think
+		}
 	}
 
 	req := struct {
@@ -519,9 +605,11 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		}
 		if chunk.Done {
 			doneReason = chunk.DoneReason
+			recStats = chunk.stats()
 			break
 		}
 	}
+	recDoneReason = doneReason
 	// Terminate streamed content with a newline so subsequent trace lines start clean.
 	if tokenWriter != nil && contentSB.Len() > 0 {
 		fmt.Fprintln(tokenWriter)
@@ -548,12 +636,13 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		slog.Info("ChatWithTools: model returned separated thinking (not fed downstream)",
 			"model", model, "thinking_chars", thinkingSB.Len(), "content_chars", contentSB.Len())
 	}
-	return Message{
+	result = Message{
 		Role:      "assistant",
 		Content:   contentSB.String(),
 		Thinking:  thinkingSB.String(),
 		ToolCalls: toolCalls,
-	}, nil
+	}
+	return result, nil
 }
 
 // ExtractJSON strips Qwen3-style <think>…</think> blocks and markdown code

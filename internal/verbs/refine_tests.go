@@ -1336,21 +1336,21 @@ func (h *RefineTestsJudge) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	// decision or on the model's own sense of whether this call needs it)
 	// is what closes that gap, mirroring ADJUDICATE's own unconditional
 	// (not decision-gated) rationale for the identical requirement.
-	//
-	// Confirmed live before wiring this in that format (a JSON Schema, not
-	// the loose "json" string) coexists with tool calls the same way the
-	// loose string already does — a tool-call-only turn still returns a
-	// proper tool_calls entry with empty Content, not a schema-violation
-	// error, so the mandatory-summary schema fix (refineTestsJudgeFormatSchema)
-	// doesn't need to be dropped to add this.
 	var lastContent string
 	usedTool := false
 	for turn := 1; turn <= snippetVerificationTurns; turn++ {
-		// NOT reasoning-first schema-mode — the flat refineTestsJudgeFormatSchema
-		// (field-presence only, predates this session) is the pre-schema-mode
-		// state. Reverted pending a deliberate tool-loop re-approach.
+		// No `format` constraint (OmitFormat). The qualification bakeoff
+		// (2026-09-03) showed the grammar's effect is model-specific: gemma4:31b
+		// needs a field-presence schema (it omits "summary" without one —
+		// connect-four-v2 bead 56), but qwen3.6:35b-a3b (the current JUDGE model)
+		// *fights* the grammar — with the schema it hit a done_reason=length dead
+		// turn on ~12% of runs and agreed with the gemma baseline only 50% of the
+		// time; with no constraint it was 8/8 valid and 62% agreement (== gemma's
+		// own rate) at 5x the speed. Validate still enforces non-empty "summary"
+		// and a valid decision, so an omitted field just triggers the normal
+		// retry rather than a silent bad verdict.
 		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetTool},
-			&ollama.Options{Format: refineTestsJudgeFormatSchema}, nil)
+			&ollama.Options{OmitFormat: true}, nil)
 		if toolErr != nil {
 			return "", toolErr
 		}
@@ -1393,26 +1393,6 @@ func (h *RefineTestsJudge) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		}
 	}
 	return lastContent, nil
-}
-
-// refineTestsJudgeFormatSchema grammar-constrains REFINE_TESTS_JUDGE's output
-// so "summary" is structurally unreachable-to-omit, mirroring Validate's own
-// unconditional requirement below. Only "decision" and "summary" are marked
-// required — "functions_to_rewrite"/"instructions" are genuinely conditional
-// on decision=="revise", which a flat "required" can't express; Validate
-// enforces that in code. Closes the gap that recurred live (connect-four-v2
-// bead 56, 2026-08-27: 3/3 attempts omitted "summary" despite the prompt).
-// This is field-presence enforcement only — NOT the reasoning-first schema-mode
-// (that was tried in Phase 3 and reverted; see docs/schema-mode-reasoning-field.md).
-var refineTestsJudgeFormatSchema = map[string]any{
-	"type": "object",
-	"properties": map[string]any{
-		"decision":             map[string]any{"type": "string"},
-		"functions_to_rewrite": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-		"instructions":         map[string]any{"type": "string"},
-		"summary":              map[string]any{"type": "string"},
-	},
-	"required": []string{"decision", "summary"},
 }
 
 func (h *RefineTestsJudge) Validate(rawOutput string) (string, any) {

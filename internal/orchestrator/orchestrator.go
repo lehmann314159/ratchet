@@ -27,7 +27,13 @@ import (
 const pollInterval = 2 * time.Second
 
 // Run drives the orchestrator loop until ctx is cancelled.
-func Run(ctx context.Context, d *db.DB, oc *ollama.Client) error {
+func Run(ctx context.Context, d *db.DB, oc *ollama.Client, opts ...Option) error {
+	var cfg config
+	for _, o := range opts {
+		o(&cfg)
+	}
+	ctx = withCapturer(ctx, cfg.capturer)
+
 	handlers := verbs.All(oc.BaseURL)
 
 	owner := fmt.Sprintf("pid-%d", os.Getpid())
@@ -90,6 +96,20 @@ func tick(ctx context.Context, d *db.DB, oc *ollama.Client, handlers map[string]
 		// or be fully complete.
 		slog.Debug("no pending jobs", "project_id", project.ID)
 		return nil
+	}
+
+	// Verb-IO capture (opt-in via `ratchet start --capture-verb-io`). Snapshots
+	// DB + folder + job before Run() and records every model call. EXECUTE_BEAD
+	// is excluded — it's subprocess-based and covered by `ratchet exec-bakeoff`.
+	if c := capturerFrom(ctx); c != nil && job.Verb != db.VerbExecuteBead {
+		dctx, finalize, err := c.BeginDispatch(ctx, d, project, job)
+		if err != nil {
+			slog.Warn("capture: BeginDispatch failed — dispatching uninstrumented",
+				"verb", job.Verb, "job_id", job.ID, "error", err)
+		} else {
+			defer finalize()
+			ctx = dctx
+		}
 	}
 
 	return dispatch(ctx, d, oc, handlers, job)

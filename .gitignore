@@ -7,6 +7,7 @@ ratchet-projects/
 *.log
 /ratchet
 /checkdesigndoc
+docs/state-machine.pdf
 internal/verbs/traces/
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
