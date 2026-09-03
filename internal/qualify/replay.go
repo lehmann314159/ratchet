@@ -116,9 +116,12 @@ func (r ReplayResult) promptTokens() int64 {
 	return n
 }
 
-// tokPerSec is generated tokens over generation nanoseconds, summed across
-// calls. Zero when Ollama omitted the counters.
-func (r ReplayResult) tokPerSec() float64 {
+// answerTokPerSec is *answer* tokens over answer-generation nanoseconds. Ollama's
+// eval_count/eval_duration cover only the final content, NOT a reasoning model's
+// thinking stream (which is generated at the same rate but reported nowhere in
+// the token counters — it only shows up in total_duration). So this is
+// "throughput of the visible answer", not the model's true generation rate.
+func (r ReplayResult) answerTokPerSec() float64 {
 	var tok, ns int64
 	for _, c := range r.Calls {
 		tok += c.Stats.EvalCount
@@ -128,6 +131,33 @@ func (r ReplayResult) tokPerSec() float64 {
 		return 0
 	}
 	return float64(tok) / (float64(ns) / 1e9)
+}
+
+// thinkingSecs estimates total time spent generating the (uncounted) reasoning
+// stream: total_duration − prompt_eval_duration − eval_duration, summed across
+// calls. Zero when total_duration wasn't captured (pre-fix result.json / older
+// replay.txt) — callers should fall back to the thinking char count.
+func (r ReplayResult) thinkingSecs() float64 {
+	var ns int64
+	for _, c := range r.Calls {
+		if c.Stats.TotalDuration <= 0 {
+			continue
+		}
+		d := c.Stats.TotalDuration - c.Stats.PromptEvalDuration - c.Stats.EvalDuration - c.Stats.LoadDuration
+		if d > 0 {
+			ns += d
+		}
+	}
+	return float64(ns) / 1e9
+}
+
+// thinkingChars is the fallback signal when total_duration is absent.
+func (r ReplayResult) thinkingChars() int {
+	n := 0
+	for _, c := range r.Calls {
+		n += len(c.Response.Thinking)
+	}
+	return n
 }
 
 // Replayer holds the fixed configuration for a batch of replays.
@@ -308,31 +338,34 @@ func (rp *Replayer) Replay(ctx context.Context, c Case, model string, run int) R
 // re-run Validate + the graders without the model. The per-run folder/ +
 // grade/ dirs stay on disk alongside it for the WRITE grader.
 type resultRecord struct {
-	Case      string     `json:"case"`
-	CaseName  string     `json:"case_name"`
-	Verb      string     `json:"verb"`
-	Model     string     `json:"model"`
-	Run       int        `json:"run"`
-	Ordinal   int        `json:"ordinal"`
-	BeadID    *int64     `json:"bead_id"`
-	Cycle     *int64     `json:"cycle_id"`
-	WallMS    int64      `json:"wall_ms"`
-	RunErr    string     `json:"run_err,omitempty"`
-	Raw       string     `json:"raw_output"`
-	Validation string    `json:"validation_result"`
-	Fidelity  FidelityResult `json:"fidelity"`
-	Calls     []callLite `json:"calls"`
+	Case       string         `json:"case"`
+	CaseName   string         `json:"case_name"`
+	Verb       string         `json:"verb"`
+	Model      string         `json:"model"`
+	Run        int            `json:"run"`
+	Ordinal    int            `json:"ordinal"`
+	BeadID     *int64         `json:"bead_id"`
+	Cycle      *int64         `json:"cycle_id"`
+	WallMS     int64          `json:"wall_ms"`
+	RunErr     string         `json:"run_err,omitempty"`
+	Raw        string         `json:"raw_output"`
+	Validation string         `json:"validation_result"`
+	Fidelity   FidelityResult `json:"fidelity"`
+	Calls      []callLite     `json:"calls"`
 }
 
 type callLite struct {
-	DoneReason      string `json:"done_reason"`
-	EvalCount       int64  `json:"eval_count"`
-	EvalDuration    int64  `json:"eval_duration"`
-	PromptEvalCount int64  `json:"prompt_eval_count"`
-	ContentLen      int    `json:"content_len"`
-	ThinkingLen     int    `json:"thinking_len"`
-	ToolCalls       int    `json:"tool_calls"`
-	WallMS          int64  `json:"wall_ms"`
+	DoneReason         string `json:"done_reason"`
+	EvalCount          int64  `json:"eval_count"`
+	EvalDuration       int64  `json:"eval_duration"`
+	PromptEvalCount    int64  `json:"prompt_eval_count"`
+	PromptEvalDuration int64  `json:"prompt_eval_duration"`
+	TotalDuration      int64  `json:"total_duration"`
+	LoadDuration       int64  `json:"load_duration"`
+	ContentLen         int    `json:"content_len"`
+	ThinkingLen        int    `json:"thinking_len"`
+	ToolCalls          int    `json:"tool_calls"`
+	WallMS             int64  `json:"wall_ms"`
 }
 
 func writeResultRecord(runDir string, c Case, res ReplayResult) {
@@ -349,7 +382,9 @@ func writeResultRecord(runDir string, c Case, res ReplayResult) {
 		rr.Calls = append(rr.Calls, callLite{
 			DoneReason: cl.DoneReason, EvalCount: cl.Stats.EvalCount,
 			EvalDuration: cl.Stats.EvalDuration, PromptEvalCount: cl.Stats.PromptEvalCount,
-			ContentLen: len(cl.Response.Content), ThinkingLen: len(cl.Response.Thinking),
+			PromptEvalDuration: cl.Stats.PromptEvalDuration, TotalDuration: cl.Stats.TotalDuration,
+			LoadDuration: cl.Stats.LoadDuration,
+			ContentLen:   len(cl.Response.Content), ThinkingLen: len(cl.Response.Thinking),
 			ToolCalls: len(cl.Response.ToolCalls), WallMS: cl.WallMillis,
 		})
 	}
@@ -438,11 +473,14 @@ func writeTrace(runDir string, res ReplayResult) {
 	fmt.Fprintf(f, "case=%s model=%s run=%d\n", res.Case, res.Model, res.Run)
 	fmt.Fprintf(f, "wall=%s validation=%q fidelity_match=%t %s\n",
 		res.Wall.Round(time.Millisecond), res.ValidationResult, res.Fidelity.Match, res.Fidelity.Detail)
-	fmt.Fprintf(f, "calls=%d gen_tok=%d prompt_tok=%d tok/s=%.1f dead_turns=%d\n",
-		len(res.Calls), res.genTokens(), res.promptTokens(), res.tokPerSec(), res.deadTurns())
+	fmt.Fprintf(f, "calls=%d answer_tok=%d prompt_tok=%d answer_tok/s=%.1f thinking_s=%.0f thinking_chars=%d dead_turns=%d\n",
+		len(res.Calls), res.genTokens(), res.promptTokens(), res.answerTokPerSec(),
+		res.thinkingSecs(), res.thinkingChars(), res.deadTurns())
 	for i, c := range res.Calls {
-		fmt.Fprintf(f, "\n--- call %d: done=%q eval=%d thinking=%d content=%d tools=%d ---\n",
-			i+1, c.DoneReason, c.Stats.EvalCount, len(c.Response.Thinking), len(c.Response.Content), len(c.Response.ToolCalls))
+		think := c.Stats.TotalDuration - c.Stats.PromptEvalDuration - c.Stats.EvalDuration - c.Stats.LoadDuration
+		fmt.Fprintf(f, "\n--- call %d: done=%q eval=%d thinking=%d content=%d tools=%d total_dur=%d prompt_eval_dur=%d eval_dur=%d think_s=%.0f ---\n",
+			i+1, c.DoneReason, c.Stats.EvalCount, len(c.Response.Thinking), len(c.Response.Content), len(c.Response.ToolCalls),
+			c.Stats.TotalDuration, c.Stats.PromptEvalDuration, c.Stats.EvalDuration, float64(think)/1e9)
 	}
 	fmt.Fprintf(f, "\n=== raw output ===\n%s\n", res.RawOutput)
 }

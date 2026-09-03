@@ -116,7 +116,11 @@ func runRegrade(args []string) {
 		for _, cl := range rr.Calls {
 			res.Calls = append(res.Calls, ollama.CallRecord{
 				DoneReason: cl.DoneReason,
-				Stats: ollama.Stats{EvalCount: cl.EvalCount, EvalDuration: cl.EvalDuration, PromptEvalCount: cl.PromptEvalCount},
+				Stats: ollama.Stats{
+					EvalCount: cl.EvalCount, EvalDuration: cl.EvalDuration,
+					PromptEvalCount: cl.PromptEvalCount, PromptEvalDuration: cl.PromptEvalDuration,
+					TotalDuration: cl.TotalDuration, LoadDuration: cl.LoadDuration,
+				},
 				Response:   ollama.Message{Content: pad(cl.ContentLen), Thinking: pad(cl.ThinkingLen), ToolCalls: make([]ollama.ToolCall, cl.ToolCalls)},
 				WallMillis: cl.WallMS,
 			})
@@ -197,10 +201,17 @@ func parseReplayTxt(path string, byName map[string]Case) (resultRecord, error) {
 	rr.Fidelity = FidelityResult{Checked: true, Match: strings.Contains(text, "fidelity_match=true")}
 
 	for _, m := range reCall.FindAllStringSubmatch(text, -1) {
-		rr.Calls = append(rr.Calls, callLite{
+		cl := callLite{
 			DoneReason: m[1], EvalCount: int64(atoiSafe(m[2])),
 			ThinkingLen: atoiSafe(m[3]), ContentLen: atoiSafe(m[4]), ToolCalls: atoiSafe(m[5]),
-		})
+		}
+		// new trace format also carries per-call durations
+		if len(m) > 8 && m[6] != "" {
+			cl.TotalDuration = int64(atoiSafe(m[6]))
+			cl.PromptEvalDuration = int64(atoiSafe(m[7]))
+			cl.EvalDuration = int64(atoiSafe(m[8]))
+		}
+		rr.Calls = append(rr.Calls, cl)
 	}
 	// Distribute the trace's aggregate gen-token count + tok/s across the calls
 	// so Summarize's per-call sums land on the right totals (replay.txt has no
@@ -228,8 +239,8 @@ var (
 	reField      = regexp.MustCompile(`case=\S+ model=(\S+) run=(\d+)`)
 	reWall       = regexp.MustCompile(`wall=(\S+) validation=`)
 	reValidation = regexp.MustCompile(`validation="([^"]*)"`)
-	reCall       = regexp.MustCompile(`--- call \d+: done="([^"]*)" eval=(\d+) thinking=(\d+) content=(\d+) tools=(\d+) ---`)
-	reAgg        = regexp.MustCompile(`calls=\d+ gen_tok=(\d+) prompt_tok=\d+ tok/s=([\d.]+)`)
+	reCall       = regexp.MustCompile(`--- call \d+: done="([^"]*)" eval=(\d+) thinking=(\d+) content=(\d+) tools=(\d+)(?: total_dur=(\d+) prompt_eval_dur=(\d+) eval_dur=(\d+))?`)
+	reAgg        = regexp.MustCompile(`calls=\d+ (?:gen_tok|answer_tok)=(\d+) prompt_tok=\d+ (?:tok/s|answer_tok/s)=([\d.]+)`)
 )
 
 func parseFloat(s string) float64 {

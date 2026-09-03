@@ -65,10 +65,10 @@ func TestCorpusSelect(t *testing.T) {
 
 func TestDeadTurnDetection(t *testing.T) {
 	r := ReplayResult{Calls: []ollama.CallRecord{
-		{DoneReason: "length", Response: ollama.Message{}},                                  // dead
-		{DoneReason: "stop", Response: ollama.Message{Content: "ok"}},                        // fine
-		{DoneReason: "length", Response: ollama.Message{Content: "partial"}},                 // not dead (has content)
-		{DoneReason: "length", Response: ollama.Message{ToolCalls: []ollama.ToolCall{{}}}},   // not dead (tool call)
+		{DoneReason: "length", Response: ollama.Message{}},                                 // dead
+		{DoneReason: "stop", Response: ollama.Message{Content: "ok"}},                      // fine
+		{DoneReason: "length", Response: ollama.Message{Content: "partial"}},               // not dead (has content)
+		{DoneReason: "length", Response: ollama.Message{ToolCalls: []ollama.ToolCall{{}}}}, // not dead (tool call)
 	}}
 	if got := r.deadTurns(); got != 1 {
 		t.Fatalf("deadTurns = %d want 1", got)
