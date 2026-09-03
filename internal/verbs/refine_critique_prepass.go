@@ -207,6 +207,68 @@ func runCritiquePrepass(ctx context.Context, folderPath string, testFiles, curre
 	return rep
 }
 
+// formatCritiquePrepass renders the report as the "Mechanical Pre-Pass Results"
+// section of the CRITIQUE user message: the raw compile/run outcome (always,
+// as execution ground truth) followed by the classified seeds.
+func formatCritiquePrepass(rep critiquePrepassReport) string {
+	var b strings.Builder
+	b.WriteString("## Mechanical Pre-Pass Results\n\n")
+	b.WriteString("A deterministic pass compiled the package and ran the test file as it stands now " +
+		"(test file present, THIS bead's implementation still scaffold stubs, prior beads' code real). " +
+		"This is execution ground truth — what the tests actually did, not a prediction.\n\n")
+
+	if !rep.Compiled {
+		b.WriteString("### Compile: FAILED\n\n```\n" + strings.TrimSpace(rep.CompileOut) + "\n```\n\n")
+	} else {
+		b.WriteString("### Compile: ok\n\n")
+		if rep.Ran {
+			b.WriteString("### Test run against the scaffold stubs\n\n")
+			if len(rep.Subtests) == 0 {
+				b.WriteString("_the run reported no subtests_\n\n")
+			} else {
+				for _, s := range rep.Subtests {
+					status := s.Action
+					if status == "" {
+						status = "did not finish"
+					}
+					if s.Panicked {
+						status = "panic"
+					}
+					fmt.Fprintf(&b, "- `%s`: %s\n", s.Name, status)
+				}
+				b.WriteString("\nA failure here is EXPECTED wherever it is only the unimplemented stub " +
+					"returning a zero value — that is not a test defect. A seed below is a failure the " +
+					"pre-pass judged to be more than that.\n\n")
+			}
+		}
+	}
+
+	if len(rep.Seeds) == 0 {
+		b.WriteString("### Seed findings: none\n\n" +
+			"The pre-pass found nothing mechanically wrong. This does NOT mean the file is correct — " +
+			"a plausible-but-wrong expected value, or an assertion stricter than the spec allows, is " +
+			"invisible to a mechanical check. Do the spec-contradiction pass.\n\n")
+	} else {
+		fmt.Fprintf(&b, "### Seed findings: %d\n\n", len(rep.Seeds))
+		for i, s := range rep.Seeds {
+			fmt.Fprintf(&b, "**Seed %d — %s** (confidence: `%s`", i+1, s.Kind, s.Confidence)
+			if s.Subtest != "" {
+				b.WriteString(", " + s.Subtest)
+			}
+			b.WriteString(")\n\n```\n" + strings.TrimSpace(s.Evidence) + "\n```\n\n")
+		}
+	}
+
+	if len(rep.Notes) > 0 {
+		b.WriteString("### Other observations (not seeds — your judgement)\n\n")
+		for _, n := range rep.Notes {
+			b.WriteString("- " + strings.TrimSpace(n) + "\n")
+		}
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // --- go test -json parsing ---
 
 type testEvent struct {
