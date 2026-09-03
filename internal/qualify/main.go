@@ -75,12 +75,25 @@ func RunQualifyModelMain(args []string) {
 		slog.Error("qualify-model: select cases", "error", err)
 		os.Exit(1)
 	}
-	// Ordinal within same-bead cases of this verb (for ADJUDICATE baseline alignment).
+	// Ordinal within same-bead cases of this verb (for ADJUDICATE baseline
+	// alignment), and a display label that disambiguates when one bead has
+	// several dispatches of the same verb (ADJUDICATE b314 -> b314.0, b314.1).
+	beadCount := map[int64]int{}
+	for _, c := range cases {
+		if c.Meta.BeadID != nil {
+			beadCount[*c.Meta.BeadID]++
+		}
+	}
 	ord := map[int64]int{}
 	ordinals := make([]int, len(cases))
+	labels := make([]string, len(cases))
 	for i, c := range cases {
+		labels[i] = c.ID()
 		if c.Meta.BeadID != nil {
 			ordinals[i] = ord[*c.Meta.BeadID]
+			if c.Meta.RefinementCycle == nil && beadCount[*c.Meta.BeadID] > 1 {
+				labels[i] = fmt.Sprintf("%s.%d", c.ID(), ordinals[i])
+			}
 			ord[*c.Meta.BeadID]++
 		} else {
 			ordinals[i] = -1
@@ -146,6 +159,7 @@ func RunQualifyModelMain(args []string) {
 				t0 := time.Now()
 				res := rp.Replay(ctx, c, model, run)
 				res.Ordinal = ordinals[ci]
+				res.Case = labels[ci]
 				results = append(results, res)
 
 				fid := "n/a"
@@ -153,12 +167,12 @@ func RunQualifyModelMain(args []string) {
 					fid = fmt.Sprintf("match=%t", res.Fidelity.Match)
 				}
 				slog.Info("qualify-model: replay",
-					"model", model, "case", c.ID(), "run", run,
+					"model", model, "case", labels[ci], "run", run,
 					"wall", time.Since(t0).Round(time.Second),
 					"validation", res.ValidationResult, "fidelity", fid,
 					"run_err", errStr(res.RunErr))
 				fidLines = append(fidLines, fmt.Sprintf("%s\t%s\t%t\t%t\t%s",
-					model, c.ID(), res.Fidelity.Checked, res.Fidelity.Match, res.Fidelity.Detail))
+					model, labels[ci], res.Fidelity.Checked, res.Fidelity.Match, res.Fidelity.Detail))
 
 				var g RunGrade
 				if !*fidelityOnly {

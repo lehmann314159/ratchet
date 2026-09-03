@@ -114,11 +114,14 @@ func gradeWrite(ctx context.Context, mutantRoot string, c Case, res ReplayResult
 	if runFuncs == "" {
 		runFuncs = "Test"
 	}
+	gradeRoot := filepath.Join(res.RunDir, "grade")
+	_ = os.MkdirAll(gradeRoot, 0o755)
+
 	passesGood := false
-	killsMutant := false
+	mutantsKilled := 0
 	var detail []string
 	for _, v := range variants {
-		w := filepath.Join(res.RunDir, "mut-"+sanitize(v.name))
+		w := filepath.Join(gradeRoot, sanitize(v.name))
 		if err := copyTree(folder, w); err != nil {
 			detail = append(detail, v.name+":copyerr")
 			continue
@@ -128,23 +131,35 @@ func gradeWrite(ctx context.Context, mutantRoot string, c Case, res ReplayResult
 				detail = append(detail, v.name+":overlayerr")
 			}
 		}
-		testErr := runGo(w, 8*time.Minute, "test", "-run", runFuncs, "-count=1", "./...")
+		out, testErr := runGoOut(w, 8*time.Minute, "test", "-run", runFuncs, "-count=1", "./...")
+		_ = os.WriteFile(filepath.Join(gradeRoot, sanitize(v.name)+".log"), []byte(out), 0o644)
 		pass := testErr == nil
 		detail = append(detail, fmt.Sprintf("%s=%s", v.name, map[bool]string{true: "pass", false: "fail"}[pass]))
 		if v.good {
 			passesGood = pass
 		} else if !pass {
-			killsMutant = true
+			mutantsKilled++
 		}
-		_ = os.RemoveAll(w)
+	}
+	nMutants := len(variants) - 1
+
+	// kills_mutant is only meaningful when the good impl passes — otherwise every
+	// variant fails trivially.
+	killsCol := "n/a"
+	if passesGood {
+		killsCol = fmt.Sprintf("%d/%d", mutantsKilled, nMutants)
+	}
+	note := strings.Join(detail, " ") + missNote(missing)
+	if !passesGood {
+		note = "TEST FAILS vs known-good impl — " + note
 	}
 
-	pass := compiles && passesGood && killsMutant
+	pass := compiles && passesGood && mutantsKilled >= 1
 	return RunGrade{
 		Pass: pass,
 		Cols: col("compiles", b2s(compiles), "passes_good", b2s(passesGood),
-			"kills_mutant", b2s(killsMutant), "coverage", coverage),
-		Note: strings.Join(detail, " ") + missNote(missing),
+			"kills_mutant", killsCol, "coverage", coverage),
+		Note: note,
 	}
 }
 
@@ -284,16 +299,17 @@ func cycleOf(c Case) int64 {
 }
 
 func runGo(dir string, timeout time.Duration, args ...string) error {
+	_, err := runGoOut(dir, timeout, args...)
+	return err
+}
+
+func runGoOut(dir string, timeout time.Duration, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		_ = os.WriteFile(filepath.Join(dir, "_grade_go.log"),
-			append([]byte(strings.Join(args, " ")+"\n"), out...), 0o644)
-	}
-	return err
+	return strings.Join(args, " ") + "\n" + string(out), err
 }
 
 func b2s(b bool) string {
