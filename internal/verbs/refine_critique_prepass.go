@@ -231,6 +231,17 @@ func runCritiquePrepass(ctx context.Context, folderPath string, testFiles, curre
 	return rep
 }
 
+// CritiquePrepassProfile re-runs the deterministic pre-pass against a folder
+// and returns a compact "kind/confidence" list plus the note count. Harness
+// helper for `ratchet qualify-model` grading — not used by the pipeline.
+func CritiquePrepassProfile(ctx context.Context, folderPath string, testFiles, currentImplFiles, requiredFuncs []string, specText string) (seeds []string, notes int) {
+	rep := runCritiquePrepass(ctx, folderPath, testFiles, currentImplFiles, requiredFuncs, specText)
+	for _, s := range rep.Seeds {
+		seeds = append(seeds, s.Kind+"/"+string(s.Confidence))
+	}
+	return seeds, len(rep.Notes)
+}
+
 // --- spec cross-check (conservative) ---
 
 // wellKnownAssertString is the set of string literals that show up in assertion

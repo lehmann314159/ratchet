@@ -209,6 +209,19 @@ func gradeCritique(ctx context.Context, ref *ReferenceDB, c Case, res ReplayResu
 	if err != nil {
 		return RunGrade{Note: err.Error()}
 	}
+
+	// Deterministic pre-pass profile (same inputs the reshaped verb feeds the
+	// model) — surfaced so the report shows what the mechanical pass contributed
+	// on each case, independent of the model.
+	prepass := "?"
+	if spec, serr := caseBeadSpec(ctx, filepath.Join(c.Dir, "db.sqlite"), *c.Meta.BeadID); serr == nil {
+		seeds, notes := verbs.CritiquePrepassProfile(ctx, filepath.Join(c.Dir, "folder"),
+			spec.TestFiles(), spec.ImplFiles(), spec.RequiredTestFuncs(), spec.FullText)
+		prepass = fmt.Sprintf("%ds+%dn", len(seeds), notes)
+		if len(seeds) > 0 {
+			prepass += "(" + strings.Join(seeds, ",") + ")"
+		}
+	}
 	if label == "ambiguous" {
 		v := "clear"
 		if res.ValidationResult != "valid" {
@@ -216,10 +229,10 @@ func gradeCritique(ctx context.Context, ref *ReferenceDB, c Case, res ReplayResu
 		} else if !res.Parsed.(verbs.RefineTestsCritiqueOutput).AllCorrect {
 			v = "flagged"
 		}
-		return RunGrade{Cols: nil, Note: "[ambiguous label — not scored] verdict=" + v}
+		return RunGrade{Cols: nil, Note: "[ambiguous label — not scored] prepass=" + prepass + " verdict=" + v}
 	}
 	if res.ValidationResult != "valid" {
-		return RunGrade{Cols: col("label", label, "verdict", "malformed", "outcome", "malformed"),
+		return RunGrade{Cols: col("label", label, "verdict", "malformed", "outcome", "malformed", "prepass", prepass),
 			Note: res.ValidationResult}
 	}
 	out := res.Parsed.(verbs.RefineTestsCritiqueOutput)
@@ -229,7 +242,7 @@ func gradeCritique(ctx context.Context, ref *ReferenceDB, c Case, res ReplayResu
 	// would score the incumbent itself as a false positive.
 	flagged := !out.AllCorrect
 	verdictCols := col("label", label, "all_correct", b2s(out.AllCorrect),
-		"findings", fmt.Sprintf("%d", len(out.Findings)))
+		"findings", fmt.Sprintf("%d", len(out.Findings)), "prepass", prepass)
 	// good -> should NOT flag (flagged == false-positive)
 	// bad  -> should flag     (not flagged == miss)
 	var pass bool
