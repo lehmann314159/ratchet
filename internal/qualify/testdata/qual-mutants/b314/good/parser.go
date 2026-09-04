@@ -212,7 +212,7 @@ func (p *Parser) parseExpression() (Expr, error) {
 		if err != nil {
 			return nil, err
 		}
-		left = &BinaryExpr{Op: op, Left: left, Right: right}
+		left = BinaryExpr{Op: op, Left: left, Right: right}
 	}
 	return left, nil
 }
@@ -231,7 +231,7 @@ func (p *Parser) parseTerm() (Expr, error) {
 		if err != nil {
 			return nil, err
 		}
-		left = &BinaryExpr{Op: op, Left: left, Right: right}
+		left = BinaryExpr{Op: op, Left: left, Right: right}
 	}
 	return left, nil
 }
@@ -247,13 +247,13 @@ func (p *Parser) parseFactor() (Expr, error) {
 		if err := p.advance(); err != nil {
 			return nil, err
 		}
-		return &NumberExpr{Value: val}, nil
+		return NumberExpr{Value: val}, nil
 	case TokenIdent:
 		name := p.cur.Text
 		if err := p.advance(); err != nil {
 			return nil, err
 		}
-		return &VarExpr{Name: name}, nil
+		return VarExpr{Name: name}, nil
 	case TokenMinus:
 		if err := p.advance(); err != nil {
 			return nil, err
@@ -262,7 +262,7 @@ func (p *Parser) parseFactor() (Expr, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &UnaryExpr{Op: TokenMinus, Value: val}, nil
+		return UnaryExpr{Op: TokenMinus, Value: val}, nil
 	case TokenLParen:
 		if err := p.advance(); err != nil {
 			return nil, err

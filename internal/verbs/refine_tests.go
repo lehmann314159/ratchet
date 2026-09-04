@@ -67,6 +67,67 @@ func missingRequiredFuncs(testPath string, required []string) []string {
 	return missing
 }
 
+// pendingFuncCount returns how many Test* functions a REFINE_TESTS_WRITE call
+// is expected to (re)write this cycle: len(allowedFuncs) when set (cycle 2+,
+// JUDGE's rewrite list restricts the call to specific functions), else
+// len(requiredFuncs) (cycle 1, the bead's full exit-criteria list).
+func pendingFuncCount(requiredFuncs []string, allowedFuncs map[string]bool) int {
+	if allowedFuncs != nil {
+		return len(allowedFuncs)
+	}
+	return len(requiredFuncs)
+}
+
+// computeMaxTurns returns the turn budget for one REFINE_TESTS_WRITE call:
+// refinementWriteAttempts, raised for two independent reasons that must both
+// be checked every turn (accepting more subtests, or more required functions,
+// only ever grows the budget, never shrinks it):
+//
+//   - pending, the number of functions this call must (re)write
+//     (pendingFuncCount) — a bead needing more than one function needs
+//     proportionally more room before any write is accepted at all, which
+//     totalReq below cannot express (it is 0 until the first write lands).
+//     baseline-9 bead 316, 2026-09-04: a 2-function bead (TestCompile,
+//     TestDisassemble) exhausted its whole 4-turn budget on run_go_snippet
+//     calls (see the write-before-verify gate in Run) without ever writing
+//     either one, and escalated with nothing on disk.
+//   - totalReq, the number of subtest cases accepted writes so far require
+//     run_go_snippet verification for (the original mechanism, pre-existing).
+func computeMaxTurns(pending, totalReq int) int {
+	maxTurns := refinementWriteAttempts
+	if pending > 1 {
+		if floor := pending + refinementWriteAttempts; floor > maxTurns {
+			maxTurns = floor
+		}
+	}
+	if totalReq+2 > maxTurns {
+		maxTurns = totalReq + 2
+	}
+	return maxTurns
+}
+
+// writeBeforeVerifyError returns the tool-error message a run_go_snippet call
+// must get back when no write_function has been accepted yet this call, or ""
+// if the call may proceed as normal.
+//
+// Verifying a subtest before any function exists is meaningless, but the
+// system prompt's "call it once for EVERY t.Run subtest ... before you
+// finish" reads to a model as permission to front-load all verification ahead
+// of any write_function call. That burns the whole turn budget (computeMaxTurns)
+// on run_go_snippet calls — none of which the empty-turn re-prompt elsewhere in
+// Run catches, since each such turn does carry a tool call — and the loop
+// hits maxTurns having written nothing (baseline-9 bead 316, 2026-09-04: a
+// 591s turn-1 planning monologue ending in a snippet call, three more
+// snippet-only turns, then escalation with compiler_test.go empty). This
+// forces the natural order instead of relying on the model to infer it.
+func writeBeforeVerifyError(writtenFuncs map[string]string) string {
+	if len(writtenFuncs) > 0 {
+		return ""
+	}
+	return "error: no test function has been written yet — call write_function first, " +
+		"then verify its subtests with run_go_snippet."
+}
+
 // compileErrLocRe strips the "./file.go:12:34: " (or "file.go:12:34: ")
 // location prefix from a Go compile-error line so the same underlying error
 // compares equal across turns even when its line/column shifts.
@@ -474,10 +535,7 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		for _, cases := range requiredCases {
 			totalReq += len(cases)
 		}
-		maxTurns := refinementWriteAttempts
-		if totalReq+2 > maxTurns {
-			maxTurns = totalReq + 2
-		}
+		maxTurns := computeMaxTurns(pendingFuncCount(requiredFuncs, allowedFuncs), totalReq)
 		if turn > maxTurns {
 			break
 		}
@@ -547,6 +605,10 @@ func (h *RefineTestsWrite) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 			var result string
 			switch tc.Function.Name {
 			case "run_go_snippet":
+				if errMsg := writeBeforeVerifyError(writtenFuncs); errMsg != "" {
+					result = errMsg
+					break
+				}
 				if src, _ := tc.Function.Arguments["source"].(string); strings.TrimSpace(src) == "" {
 					result = "error: source is empty"
 				} else if forCase, _ := tc.Function.Arguments["for_case"].(string); strings.TrimSpace(forCase) == "" {

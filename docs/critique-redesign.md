@@ -1,8 +1,9 @@
 # REFINE_TESTS_CRITIQUE redesign — mechanical pre-pass
 
-**Status:** design — 2026-09-03. Not implemented.
-**Branch:** off `main` after `refine-bakeoff` merges (the qualify-model harness +
-fleet switch land first).
+**Status:** ABANDONED — 2026-09-03. Built through phase 4, two bakeoffs, both
+negative results. Not landed; branch `critique-mechanical-prepass` reverted to
+`main`. The design below and the "Implementation notes" / "Outcome" sections at
+the bottom are kept as the record of what was tried and why it does not work.
 **Motivating data:** `docs/fleet-qualification.md` — the CRITIQUE bakeoff.
 **Related:** the noise-tolerant re_refine loop (item 2 — companion doc TBD; make
 CRITIQUE+JUDGE a cheap filter, lower/sharpen the ADJUDICATE `re_refine`
@@ -153,3 +154,82 @@ Fidelity assert **disabled for CRITIQUE** — the prompt legitimately changes.
 | 3 | spec cross-check (conservative) + setup-consistency | catches b314-c1's class on ≥1 case, or documented why not |
 | 4 | re-bakeoff the model choice against the new verb | pick a model |
 | 5 | (with item 2 done) one fresh baseline capture — end-to-end `re_refine` leakage | leakage ≤ current, loop cost down |
+
+## Implementation notes (2026-09-03)
+
+**Phase 1 + 2 shipped** (`internal/verbs/refine_critique_prepass.go`,
+`RefineTestsCritique.Run`). Seed kinds: `compile_error` (test-file build error,
+`high`), `panic` / `hang` (`stub_explained` when the panicking value flows from
+this bead's own stub, else `review`), `setup_inconsistency`. One panic aborts
+the test binary, so only the first panicking subtest is observed; the run table
+shows the rest as "did not finish". Loop: `OmitFormat`.
+
+**Phase 3 — setup-consistency kept as a seed; spec cross-check tried and removed.**
+- *Setup-consistency* is a seed: gated on an actual panic **plus** a structural
+  asymmetry between sibling subtests exercising the same bead function (one does
+  package-level state setup the panicking one omits). High precision; 0 hits on
+  p48 (no panic-before-assertion case there), validated by a fixture.
+- *Spec cross-check* (flag asserted string literals absent from the spec text)
+  was implemented, demoted to a note, then **removed**. On p48 it caught none of
+  the labelled defects and, even as a note, caused a false positive: the model
+  turned the `htmx.org` note into an over-specification finding on b318-c1, a
+  case the incumbent + JUDGE both left clean. The value was design-doc-pinned;
+  the excerpt this pass saw didn't quote it. Net negative.
+
+**Phase 4 — two bakeoffs, both negative. Redesign abandoned.**
+
+*Bakeoff 1* (reshaped verb, `OmitFormat`, ≤3 turns, `run_go_snippet` optional;
+qwen3:32b, 12 p48 cases × 2): valid 24/24 at **~1m45s p50** (vs 804s baseline,
+~7.5×) but real-defect catch fell **4/6 → 1/6** and false positives rose
+**0/4 → 2/4** (both from the spec-cross-check note). Root cause: with zero
+forced verification, a clean mechanical report ("compile ok, tests pass, 0
+seeds") primes the model to rubber-stamp `all_correct: true` — its summaries
+literally cited the pre-pass's silence as justification.
+
+*Hardening*: spec cross-check removed; PART 2 rewritten as a full independent
+review with a **completeness** class (unasserted / too-loose behavior) plus "a
+clean pre-pass runs against stubs and proves nothing"; one **mandatory**
+`run_go_snippet` before the verdict (turn budget 3 → 4).
+
+*Bakeoff 2* (hardened, qwen3:32b, 6 labelled cases × 2): the b318-c1 FP was
+fixed (spec cross-check gone), but catch stayed ~2/6, a **new** FP appeared
+(the model began mis-classifying the `stub_explained` panic seed as a real
+defect and recommending `if x != nil` guards — b314-c2), the mandatory snippet
+pushed latency back to **318s p50**, and one b320-c1 run went malformed
+(`done_reason: length` on the forced-snippet turn). No convergence.
+
+**Conclusion.** On the validated p48 corpus the mechanical checks caught **zero
+real defects**: test-file compile errors are already caught downstream (WRITE's
+Commit gate, EXECUTE); panics against the stub are benign; the one class a
+mechanical check could help with (panic-before-assertion from sibling-setup
+asymmetry) had 0 corpus hits. What the incumbent's 4/6 catch actually consists
+of — spec-interpretation, completeness gaps, wrong expected values — needs the
+model's open-ended forced review, and every attempt to bound that review to
+make room for the pre-pass dropped the catch rate. The pre-pass's *clean*
+result is an attractive nuisance: a new, larger version of the "checked a few
+things, saw nothing → all_correct" vacuous-pass failure. Redundant where it
+works, catch-lowering where it doesn't.
+
+This joins the original bakeoff's "no model beats the incumbent" with **"no
+verb reshape beats the incumbent."** CRITIQUE's cost is not fixable by making
+CRITIQUE smarter or leaner; the lever is item 2 — make CRITIQUE non-load-
+bearing (cheap filter, JUDGE/EXECUTE/ADJUDICATE the real gate) so its latency
+stops mattering — or accept 13 min as the price of the only config that
+catches defects. One residual correctness risk this does NOT address:
+a *plausible-but-wrong-but-satisfiable* expected value (b314-c1's class) can
+pass WRITE → CRITIQUE → JUDGE → EXECUTE → ADJUDICATE and ship wrong, because
+ADJUDICATE's `re_refine` only fires when *no* implementation can satisfy the
+test. That class wants a dedicated mechanism (behavioral-divergence
+escalation / a downstream spec-conformance check), not a CRITIQUE redesign.
+
+**b314-c1's class is not reachable by either static check, by construction.**
+The defect — "the test asserts an error for single-newline input, but the spec
+allows exactly one trailing newline" — is a *behavioral* disagreement between the
+test's notion of correct output and the spec's. It is not an asserted constant
+(the assertion is `(err != nil) != wantErr`, no literal), not a setup bug (the
+subtest is self-contained), and both the test and a plausible wrong reading of
+the spec are internally consistent. Detecting it mechanically would require
+deriving the correct behavior from the spec — i.e. redoing WRITE in verification
+mode, the oracle problem this redesign explicitly leaves with the model. It
+stays the model's PART 2 residual and is a target of the noise-tolerant
+`re_refine` loop (item 2), where execution is the oracle.

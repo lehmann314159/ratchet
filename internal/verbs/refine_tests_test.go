@@ -239,6 +239,71 @@ func TestMissingWriteCases(t *testing.T) {
 	}
 }
 
+func TestPendingFuncCount(t *testing.T) {
+	if got := pendingFuncCount([]string{"TestA", "TestB"}, nil); got != 2 {
+		t.Errorf("cycle 1 (allowedFuncs nil): got %d, want len(requiredFuncs)=2", got)
+	}
+	if got := pendingFuncCount(nil, nil); got != 0 {
+		t.Errorf("no required funcs and no restriction: got %d, want 0", got)
+	}
+	// Cycle 2+: allowedFuncs (JUDGE's rewrite list) restricts the call to a
+	// subset of requiredFuncs — pending must follow the restriction, not the
+	// full exit-criteria list.
+	allowed := map[string]bool{"TestB": true}
+	if got := pendingFuncCount([]string{"TestA", "TestB"}, allowed); got != 1 {
+		t.Errorf("cycle 2+ restricted to 1 function: got %d, want 1", got)
+	}
+	// An empty-but-non-nil allowedFuncs is still "restricted", just to nothing.
+	if got := pendingFuncCount([]string{"TestA", "TestB"}, map[string]bool{}); got != 0 {
+		t.Errorf("cycle 2+ restricted to 0 functions: got %d, want 0", got)
+	}
+}
+
+func TestComputeMaxTurns(t *testing.T) {
+	// A single-function bead (or no functions counted yet) gets the base budget.
+	if got := computeMaxTurns(1, 0); got != refinementWriteAttempts {
+		t.Errorf("pending=1, totalReq=0: got %d, want base %d", got, refinementWriteAttempts)
+	}
+	if got := computeMaxTurns(0, 0); got != refinementWriteAttempts {
+		t.Errorf("pending=0, totalReq=0: got %d, want base %d", got, refinementWriteAttempts)
+	}
+	// baseline-9 bead 316 (2026-09-04): a 2-function bead must get more than
+	// the base budget even before any write lands (totalReq=0).
+	if got, want := computeMaxTurns(2, 0), 2+refinementWriteAttempts; got != want {
+		t.Errorf("pending=2, totalReq=0: got %d, want %d (the fix for the baseline-9 wedge)", got, want)
+	}
+	// A bead needing many functions scales further.
+	if got, want := computeMaxTurns(5, 0), 5+refinementWriteAttempts; got != want {
+		t.Errorf("pending=5, totalReq=0: got %d, want %d", got, want)
+	}
+	// totalReq (accepted-write subtest cases) still raises the floor
+	// independently, and the two floors compose by taking the max, not adding.
+	if got, want := computeMaxTurns(1, 10), 12; got != want {
+		t.Errorf("pending=1, totalReq=10: got %d, want %d (totalReq+2)", got, want)
+	}
+	if got, want := computeMaxTurns(5, 10), 12; got != want {
+		t.Errorf("pending=5, totalReq=10: got %d, want %d (totalReq+2 dominates the pending floor)", got, want)
+	}
+}
+
+func TestWriteBeforeVerifyError(t *testing.T) {
+	// baseline-9 bead 316 (2026-09-04): the exact scenario this closes — a
+	// run_go_snippet call arriving before any write_function has landed must
+	// be rejected, not executed.
+	if got := writeBeforeVerifyError(map[string]string{}); got == "" {
+		t.Error("nothing written yet: want a blocking error, got none")
+	}
+	if got := writeBeforeVerifyError(nil); got == "" {
+		t.Error("nil writtenFuncs (equivalent to empty, cycle start): want a blocking error, got none")
+	}
+	// Once at least one function has been accepted, verification proceeds
+	// normally — this only gates the very first call of a WRITE session.
+	written := map[string]string{"TestCompile": "func TestCompile(t *testing.T) {}"}
+	if got := writeBeforeVerifyError(written); got != "" {
+		t.Errorf("one function already written: want no error, got %q", got)
+	}
+}
+
 func TestNormalizeCompileErrors(t *testing.T) {
 	// Real captures from exprvm-web-baseline-3 bead 246 (2026-09-01): turn 4 had
 	// two errors, turn 5 had one — but the html/html-template mismatch is the same
