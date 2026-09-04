@@ -1166,19 +1166,31 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 	// to what's actually being certified — one tagged call per subtest, not
 	// per file — closes that gap generally, without encoding anything about
 	// URL decoding, HTML escaping, or any other specific bug.
-	var lastContent string
 	coveredCases := map[string]bool{}
+	numPredict := 0
+	lengthCapStrikes := 0
 	for turn := 1; turn <= maxTurns; turn++ {
 		// NOT schema-mode: this is the ChatWithTools path (run_go_snippet loop).
 		// Reverted to bare "json" pending a deliberate re-approach to tool-loop
 		// schema-mode (see docs/schema-mode-reasoning-field.md — WRITE showed the
 		// tool loop is where schema-mode breaks).
-		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetCaseTool}, nil, nil)
+		turnOpts := (*ollama.Options)(nil)
+		if numPredict > 0 {
+			turnOpts = withNumPredict(nil, numPredict)
+		}
+		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetCaseTool}, turnOpts, nil)
 		if toolErr != nil {
 			return "", toolErr
 		}
-		if strings.TrimSpace(msg.Content) != "" {
-			lastContent = msg.Content
+		if isLengthCapEmpty(msg) {
+			lengthCapStrikes++
+			if lengthCapStrikes >= 2 {
+				return forceStrippedFinalAnswer(ctx, oc, model, messages[0].Content, messages[1].Content, nil)
+			}
+			numPredict = lengthCapRetryNumPredict
+			messages = append(messages, msg)
+			messages = append(messages, ollama.Message{Role: "user", Content: lengthCapStopReasoningNudge})
+			continue
 		}
 		if len(msg.ToolCalls) == 0 {
 			missing := missingVerificationCases(msg.Content, allCases, coveredCases)
@@ -1224,10 +1236,12 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 			messages = append(messages, ollama.Message{Role: "tool", Content: result})
 		}
 	}
-	// Turn cap reached without a final non-tool response — return whatever
-	// content the model last produced (Validate will reject it as malformed
-	// if it isn't valid JSON, triggering the normal retry path).
-	return lastContent, nil
+	// Turn cap reached without a final non-tool response — every turn,
+	// including the last, made a tool call, so force one more turn asking
+	// directly for the decision instead of trusting empty leftover state
+	// (see turnCapFinalizeNudge's doc comment).
+	logTurnCapFallthrough("REFINE_TESTS_CRITIQUE", job.BeadID.Int64, maxTurns)
+	return forceFinalizeAfterTurnCap(ctx, oc, model, messages, nil)
 }
 
 // missingVerificationCases parses content as a tentative RefineTestsCritiqueOutput
@@ -1398,8 +1412,10 @@ func (h *RefineTestsJudge) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 	// decision or on the model's own sense of whether this call needs it)
 	// is what closes that gap, mirroring ADJUDICATE's own unconditional
 	// (not decision-gated) rationale for the identical requirement.
-	var lastContent string
 	usedTool := false
+	baseOpts := &ollama.Options{OmitFormat: true}
+	numPredict := 0
+	lengthCapStrikes := 0
 	for turn := 1; turn <= snippetVerificationTurns; turn++ {
 		// No `format` constraint (OmitFormat). The qualification bakeoff
 		// (2026-09-03) showed the grammar's effect is model-specific: gemma4:31b
@@ -1411,13 +1427,23 @@ func (h *RefineTestsJudge) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		// own rate) at 5x the speed. Validate still enforces non-empty "summary"
 		// and a valid decision, so an omitted field just triggers the normal
 		// retry rather than a silent bad verdict.
-		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetTool},
-			&ollama.Options{OmitFormat: true}, nil)
+		turnOpts := baseOpts
+		if numPredict > 0 {
+			turnOpts = withNumPredict(baseOpts, numPredict)
+		}
+		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetTool}, turnOpts, nil)
 		if toolErr != nil {
 			return "", toolErr
 		}
-		if strings.TrimSpace(msg.Content) != "" {
-			lastContent = msg.Content
+		if isLengthCapEmpty(msg) {
+			lengthCapStrikes++
+			if lengthCapStrikes >= 2 {
+				return forceStrippedFinalAnswer(ctx, oc, model, messages[0].Content, messages[1].Content, baseOpts)
+			}
+			numPredict = lengthCapRetryNumPredict
+			messages = append(messages, msg)
+			messages = append(messages, ollama.Message{Role: "user", Content: lengthCapStopReasoningNudge})
+			continue
 		}
 		if len(msg.ToolCalls) == 0 {
 			if usedTool {
@@ -1454,7 +1480,11 @@ func (h *RefineTestsJudge) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 			messages = append(messages, ollama.Message{Role: "tool", Content: result})
 		}
 	}
-	return lastContent, nil
+	// Every turn, including the last, made a tool call (usedTool is
+	// necessarily true here) — force one more turn asking directly for the
+	// decision instead of trusting empty leftover state.
+	logTurnCapFallthrough("REFINE_TESTS_JUDGE", job.BeadID.Int64, snippetVerificationTurns)
+	return forceFinalizeAfterTurnCap(ctx, oc, model, messages, baseOpts)
 }
 
 func (h *RefineTestsJudge) Validate(rawOutput string) (string, any) {

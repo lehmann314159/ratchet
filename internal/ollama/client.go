@@ -119,6 +119,15 @@ type Message struct {
 	// carry a stray key.
 	Thinking  string     `json:"thinking,omitempty"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	// DoneReason carries Ollama's own reason a ChatWithTools turn ended
+	// ("stop", "length", ...). json:"-" — response-only, never sent back out
+	// on a subsequent request that includes this message in history. Callers
+	// use it to tell a genuine "ran out of per-turn token budget mid-thought"
+	// turn (done_reason "length" with empty Content and no ToolCalls) apart
+	// from an ordinary empty final-answer turn (done_reason "stop") — the two
+	// look identical by Content/ToolCalls alone but need different handling;
+	// see isLengthCapEmpty in internal/verbs.
+	DoneReason string `json:"-"`
 }
 
 // Tool defines a function the model may call.
@@ -637,10 +646,11 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 			"model", model, "thinking_chars", thinkingSB.Len(), "content_chars", contentSB.Len())
 	}
 	result = Message{
-		Role:      "assistant",
-		Content:   contentSB.String(),
-		Thinking:  thinkingSB.String(),
-		ToolCalls: toolCalls,
+		Role:       "assistant",
+		Content:    contentSB.String(),
+		Thinking:   thinkingSB.String(),
+		ToolCalls:  toolCalls,
+		DoneReason: doneReason,
 	}
 	return result, nil
 }
