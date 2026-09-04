@@ -333,6 +333,45 @@ func TestStuckCompileSummary(t *testing.T) {
 	}
 }
 
+func TestMissingVerificationCases(t *testing.T) {
+	allCases := map[string][]string{
+		"TestHandlers": {"HandleIndex", "HandleEval_Success", "HandleEval_CompileError"},
+	}
+
+	t.Run("certifying a function with only one covered case leaves the rest missing", func(t *testing.T) {
+		content := `{"findings":[],"verified_functions":["TestHandlers"],"all_correct":true,"summary":"all good"}`
+		covered := map[string]bool{"HandleIndex": true}
+		missing := missingVerificationCases(content, allCases, covered)
+		if len(missing) != 2 {
+			t.Fatalf("missing = %v, want 2 entries (this is exactly what let CRITIQUE approve all 8 bead-34 subtests off one call)", missing)
+		}
+	})
+
+	t.Run("covering every case clears the function", func(t *testing.T) {
+		content := `{"findings":[],"verified_functions":["TestHandlers"],"all_correct":true,"summary":"all good"}`
+		covered := map[string]bool{"HandleIndex": true, "HandleEval_Success": true, "HandleEval_CompileError": true}
+		if missing := missingVerificationCases(content, allCases, covered); len(missing) != 0 {
+			t.Errorf("missing = %v, want none", missing)
+		}
+	})
+
+	t.Run("a function with findings (not verified) requires no coverage", func(t *testing.T) {
+		content := `{"findings":["TestHandlers — bug"],"verified_functions":[],"all_correct":false,"summary":"1 problem"}`
+		if missing := missingVerificationCases(content, allCases, map[string]bool{}); len(missing) != 0 {
+			t.Errorf("missing = %v, want none for an unverified function", missing)
+		}
+	})
+
+	t.Run("malformed content falls back to the at-least-one-call floor", func(t *testing.T) {
+		if missing := missingVerificationCases("not json", allCases, map[string]bool{}); len(missing) == 0 {
+			t.Error("expected the fallback floor to require at least one covered case")
+		}
+		if missing := missingVerificationCases("not json", allCases, map[string]bool{"anything": true}); len(missing) != 0 {
+			t.Errorf("missing = %v, want none once at least one case is covered", missing)
+		}
+	})
+}
+
 // TestRefineTestsWriteCommitHardCompletenessGate: the write loop's in-turn
 // completeness nag is soft (abandoned on the last turn). Commit must escalate
 // when a required test function is still missing, rather than enqueue CRITIQUE

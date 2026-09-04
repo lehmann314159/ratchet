@@ -1,8 +1,9 @@
 # REFINE_TESTS_CRITIQUE redesign — mechanical pre-pass
 
-**Status:** design — 2026-09-03. Not implemented.
-**Branch:** off `main` after `refine-bakeoff` merges (the qualify-model harness +
-fleet switch land first).
+**Status:** ABANDONED — 2026-09-03. Built through phase 4, two bakeoffs, both
+negative results. Not landed; branch `critique-mechanical-prepass` reverted to
+`main`. The design below and the "Implementation notes" / "Outcome" sections at
+the bottom are kept as the record of what was tried and why it does not work.
 **Motivating data:** `docs/fleet-qualification.md` — the CRITIQUE bakeoff.
 **Related:** the noise-tolerant re_refine loop (item 2 — companion doc TBD; make
 CRITIQUE+JUDGE a cheap filter, lower/sharpen the ADJUDICATE `re_refine`
@@ -175,21 +176,51 @@ shows the rest as "did not finish". Loop: `OmitFormat`.
   case the incumbent + JUDGE both left clean. The value was design-doc-pinned;
   the excerpt this pass saw didn't quote it. Net negative.
 
-**Phase 4 — first bakeoff was a NEGATIVE result; verb hardened, re-bakeoff.**
-The reshaped verb (qwen3:32b, 12 p48 cases × 2) ran valid 24/24 in ~1m45s p50
-(vs 804s baseline, ~7.5×) but real-defect catch fell **4/6 → 1/6** and false
-positives rose **0/4 → 2/4** (both from the spec-cross-check note). Root cause:
-zero forced verification + a clean mechanical report primes the model to
-rubber-stamp `all_correct: true`. Hardening (2026-09-03):
-- spec cross-check removed (above);
-- PART 2 of the prompt is now a *full independent review* with a **completeness**
-  class — "is any required behavior not covered by an assertion, or covered too
-  loosely" — targeting the b320-c1 (unasserted happy-path status) and b321-c1
-  (loose error substring) misses; plus explicit "a clean pre-pass runs against
-  stubs and proves nothing";
-- one **mandatory** `run_go_snippet` before the verdict is accepted (turn budget
-  3 → 4) — restores the friction the 6-forced-turn loop had, at ~1 extra turn.
-Re-bakeoff pending.
+**Phase 4 — two bakeoffs, both negative. Redesign abandoned.**
+
+*Bakeoff 1* (reshaped verb, `OmitFormat`, ≤3 turns, `run_go_snippet` optional;
+qwen3:32b, 12 p48 cases × 2): valid 24/24 at **~1m45s p50** (vs 804s baseline,
+~7.5×) but real-defect catch fell **4/6 → 1/6** and false positives rose
+**0/4 → 2/4** (both from the spec-cross-check note). Root cause: with zero
+forced verification, a clean mechanical report ("compile ok, tests pass, 0
+seeds") primes the model to rubber-stamp `all_correct: true` — its summaries
+literally cited the pre-pass's silence as justification.
+
+*Hardening*: spec cross-check removed; PART 2 rewritten as a full independent
+review with a **completeness** class (unasserted / too-loose behavior) plus "a
+clean pre-pass runs against stubs and proves nothing"; one **mandatory**
+`run_go_snippet` before the verdict (turn budget 3 → 4).
+
+*Bakeoff 2* (hardened, qwen3:32b, 6 labelled cases × 2): the b318-c1 FP was
+fixed (spec cross-check gone), but catch stayed ~2/6, a **new** FP appeared
+(the model began mis-classifying the `stub_explained` panic seed as a real
+defect and recommending `if x != nil` guards — b314-c2), the mandatory snippet
+pushed latency back to **318s p50**, and one b320-c1 run went malformed
+(`done_reason: length` on the forced-snippet turn). No convergence.
+
+**Conclusion.** On the validated p48 corpus the mechanical checks caught **zero
+real defects**: test-file compile errors are already caught downstream (WRITE's
+Commit gate, EXECUTE); panics against the stub are benign; the one class a
+mechanical check could help with (panic-before-assertion from sibling-setup
+asymmetry) had 0 corpus hits. What the incumbent's 4/6 catch actually consists
+of — spec-interpretation, completeness gaps, wrong expected values — needs the
+model's open-ended forced review, and every attempt to bound that review to
+make room for the pre-pass dropped the catch rate. The pre-pass's *clean*
+result is an attractive nuisance: a new, larger version of the "checked a few
+things, saw nothing → all_correct" vacuous-pass failure. Redundant where it
+works, catch-lowering where it doesn't.
+
+This joins the original bakeoff's "no model beats the incumbent" with **"no
+verb reshape beats the incumbent."** CRITIQUE's cost is not fixable by making
+CRITIQUE smarter or leaner; the lever is item 2 — make CRITIQUE non-load-
+bearing (cheap filter, JUDGE/EXECUTE/ADJUDICATE the real gate) so its latency
+stops mattering — or accept 13 min as the price of the only config that
+catches defects. One residual correctness risk this does NOT address:
+a *plausible-but-wrong-but-satisfiable* expected value (b314-c1's class) can
+pass WRITE → CRITIQUE → JUDGE → EXECUTE → ADJUDICATE and ship wrong, because
+ADJUDICATE's `re_refine` only fires when *no* implementation can satisfy the
+test. That class wants a dedicated mechanism (behavioral-divergence
+escalation / a downstream spec-conformance check), not a CRITIQUE redesign.
 
 **b314-c1's class is not reachable by either static check, by construction.**
 The defect — "the test asserts an error for single-newline input, but the spec

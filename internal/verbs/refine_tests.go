@@ -1034,30 +1034,17 @@ func caseCovered(covered map[string]bool, c string) bool {
 }
 
 // snippetVerificationTurns bounds how many run_go_snippet round-trips a
-// single ADJUDICATE_NEXT_EXECUTION call may use before it must give its final
-// decision — enough for a handful of independent verifications without letting
-// the call run indefinitely.
+// single REFINE_TESTS_CRITIQUE or ADJUDICATE_NEXT_EXECUTION call may use
+// before it must give its final verdict/decision — enough for a handful of
+// independent verifications without letting the call run indefinitely.
 const snippetVerificationTurns = 6
-
-// critiquePrepassTurns bounds the reshaped REFINE_TESTS_CRITIQUE model turn.
-// The old verb forced 6 run_go_snippet verification turns (one per subtest of
-// every function it wanted to certify), which — via a long reasoning stream per
-// turn — was ~13 min/run and still missed the spec-interpretation defects it
-// exists to catch (docs/critique-redesign.md, the CRITIQUE bakeoff). The
-// mechanical pre-pass now runs the tests once, deterministically, and hands the
-// model seed findings with evidence; the model's job shrinks to confirm/refute
-// each seed plus a full spec-contradiction / coverage pass, with one mandatory
-// run_go_snippet verification (not per-subtest). 4 turns covers: one snippet
-// round-trip, the mandatory-verification nudge if the model tries to finalize
-// early, and the verdict.
-const critiquePrepassTurns = 4
 
 type RefineTestsCritique struct{}
 
 func (h *RefineTestsCritique) Verb() string { return db.VerbRefineTestsCritique }
 
 func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Client, job *db.HandoffJob) (string, error) {
-	bead, _, folderPath, implContext, testFilePaths, currentTestContent, err := loadRefineContext(ctx, d, job)
+	bead, _, _, implContext, _, currentTestContent, err := loadRefineContext(ctx, d, job)
 	if err != nil {
 		return "", err
 	}
@@ -1067,61 +1054,64 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 		return "", err
 	}
 
-	// Non-test output files of THIS bead — scaffold stubs at CRITIQUE time. The
-	// pre-pass uses them to tell "the stub isn't implemented" apart from a real
-	// test defect.
-	var currentImplFiles []string
-	for _, f := range bead.OutputFiles {
-		if strings.HasSuffix(f, ".go") && !strings.HasSuffix(f, "_test.go") {
-			currentImplFiles = append(currentImplFiles, f)
-		}
-	}
-	requiredFuncs := extractRequiredTestFuncs(bead.ExitCriteria)
-	docExcerpt := loadDesignDocExcerptForBead(ctx, d, job.ProjectID, bead)
-
-	// Mechanical pre-pass: compile + run the locked test file against the folder
-	// as-is, classify each failure, emit seed findings with evidence. See
-	// refine_critique_prepass.go and docs/critique-redesign.md.
-	prepass := runCritiquePrepass(ctx, folderPath, testFilePaths, currentImplFiles, requiredFuncs)
-	slog.Info("REFINE_TESTS_CRITIQUE pre-pass",
-		"bead_id", job.BeadID.Int64, "compiled", prepass.Compiled, "ran", prepass.Ran,
-		"seeds", len(prepass.Seeds), "notes", len(prepass.Notes))
-
 	userMsg := "## Bead Specification\n\n" + bead.FullText
-	if docExcerpt != "" {
-		userMsg += "\n\n## Authoritative Design Document (excerpts)\n\n" + docExcerpt
+	if excerpt := loadDesignDocExcerptForBead(ctx, d, job.ProjectID, bead); excerpt != "" {
+		userMsg += "\n\n## Authoritative Design Document (excerpts)\n\n" + excerpt
 	}
 	if implContext != "" {
 		userMsg += "\n\n## Implementation Files (prior beads — types and conventions)\n\n" +
 			strings.TrimSpace(implContext)
 	}
 	userMsg += "\n\n## Current Test File\n\n" + strings.TrimSpace(currentTestContent)
-	userMsg += "\n\n" + formatCritiquePrepass(prepass)
 
 	messages := []ollama.Message{
 		{Role: "system", Content: refineTestsCritiqueSystemPrompt},
 		{Role: "user", Content: userMsg},
 	}
 
-	// Bounded tool loop. The pre-pass already ran the tests, so run_go_snippet
-	// is not a per-subtest gate — but the model must call it at least once
-	// before its final verdict is accepted. This restores the friction the
-	// original 6-forced-turn loop provided without the cost: the first
-	// qualification of the reshaped verb (2026-09-03) showed that with zero
-	// forced verification the model, led by a clean mechanical result, rubber-
-	// stamps `all_correct: true` — catch rate on real defects fell from 4/6 to
-	// 1/6. One mandatory verification turn is the middle ground.
+	// allCases is an upper bound (every subtest in the whole file) used only
+	// to size the turn budget below; the actual gate per attempt is scoped to
+	// whichever functions the model is about to certify as verified.
+	allCases := extractSubtestCases(currentTestContent)
+	totalCases := 0
+	for _, cases := range allCases {
+		totalCases += len(cases)
+	}
+	maxTurns := snippetVerificationTurns
+	if totalCases+2 > maxTurns {
+		maxTurns = totalCases + 2
+	}
+
+	// Tool loop: the model may call run_go_snippet to verify a runtime-
+	// behavior claim before giving its final JSON verdict. Mirrors
+	// RefineTestsWrite's turn loop below, with one addition: a final
+	// (zero-tool-call) response is only accepted once every subtest belonging
+	// to a function it's about to list in verified_functions has been
+	// covered by a tagged run_go_snippet call.
+	//
+	// Why: "verify when you're not certain" (the original prompt wording)
+	// only helps when the model perceives itself as uncertain. The 2026-07-20
+	// exprvm-web-v1 bead 34 incident showed that failure — CRITIQUE stated,
+	// as flat unhedged fact, that html/template does not escape '+', with no
+	// sign the tool was ever invoked. Requiring at least one call, full stop,
+	// fixed that specific case but left a subtler gap: a single untargeted
+	// call anywhere satisfied the old boolean gate no matter how many
+	// separate claims were being certified. The very next cycle, CRITIQUE
+	// called run_go_snippet once and then approved all 8 subtests of a
+	// single TestHandlers function as correct — including 3 that hand-built
+	// a raw '+' into an x-www-form-urlencoded request body (the stdlib
+	// decodes that as a space, not a literal '+'). Requiring coverage scaled
+	// to what's actually being certified — one tagged call per subtest, not
+	// per file — closes that gap generally, without encoding anything about
+	// URL decoding, HTML escaping, or any other specific bug.
 	var lastContent string
-	usedSnippet := false
-	for turn := 1; turn <= critiquePrepassTurns; turn++ {
-		// OmitFormat: CRITIQUE's output (findings[] + summary + all_correct) is
-		// low-risk for the JSON-escaping corruption the "json" grammar was added
-		// to prevent, and the grammar suppresses reasoning-model thinking on the
-		// tool loop while roughly doubling latency (the 2026-09-03 bakeoff).
-		// Validate still enforces a non-empty summary via ExtractJSON, so a
-		// prose-wrapped or malformed answer just triggers the normal retry.
-		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetTool},
-			&ollama.Options{OmitFormat: true}, nil)
+	coveredCases := map[string]bool{}
+	for turn := 1; turn <= maxTurns; turn++ {
+		// NOT schema-mode: this is the ChatWithTools path (run_go_snippet loop).
+		// Reverted to bare "json" pending a deliberate re-approach to tool-loop
+		// schema-mode (see docs/schema-mode-reasoning-field.md — WRITE showed the
+		// tool loop is where schema-mode breaks).
+		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetCaseTool}, nil, nil)
 		if toolErr != nil {
 			return "", toolErr
 		}
@@ -1129,15 +1119,24 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 			lastContent = msg.Content
 		}
 		if len(msg.ToolCalls) == 0 {
-			if usedSnippet || turn == critiquePrepassTurns {
+			missing := missingVerificationCases(msg.Content, allCases, coveredCases)
+			if len(missing) == 0 || turn == maxTurns {
+				// Accept: either every certified function's subtests were
+				// covered, or the turn budget is exhausted — fall back to
+				// whatever it gave rather than fail the job outright. Logged
+				// so an under-verified verdict is visible, not silent.
+				if len(missing) > 0 {
+					slog.Warn("REFINE_TESTS_CRITIQUE finalized with uncovered subtests",
+						"bead_id", job.BeadID.Int64, "turn", turn, "missing", missing)
+				}
 				return msg.Content, nil
 			}
 			messages = append(messages, msg)
-			messages = append(messages, ollama.Message{Role: "user", Content: "Before your verdict is " +
-				"accepted, call run_go_snippet at least once to check a concrete claim about Go/stdlib runtime " +
-				"behavior that one of these assertions depends on — even if the file looks correct and the " +
-				"mechanical pre-pass was clean. A clean pre-pass runs against unimplemented stubs and does not " +
-				"tell you the assertions are right. Then give your final JSON verdict."})
+			messages = append(messages, ollama.Message{Role: "user", Content: "Before giving your final " +
+				"verdict, call run_go_snippet — tagged with for_case — to verify a specific claim behind each " +
+				"of these still-unverified subtests, since you're about to certify their enclosing function(s) " +
+				"as correct: " + strings.Join(missing, ", ") + ". Confidence is not evidence; that gap is " +
+				"exactly what this tool exists to close. Then give your final JSON verdict."})
 			continue
 		}
 
@@ -1148,10 +1147,12 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 				result = fmt.Sprintf("error: unknown tool %q — only run_go_snippet is available", tc.Function.Name)
 			} else if src, _ := tc.Function.Arguments["source"].(string); strings.TrimSpace(src) == "" {
 				result = "error: source is empty"
+			} else if forCase, _ := tc.Function.Arguments["for_case"].(string); strings.TrimSpace(forCase) == "" {
+				result = "error: for_case is empty — name the t.Run subtest (or Test* function) this verifies"
 			} else if out, rerr := runGoSnippet(ctx, src); rerr != nil {
 				result = fmt.Sprintf("error: %v", rerr)
 			} else {
-				usedSnippet = true
+				coveredCases[strings.TrimSpace(forCase)] = true
 				if out == "" {
 					result = "(snippet ran with no output — add a print statement to see a result)"
 				} else {
@@ -1165,6 +1166,33 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 	// content the model last produced (Validate will reject it as malformed
 	// if it isn't valid JSON, triggering the normal retry path).
 	return lastContent, nil
+}
+
+// missingVerificationCases parses content as a tentative RefineTestsCritiqueOutput
+// and returns, for every function it lists in verified_functions, the
+// subtest cases (from allCases) not yet present in covered. If content
+// doesn't parse as valid JSON yet (the model may still be mid-thought before
+// its real final answer), it falls back to requiring at least one covered
+// case, matching this verb's pre-existing floor. If allCases itself is nil
+// (the test file didn't parse), no per-case requirement can be computed and
+// the same one-call floor applies.
+func missingVerificationCases(content string, allCases map[string][]string, covered map[string]bool) []string {
+	var out RefineTestsCritiqueOutput
+	if err := json.Unmarshal([]byte(ollama.ExtractJSON(content)), &out); err != nil || allCases == nil {
+		if len(covered) == 0 {
+			return []string{"(at least one verified claim)"}
+		}
+		return nil
+	}
+	var missing []string
+	for _, fn := range out.VerifiedFunctions {
+		for _, c := range allCases[fn] {
+			if !caseCovered(covered, c) {
+				missing = append(missing, fn+"/"+c)
+			}
+		}
+	}
+	return missing
 }
 
 // missingWriteCases returns, for every function REFINE_TESTS_WRITE has

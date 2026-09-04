@@ -313,17 +313,8 @@ func (rp *Replayer) Replay(ctx context.Context, c Case, model string, run int) R
 
 	// Fidelity is checkable as soon as the first call is recorded, even if the
 	// run was deliberately aborted (StopAfterCalls) or errored later.
-	//
-	// REFINE_TESTS_CRITIQUE is exempt: the mechanical-pre-pass redesign
-	// (docs/critique-redesign.md) deliberately reshapes the prompt — it now
-	// carries seed findings from a live `go test` run of the case folder, which
-	// by construction won't match the captured prompt.
 	if len(res.Calls) > 0 {
-		if m.Verb == "REFINE_TESTS_CRITIQUE" {
-			res.Fidelity = FidelityResult{Checked: false, Detail: "skipped — CRITIQUE prompt reshaped by the mechanical-pre-pass redesign"}
-		} else {
-			res.Fidelity = checkFidelity(c, res.Calls)
-		}
+		res.Fidelity = checkFidelity(c, res.Calls)
 	}
 
 	if runErr != nil {
