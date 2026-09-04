@@ -313,3 +313,73 @@ Cases: p48's 6 adjudication dispatches (b313, b314×2, b315–b317). n=2.
 - **`eval_count`/`eval_duration` count only answer tokens**, not a reasoning
   model's thinking stream (visible only in `total_duration`). The harness now
   derives `thinking_secs` from the difference.
+
+## Tool-loop length-cap spiral fix — smoke-tested, not proven (2026-09-04 night)
+
+**Fix:** `internal/verbs/tool_loop_recovery.go` (PR #3, `1211f36` on `main`,
+deployed to the live binary). See [[project_tool_loop_length_cap_fix]] in
+memory for the full diagnosis. Summary: a tool-loop turn that hits
+`toolLoopNumPredict` (8192) while still reasoning — `done_reason=length`, zero
+content, zero tool calls — was previously nudged with the ordinary
+mandatory-verification prompt (asking for *more* reasoning, exactly backwards)
+and could burn the rest of a job's turn budget on repeats of the same dead
+turn. Fix: detect the condition distinctly; 1st occurrence → one retry at 2x
+budget with a "stop analyzing, answer now" nudge; 2nd occurrence → drop the
+accumulated transcript and force one stripped last-resort turn (fresh
+system+user, no tools). A related gap (turn budget exhausted while every turn,
+including the last, legitimately called a tool → silent empty return) gets a
+forced finalize-only turn instead.
+
+**Harness changes made to validate this** (both are now permanent
+`qualify-model` capabilities, not one-off hacks):
+- `--ceiling` flag (`internal/qualify/main.go`) — `Replayer.PerRunCeiling`
+  (hard cap on one case+run, default 30m) wasn't exposed before. The fix's own
+  retry legitimately asks for 2x the per-turn budget, which can exceed 30m on
+  the slowest model (qwen3:32b) on its own — the harness's own safety net was
+  at risk of mistaking the fix's designed behavior for a hang.
+- `--force-num-predict` flag, plumbed through `ollama.ChatOverride.NumPredict`
+  (`internal/ollama/override.go`, `client.go`) — deterministically forces
+  every turn to hit `done_reason=length` (set it small, e.g. 64) instead of
+  waiting for a natural spiral to recur, which is inherently stochastic (see
+  results below).
+
+**Live results:**
+- **Organic replay of the primary incident — ADJUDICATE case b314 (the exact
+  bead/job that spiraled 3/3 times to escalation in baseline-10, job 2014):
+  2/2 replay runs now resolve cleanly** (21m35s and 1m17s, both
+  `validation=valid run_err=""`), via the first-hit-retry path. No regression
+  on ADJUDICATE's already-clean case (`020`, 2/2 valid) either.
+- **Organic replay of CRITIQUE's spiral case (b315-c1, baseline-9 bead 315)
+  did NOT reproduce the length-cap condition on either of 2 attempts**
+  (`033`: 21m42s valid, 0 dead turns; `034`: 22m56s valid, 0 dead turns) —
+  confirms no regression on the ordinary path, but ~45 minutes of real
+  GPU time spent without exercising the new recovery logic on this verb at
+  all. Reasoning-model spirals are genuinely stochastic (the original corpus
+  showed the same non-determinism), so this is expected, not a red flag.
+- **Deterministic smoke test (`--force-num-predict=64`, CRITIQUE b315-c1,
+  qwen3:32b) closed that gap directly, in 1m9s:** a clean 4-call sequence —
+  call 1 hits the forced cap (`length`, 1st occurrence) → call 2 recovers with
+  real but insufficient-for-CRITIQUE's-separate-coverage-gate content (`stop`,
+  142 chars) → call 3 hits the forced cap again (`length`, 2nd occurrence,
+  triggers the stripped-final path) → call 4 (the stripped call) returns real
+  valid JSON (`stop`, 154 chars), accepted by `Validate`. Both new code paths
+  fired and worked, against a real model and real Ollama, exactly as designed.
+  Caveat: the harness's `ChatOverride.NumPredict` always wins over the fix's
+  own internal 2x-budget bump (by design, for determinism), so this run
+  confirms the *nudge* half of the retry mechanism (successfully steering the
+  model to a short real answer) but not that a genuine 2x budget increase
+  specifically helps a naturally-occurring long spiral converge — that half
+  rests on the corpus-read diagnosis (verbose-but-progressing vs.
+  genuinely-repeating shapes) plus the 2/2 organic ADJUDICATE success, not on
+  this smoke test.
+- **Finding B (turn-cap-fallthrough) remains live-unconfirmed** — only
+  mechanically covered, via the fake-server unit tests
+  (`internal/verbs/tool_loop_recovery_test.go`).
+
+**Verdict:** promising, not proven — deliberately treated as a smoke test, not
+exhaustive validation (per-user direction, 2026-09-04: real confidence comes
+from running ratchet on real work, not from more replay engineering). No
+regressions observed anywhere it was exercised; the primary reported incident
+is directly fixed; the harder CRITIQUE-side organic reproduction and Finding B
+remain open, to be picked up (if at all) by real usage in
+`exprvm-web-baseline-11` rather than further synthetic replay.

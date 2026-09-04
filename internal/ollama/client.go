@@ -497,6 +497,9 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		if ov.Think != nil {
 			think = ov.Think
 		}
+		if ov.NumPredict > 0 {
+			numPredict = ov.NumPredict
+		}
 	}
 
 	req := struct {
