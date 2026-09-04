@@ -19,6 +19,16 @@ type ChatOverride struct {
 	// Think, when non-nil, sets the request's top-level `think` field,
 	// overriding whatever the caller's Options specified.
 	Think *bool
+	// NumPredict, when positive, overrides ChatWithTools's per-turn token cap
+	// (toolLoopNumPredict, or a caller's Options.NumPredict / an in-loop
+	// budget bump) after every other source has been applied — it always
+	// wins. Exists to deterministically force a tool-loop turn to hit
+	// done_reason=length without waiting for a model to naturally spiral: set
+	// it small (e.g. 64) and any real reasoning stream gets truncated on the
+	// first turn, letting the qualify-model harness exercise the
+	// length-cap-recovery paths in internal/verbs/tool_loop_recovery.go on
+	// demand instead of hoping a case reproduces the condition organically.
+	NumPredict int
 }
 
 type chatOverrideKey struct{}

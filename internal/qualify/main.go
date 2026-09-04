@@ -50,6 +50,12 @@ func RunQualifyModelMain(args []string) {
 	unload := fs.Bool("unload", true, "nudge each model out of remote VRAM when done")
 	omitFormat := fs.Bool("omit-format", false, "drop the format grammar constraint on every model call (reasoning-model sweep)")
 	thinkMode := fs.String("think", "", "override the think flag: '', 'on', or 'off'")
+	ceiling := fs.Duration("ceiling", 30*time.Minute, "hard cap on one case+run replay (Replayer.PerRunCeiling); "+
+		"raise this for verbs/cases whose legitimate recovery path can exceed the 30m default, e.g. a "+
+		"length-cap retry asking for 2x the per-turn token budget")
+	forceNumPredict := fs.Int("force-num-predict", 0, "override every turn's token cap (ollama.ChatOverride.NumPredict); "+
+		"set small (e.g. 64) to deterministically force done_reason=length on the first real reasoning turn, "+
+		"for smoke-testing the length-cap recovery paths without waiting for a natural spiral. 0 = no override")
 	_ = fs.Parse(args)
 
 	if *corpus == "" || *verb == "" || *modelsArg == "" || *outDir == "" {
@@ -115,10 +121,12 @@ func RunQualifyModelMain(args []string) {
 		"runs", *runs, "fidelity_only", *fidelityOnly)
 
 	rp := NewReplayer(*ollamaURL, *workDir)
+	rp.PerRunCeiling = *ceiling
 	cfg := "format=json think=default"
-	if *omitFormat || *thinkMode != "" {
+	if *omitFormat || *thinkMode != "" || *forceNumPredict > 0 {
 		var ov ollama.ChatOverride
 		ov.ForceOmitFormat = *omitFormat
+		ov.NumPredict = *forceNumPredict
 		switch *thinkMode {
 		case "on":
 			t := true
@@ -141,6 +149,9 @@ func RunQualifyModelMain(args []string) {
 			tm = *thinkMode
 		}
 		cfg = fmt.Sprintf("format=%s think=%s", fm, tm)
+		if *forceNumPredict > 0 {
+			cfg += fmt.Sprintf(" num_predict=%d(forced)", *forceNumPredict)
+		}
 	}
 	_ = os.WriteFile(filepath.Join(*outDir, "config.txt"),
 		[]byte(fmt.Sprintf("verb=%s\nmodels=%s\nruns=%d\ncases=%s\n%s\n", *verb, *modelsArg, *runs, *casesArg, cfg)), 0o644)
