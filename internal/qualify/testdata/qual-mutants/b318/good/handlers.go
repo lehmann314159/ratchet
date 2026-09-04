@@ -72,7 +72,7 @@ func HandleEval(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		entry.Err = err.Error()
 	} else {
-		entry.Output = outBuf.String()
+		entry.Output = strings.TrimSuffix(outBuf.String(), "\n")
 	}
 
 	history = append(history, entry)

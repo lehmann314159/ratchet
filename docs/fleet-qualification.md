@@ -105,7 +105,8 @@ stale against `refine-bakeoff` HEAD.
 
 ### REFINE_TESTS_WRITE
 
-b313 (lexer) only — the one bead with authored mutants. n=3.
+**2026-09-03 (b313 only, n=3):** see below — superseded by the 2026-09-04 full
+run, kept for the raw dead-turn-rate numbers on repeated attempts of one bead.
 
 | model | rubric | lat p50 / p90 | turns | tok/s | dead-turn rate | notes |
 |-------|--------|---------------|-------|-------|----------------|-------|
@@ -113,17 +114,64 @@ b313 (lexer) only — the one bead with authored mutants. n=3.
 | qwen3.6:35b-a3b | 2/3 | 245s / **807s** | 3 | 64 | **0.67** | 1/3 runs wrote a test that fails vs the correct impl; 2/3 runs hit a `done_reason=length` dead turn; one run spiralled to 13 min |
 | gemma4:31b | 0/1 | 592s | 2 | 9 | 0 | compiles + covers but **wrong assertions** (fails vs good impl); 9.9 min, 9 tok/s. An earlier ad-hoc run spiralled past 25 min without finishing — this one completed but still failed the rubric |
 
-- **muse-glimmer wins WRITE** on this bead: 3/3 correct, covering,
-  mutation-killing tests; stable 2-turn loop; no dead turns. It also answers the
-  plan's open "test quality unknown" for muse — the tests are genuinely good,
-  not just syntactically valid. On b313 the incumbent **gemma went 0/1** (wrong
-  assertions, 9.9 min) and qwen3.6 2/3.
-- **qwen3.6** is fast *when it works* but has a ~33% wrong-test rate here (the
-  recurring bug: it doesn't know `Next()` auto-skips leading whitespace, so it
-  calls `Next()` twice and asserts on the wrong token) plus a real spiral risk.
-- Caveat: b313 is the simplest bead. b314–b318 need mutants before this
-  generalizes — but the muse/qwen3.6 split is consistent with the EXECUTE_BEAD
-  bakeoff.
+**2026-09-04, full run — b313/314/315/316/317/318, n=1 each, post turn-budget fix
+(`internal/verbs/refine_tests.go`, see [[project_refine_tests_loop_cost]]).**
+`good/` now exists for all 6 beads (only b313 has seeded mutants). Corpus
+`qual-corpus-p48`. Grading corrected below for two fixture defects the run
+itself exposed and that are now fixed
+(`internal/qualify/testdata/qual-mutants/b314/good/parser.go`,
+`.../b318/good/handlers.go` — see "Fixture defects found" below); the raw table
+in `scratchpad/qual-write-bakeoff/table.txt` predates that fix and undercounts
+gemma and muse.
+
+| model | genuinely correct | real defects | catastrophic (silent or timeout) | lat p50 | dead-turn rate | total thinking chars |
+|---|---|---|---|---|---|---|
+| **muse-glimmer:30b-q8_0-dflash** | **6/6** | 0 | 0 | 332s | 0% | 15,577 |
+| gemma4:31b (incumbent) | 3/6 (b314, b315, b316) | 1 (b313 — asserts error *identity*, not content; not a real spec requirement) | 2 (b317, b318 — 30-min ceiling, zero output) | 865s | 0%* | 15,131 |
+| qwen3.6:35b-a3b | 3/6 (b313, b315, b316) | 1 (b318 — fragile HTML-substring check against accumulated global history, false-matches leftover content from earlier subtests) | 2 (b314, b317 — **silent**: 4/4 turns zero tool calls, giant thinking-only streams up to 44K chars, fell through to the generic fallback summary with `validation=valid`) | 499s | 67% | 92,474 |
+
+*gemma's failures were categorized as `run_err` timeouts by the harness rather
+than its narrower dead-turn metric; behaviorally it's the same
+zero-forward-action pathology qwen3.6's 67% captures.
+
+- **muse-glimmer wins outright, cleanly.** Fastest median latency, zero dead
+  turns, zero catastrophic failures, and it independently converged (twice,
+  once for b316 and once as qwen3.6 also found) on testing the compiler
+  *through the real parser* (`NewParser(...).ParseProgram()` → `Compile(...)`)
+  rather than hand-constructing AST literals — sidestepping the
+  pointer-vs-value construction-form ambiguity that is otherwise a recurring
+  defect class in this project (see `docs/decompose-precision-plan.md`).
+- **gemma's real record is worse than raw mechanical validity suggested.**
+  4/6 runs were "valid" (compiled, no crash) but only 3/6 were actually
+  correct — b313's assertion is over-strict on an implementation detail the
+  spec never requires. The other two (b317, b318 — the two most complex beads)
+  hit the harness's 30-minute per-replay ceiling having written nothing, the
+  same single-giant-thinking-stream pathology already noted below.
+- **qwen3.6 is fast when it engages, but fails harder and more silently than
+  gemma on complex beads.** Its two failures on b314/b317 are **not** loud
+  timeouts — the call returns normally with `validation=valid, run_err=""` and
+  a generic fallback summary; only inspecting the actual output file reveals
+  nothing was written. This is a worse failure signature than a timeout for
+  anyone relying on the top-line replay result. Consistent with the 2026-09-03
+  b313 dead-turn finding (33% rate there too) — this is a real, recurring
+  qwen3.6 weakness on WRITE, not a fluke.
+- **Fixture defects found and fixed during this run** (both discovered because
+  a genuinely-good test "failed" grading and warranted tracing to root cause,
+  not written off as a model mistake):
+  - `qual-mutants/b314/good/parser.go` constructed expression-level AST nodes
+    (`BinaryExpr`, `NumberExpr`, `VarExpr`, `UnaryExpr`) as **pointers** while
+    statement-level nodes (`ExprStmt`, `AssignStmt`, `PrintStmt`) were
+    **values** — internally inconsistent, and the design doc's own worked
+    example uses values throughout. Fixed to value construction at both
+    levels. This is the same pointer-vs-value defect class independently found
+    live on exprvm-web-baseline-9's b314 `re_refine`.
+  - `qual-mutants/b318/good/handlers.go` set `entry.Output = outBuf.String()`
+    without trimming, violating the design doc's explicit "trailing '\n'
+    trimmed" rule. Fixed to `strings.TrimSuffix(outBuf.String(), "\n")`. Same
+    recurring output-trim ambiguity documented in `project_refine_precision_phase0`'s
+    Phase 0 retrospective (the dominant historical defect class across this
+    project's whole corpus) — finding it baked into the trusted reference
+    implementation itself is a strong confirmation of how sticky that gap is.
 
 ### REFINE_TESTS_CRITIQUE
 
@@ -220,12 +268,13 @@ Cases: p48's 6 adjudication dispatches (b313, b314×2, b315–b317). n=2.
 
 ## Recommendations
 
-### Applied to the default fleet (`internal/db/assignments.go`, 2026-09-03)
+### Applied to the default fleet (`internal/db/assignments.go`, 2026-09-03; WRITE 2026-09-04)
 
 | verb | change | why |
 |------|--------|-----|
-| `ADJUDICATE_NEXT_EXECUTION` | gemma4:31b → **qwen3.6:35b-a3b** | 12/12 agreement, 4–5× faster. Hard cases unvalidated — confirm on the next baseline. |
-| `REFINE_TESTS_JUDGE` | gemma4:31b → **qwen3.6:35b-a3b**, and drop the format schema (`OmitFormat`) | 62% (= gemma) at 5× speed, only without the grammar. |
+| `ADJUDICATE_NEXT_EXECUTION` | gemma4:31b → **qwen3.6:35b-a3b** | 12/12 agreement, 4–5× faster. Partially validated on hard cases by baseline-9 (2026-09-04): 0–2 min every verdict, no spiral, caught a real pointer/value defect via `re_refine` that CRITIQUE missed. |
+| `REFINE_TESTS_JUDGE` | gemma4:31b → **qwen3.6:35b-a3b**, and drop the format schema (`OmitFormat`) | 62% (= gemma) at 5× speed, only without the grammar. Partially validated on hard cases by baseline-9: 5/5 valid on attempt 1, zero malformed, zero dead turns. |
+| `REFINE_TESTS_WRITE` | gemma4:31b → **muse-glimmer:30b-q8_0-dflash** | Full 6-bead bakeoff (see above): 6/6 genuinely correct vs gemma's 3/6, including the two beads (b317, b318) that timed out gemma completely. The independence concern noted below (WRITE == EXECUTE) is judged acceptable: CRITIQUE (qwen3:32b) and JUDGE (qwen3.6) remain independent reviewers between WRITE(muse) and EXECUTE(muse), the same structure already accepted for EXECUTE's move off producer-model self-certification ([[project_third_model_decider]]). Also frees qwen3.6 to stay on JUDGE rather than pulling it toward WRITE too, which would collapse WRITE+JUDGE self-review — a more serious independence loss than WRITE+EXECUTE sharing muse. Prerequisite fix: `internal/verbs/refine_tests.go`'s turn-budget bug (a WRITE call that front-loads verification before any write could burn its whole budget and escalate with nothing written) — fixed 2026-09-04 before this bakeoff ran, or the comparison would have been unfair to any candidate with muse's/qwen3.6's/gemma's specific tool-ordering habits. |
 
 ### Not changed
 
@@ -235,11 +284,10 @@ Cases: p48's 6 adjudication dispatches (b313, b314×2, b315–b317). n=2.
   verification turns × a long reasoning stream each. The fix is the
   mechanical-pre-pass redesign (see `docs/` / the CRITIQUE redesign work), not a
   swap.
-- **`REFINE_TESTS_WRITE` stays gemma4:31b for now.** muse-glimmer went 3/3 on
-  b313 with genuinely thorough tests (vs gemma 0/1, qwen3.6 2/3 + a 13-min
-  spiral), but: (a) only one bead has mutants, (b) moving WRITE to muse makes
-  WRITE == EXECUTE, collapsing the test/impl independence. Blocked on
-  b314–b318 mutants + a WRITE→CRITIQUE→JUDGE independence check.
+- ~~`REFINE_TESTS_WRITE` stays gemma4:31b for now~~ — **superseded 2026-09-04**,
+  see the Applied table above. `good/` fixtures now exist for b314–b318 (still
+  missing seeded mutants beyond b313); that plus the turn-budget fix was enough
+  to run the full 6-bead bakeoff and settle this.
 
 ### Cross-cutting findings
 
@@ -250,9 +298,15 @@ Cases: p48's 6 adjudication dispatches (b313, b314×2, b315–b317). n=2.
 - **mistral-small3.2:24b fails every tool-loop verb** — empty required fields
   (JUDGE/ADJUDICATE) or never calls the mandatory tool (JUDGE/CRITIQUE under the
   grammar).
-- **gemma4:31b's single-giant-thinking-stream pathology is not WRITE-specific** —
-  it burned the whole `num_predict` budget thinking on turn 1 of a WRITE, and
-  spends ~5 min thinking on a JUDGE approve/revise.
+- **The single-giant-thinking-stream / zero-action pathology is not
+  gemma-specific.** gemma burned the whole `num_predict` budget thinking on
+  turn 1 of a WRITE and spends ~5 min thinking on a JUDGE approve/revise; the
+  2026-09-04 WRITE bakeoff found **qwen3.6:35b-a3b does the identical thing**,
+  worse in one respect — its failures return `validation=valid` with a generic
+  fallback summary rather than an explicit timeout, so the top-line replay
+  result gives no indication anything went wrong. Model-agnostic risk class,
+  not a single-model quirk; muse-glimmer is the only WRITE candidate that
+  hasn't shown it.
 - **Ollama reuses the KV cache across tool-loop turns** (`prompt_eval` stays flat
   as history grows) — the tool-loop cost is reasoning generation, not prompt
   re-eval. Weakens the case for an llama.cpp migration.

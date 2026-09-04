@@ -32,15 +32,29 @@ on current-generation data (projects 47 + 48) the live lever is bucket **(b)**,
    cost), `validation=valid`, `fidelity match=true`. See "Live validation" below
    for what the replay's grading result additionally surfaced (a second,
    independent occurrence of the pointer-vs-value defect class from b314).
-2. **REFINE_TESTS_WRITE model bakeoff** — on the fixed turn-budget mechanism.
-   Harness + corpus exist (`cmd/qualify-model`, `qual-corpus-p48`, 12 WRITE
-   cases). Candidates: muse-glimmer, gemma4:31b (incumbent), qwen3.6:35b-a3b.
-   **Grade on mutation-style only** (compile + pass good impl + kill ≥1 mutant) —
-   *not* the "run through real CRITIQUE" secondary: baseline-9 Finding B has the
-   incumbent CRITIQUE rubber-stamping 4/4 `all_correct=true` with a 79-min
-   spiral, so it is a broken grader on this corpus. See
-   `memory/project_refine_tests_loop_cost`.
-3. **This project (DECOMPOSE precision)** — third.
+2. **REFINE_TESTS_WRITE model bakeoff — DONE 2026-09-04.** `qual-corpus-p48`,
+   6 beads (b313–b318), n=1 each, mutation-style grading (`good/` fixtures for
+   all 6, seeded mutants for b313 only). Result: **muse-glimmer 6/6 genuinely
+   correct, gemma4:31b 3/6, qwen3.6:35b-a3b 3/6.** Both incumbents failed the
+   two hardest beads (b317 vm, b318 handlers-templates) — gemma via a loud
+   30-min timeout, qwen3.6 via a **silent** failure (`validation=valid`,
+   generic fallback summary, zero tool calls across all 4 turns, nothing
+   written — worse than a timeout for anyone trusting the top-line result).
+   **muse-glimmer ADOPTED** for `VerbRefineTestsWrite`
+   (`internal/db/assignments.go`); qwen3.6 deliberately stays on JUDGE rather
+   than also taking WRITE (would collapse WRITE+JUDGE self-review — worse than
+   WRITE+EXECUTE sharing muse, which CRITIQUE+JUDGE still independently review
+   between). Two qualify-model reference fixtures fixed along the way
+   (`b314/good/parser.go` pointer/value inconsistency,
+   `b318/good/handlers.go` untrimmed `Output`) — both independent
+   corroborations of recurring defect classes, folded into "Live validation"
+   below. Full table: `docs/fleet-qualification.md`. Branch
+   `write-turn-budget-fix`, uncommitted to main.
+3. **This project (DECOMPOSE precision)** — third. **Re-measure Phase 0's
+   expected payoff against a fresh completed baseline on muse-WRITE before
+   locking scope** — some of what Phase 0 attributed to doc/DECOMPOSE
+   precision gaps was convolved with gemma's specific WRITE pathology and may
+   not recur under muse.
 4. **Design-doc precision guidance** (`memory/project_designdoc_precision_guidance`)
    — fourth.
 

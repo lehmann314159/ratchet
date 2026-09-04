@@ -83,7 +83,7 @@ func SeedVerbModelAssignments(ctx context.Context, tx *sql.Tx, projectID int64) 
 		VerbCompressAnalysis:        "mistral-small3.2:24b",
 		VerbAdjudicateNextExecution: "qwen3.6:35b-a3b",
 		VerbRevisePending:           "qwen3:32b",
-		VerbRefineTestsWrite:        "gemma4:31b",
+		VerbRefineTestsWrite:        "muse-glimmer:30b-q8_0-dflash",
 		VerbRefineTestsCritique:     "qwen3:32b",
 		VerbRefineTestsJudge:        "qwen3.6:35b-a3b",
 	}
@@ -132,15 +132,23 @@ func SeedVerbModelAssignmentsFromFleet(ctx context.Context, tx *sql.Tx, projectI
 			enriched[VerbRevisePending] = m
 		}
 	}
-	// REFINE_TESTS_WRITE/JUDGE fallback: DECOMPOSE model (gemma4:31b in the live
-	// fleet). These used to fall back to the EXECUTE model, but as of 2026-09-02
-	// EXECUTE_BEAD is muse-glimmer (whose test-writing is unvalidated) while
-	// REFINE_TESTS deliberately stays on gemma — so a fleet file that omits
-	// these must not inherit the EXECUTE model. DECOMPOSE_SPEC == gemma in the
-	// default fleet and is the intended writer/judge model.
-	// REFINE_TESTS_CRITIQUE: critic → AUDIT model (qwen3:32b in live fleet).
+	// REFINE_TESTS_WRITE fallback: EXECUTE_BEAD's model (muse-glimmer in the
+	// live fleet). This fell back to EXECUTE originally, then was decoupled
+	// 2026-09-02 because muse's test-writing was unvalidated (WRITE stayed on
+	// gemma4:31b, DECOMPOSE_SPEC's model, instead). The 2026-09-04 WRITE
+	// bakeoff (docs/fleet-qualification.md) validated muse for WRITE — 6/6
+	// genuinely correct across 6 beads vs gemma's 2/6, including the two beads
+	// that timed out gemma completely — so WRITE now matches EXECUTE by
+	// default again, and this fallback reverts to match.
+	// REFINE_TESTS_CRITIQUE fallback: AUDIT_DECOMPOSITION's model (qwen3:32b
+	// in the live fleet).
+	// REFINE_TESTS_JUDGE fallback below: DECOMPOSE_SPEC's model — stale for the
+	// live fleet, which assigns qwen3.6:35b-a3b to JUDGE directly (2026-09-03,
+	// docs/fleet-qualification.md); a fleet file omitting JUDGE still inherits
+	// DECOMPOSE's model here, not the live default. Pre-existing, orthogonal
+	// to the WRITE change above — not fixed here.
 	if _, ok := enriched[VerbRefineTestsWrite]; !ok {
-		if m, ok := enriched[VerbDecomposeSpec]; ok {
+		if m, ok := enriched[VerbExecuteBead]; ok {
 			enriched[VerbRefineTestsWrite] = m
 		}
 	}
