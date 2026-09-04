@@ -1109,16 +1109,28 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 	// about what the code does or would do; requiring verification
 	// universally, not conditioned on the model's own sense of whether this
 	// particular call needs it, is what closes that gap.
-	var lastContent string
 	usedTool := false
 	reRefineProbed := false
+	numPredict := 0
+	lengthCapStrikes := 0
 	for turn := 1; turn <= snippetVerificationTurns; turn++ {
-		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetTool}, nil, nil)
+		turnOpts := (*ollama.Options)(nil)
+		if numPredict > 0 {
+			turnOpts = withNumPredict(nil, numPredict)
+		}
+		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetTool}, turnOpts, nil)
 		if toolErr != nil {
 			return "", toolErr
 		}
-		if strings.TrimSpace(msg.Content) != "" {
-			lastContent = msg.Content
+		if isLengthCapEmpty(msg) {
+			lengthCapStrikes++
+			if lengthCapStrikes >= 2 {
+				return forceStrippedFinalAnswer(ctx, oc, model, messages[0].Content, messages[1].Content, nil)
+			}
+			numPredict = lengthCapRetryNumPredict
+			messages = append(messages, msg)
+			messages = append(messages, ollama.Message{Role: "user", Content: lengthCapStopReasoningNudge})
+			continue
 		}
 		if len(msg.ToolCalls) == 0 {
 			// re_refine scope probe: if the model wants to route this to
@@ -1183,7 +1195,8 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 			messages = append(messages, ollama.Message{Role: "tool", Content: result})
 		}
 	}
-	return lastContent, nil
+	logTurnCapFallthrough("ADJUDICATE_NEXT_EXECUTION", beadID, snippetVerificationTurns)
+	return forceFinalizeAfterTurnCap(ctx, oc, model, messages, nil)
 }
 
 func buildAdjudicateUserMsg(bead *beadState, revLog []revisionEntry, mechanicalFindings, compressedHistory, diffSignal, docExcerpt string) string {
