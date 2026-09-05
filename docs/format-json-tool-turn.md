@@ -47,18 +47,52 @@ single non-terminating thinking stream and never emitted a `write_file` call —
 `num_predict` per-turn cap stays as the runaway bound; thinking stays on (model
 default).
 
+## Phase 2 (REFINE_TESTS_JUDGE)
+
+2026-09-03 fleet switch moved JUDGE to `qwen3.6:35b-a3b` and dropped its
+schema (`7572b21`). The qualification bakeoff run that day found the grammar
+is actively harmful for this model even though JUDGE parses its final turn as
+JSON: with `format:"json"` (+ a field-presence schema), qwen3.6 hit
+`done_reason=length` dead turns on ~12% of runs and agreed with the gemma
+baseline only 50% of the time; with `OmitFormat` it was 8/8 valid, 62%
+agreement (matching gemma's own rate), at 5x the speed. `OmitFormat` applied
+at `internal/verbs/refine_tests.go`'s REFINE_TESTS_JUDGE tool loop.
+`ExtractJSON`'s existing control-char repair covers the class the grammar was
+originally meant to prevent, so nothing else needed to change.
+
+## Phase 3 (REFINE_TESTS_CRITIQUE)
+
+Root-caused 2026-09-04/05 during `exprvm-web-baseline-11`
+(`project_critique_tool_call_json_grammar_block` in memory): unlike JUDGE,
+CRITIQUE's model (`qwen3:32b`) was never merely *harmed* by the grammar — it
+was **structurally blocked** from ever calling its tool. `qwen3:32b`'s Ollama
+template requires tool calls as literal `<tool_call>...</tool_call>` text in
+the content stream, and `<` is not a valid JSON start token under
+`format:"json"`'s GBNF grammar. Confirmed via `grep` over every captured
+`REFINE_TESTS_CRITIQUE` call across four corpora: **0 non-empty `tool_calls`
+out of 139**, CRITIQUE's entire recorded history. Same framework code,
+different model-level tool-calling mechanism, is why ADJUDICATE
+(`qwen3.6:35b-a3b`, native RENDERER/PARSER tool-calling, unaffected — see
+below) never showed this failure on an otherwise-identical `format:"json"` +
+`run_go_snippet` wiring.
+
+`OmitFormat` applied at `internal/verbs/refine_tests.go`'s
+REFINE_TESTS_CRITIQUE tool loop, same pattern as Phase 1/2 above.
+`RefineTestsCritiqueOutput` is a flat object (`findings`/`verified_functions`/
+`all_correct`/`summary`) of the same shape already proven to survive
+`ExtractJSON` unconstrained for WRITE/JUDGE, so no new parsing risk. Not yet
+live-validated — that's `exprvm-web-baseline-12`'s question (a separate
+project-run conversation), not this fix's.
+
 ## Not changed
 
-REFINE_TESTS_CRITIQUE (`qwen3:32b`), REFINE_TESTS_JUDGE (`gemma4:31b`), and
-ADJUDICATE_NEXT_EXECUTION (`gemma4:31b`) all parse their final turn's `Content`
-as JSON via `ollama.ExtractJSON` → `json.Unmarshal`. All three run on reasoning
-models with thinking ON — the working config — and are not currently broken.
-`ExtractJSON.escapeRawControlCharsInStrings` already repairs the
-unescaped-control-char class that `format:"json"` was originally added to
-prevent, applied unconditionally in every Validate path, so dropping the grammar
-there is feasible — but it is deferred to the work that moves those verbs onto
-non-reasoning models (gated on the model-qualification harness), where dropping
-it becomes mandatory rather than optional.
+ADJUDICATE_NEXT_EXECUTION (`qwen3.6:35b-a3b`) still parses its final turn's
+`Content` as JSON via `ollama.ExtractJSON` → `json.Unmarshal`, under the
+default `format:"json"`, and is not currently broken. Its Modelfile shows
+native `RENDERER qwen3.5` / `PARSER qwen3.5` tool-call handling (confirmed via
+`curl .../api/show`) — its tool call lands in a channel the grammar doesn't
+constrain the same way, unlike CRITIQUE's text-template model. No change
+proposed here.
 
 ## Follow-on
 

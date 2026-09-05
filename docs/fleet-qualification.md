@@ -383,3 +383,37 @@ regressions observed anywhere it was exercised; the primary reported incident
 is directly fixed; the harder CRITIQUE-side organic reproduction and Finding B
 remain open, to be picked up (if at all) by real usage in
 `exprvm-web-baseline-11` rather than further synthetic replay.
+
+## Live validation via exprvm-web-baseline-11 (2026-09-04/05) — CONFIRMED
+
+Both gaps left open above are now closed. See [[handoff_exprvm_web_baseline_11]]
+and [[project_tool_loop_length_cap_fix]] for full detail.
+
+- **CRITIQUE-side organic reproduction: happened twice, both recovered clean.**
+  Bead 314 (parser) job 2003 turn 6/7 and bead 315 (env) job 2015 turn 2/6 both
+  hit real, naturally-occurring `done_reason=length` — no forcing, no replay.
+  Both recovered without escalation (bead 315's via a single strike-1 retry;
+  bead 314's composed the strike-1 path with **Finding B's
+  turn-cap-fallthrough path in the same call**, since the length-cap turn was
+  also the loop's last allotted turn — the first live exercise of that path).
+  **Finding B is no longer live-unconfirmed.**
+- **Emergent, bigger result**: root-caused *why* CRITIQUE spirals at all —
+  `qwen3:32b` has never emitted a real tool call in the entire corpus history
+  (0/139 calls, all four corpora), a structural `format:"json"`-grammar vs.
+  `<tool_call>`-tag-syntax conflict, not a behavioral/prompt-compliance issue.
+  Full detail in [[project_critique_tool_call_json_grammar_block]] — this
+  directly contradicts `docs/format-json-tool-turn.md`'s existing assumption
+  that CRITIQUE is "not currently broken," and is the likely actual driver of
+  most of what this section characterized as "CRITIQUE reasoning spirals."
+  Proposed fix (`Options.OmitFormat` on CRITIQUE's tool-turn, same pattern as
+  WRITE/EXECUTE_BEAD) is queued for the next framework conversation, ahead of
+  a baseline-12.
+- Run was deliberately full-stopped at 4/9 beads clean (not a wedge) once this
+  finding made continuing less valuable than reallocating the night to the fix
+  + a fresh validation baseline.
+
+**Updated verdict:** the tool-loop length-cap fix itself is now **confirmed**,
+not just promising — 2/2 real spirals recovered, 0 escalations, both recovery
+code paths exercised live. The remaining open work shifted from "does the
+recovery mechanism work" (yes) to "why does CRITIQUE need it so often" (now
+answered, with a fix queued).
