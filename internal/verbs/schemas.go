@@ -222,11 +222,12 @@ var SurveySpecSchema = orderedObject{
 			"minItems": 1,
 			"items": map[string]any{
 				"type": "object",
-				"properties": map[string]any{
-					"path":         map[string]any{"type": "string"},
-					"declarations": map[string]any{"type": "string"},
+				"properties": orderedObject{
+					{"path", map[string]any{"type": "string"}},
+					{"imports", map[string]any{"type": "array", "items": map[string]any{"type": "string"}}},
+					{"declarations", map[string]any{"type": "string"}},
 				},
-				"required": []string{"path", "declarations"},
+				"required": []string{"path", "imports", "declarations"},
 			},
 		}},
 	}},

@@ -3,6 +3,7 @@ package verbs
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -110,6 +111,61 @@ var Handler = func(x int) int { return 0 }
 	manifest := &SurveySpecOutput{Files: []SurveyManifestFile{{Path: "handler.go"}}}
 	if got := checkStubPurity(dir, manifest); len(got) != 0 {
 		t.Errorf("expected no violations for a pure func-literal stub, got %v", got)
+	}
+}
+
+// TestCheckCrossFileTypeConsistency_CatchesTemplateSplit is check 6's
+// regression test: the exact shape that full_stopped exprvm-web baseline-3
+// (bead 246) and baseline-12 (bead 318) — one file's `var templates
+// *template.Template` backed by text/template, another by html/template. Both
+// files compile in isolation (different identifiers), so no other check sees
+// it.
+func TestCheckCrossFileTypeConsistency_CatchesTemplateSplit(t *testing.T) {
+	dir := t.TempDir()
+	writeGoFile(t, dir, "main.go", `package main
+
+import "text/template"
+
+var templates *template.Template
+`)
+	writeGoFile(t, dir, "render.go", `package main
+
+import "html/template"
+
+var templates *template.Template
+`)
+	manifest := &SurveySpecOutput{Files: []SurveyManifestFile{{Path: "main.go"}, {Path: "render.go"}}}
+	got := checkCrossFileTypeConsistency(dir, manifest)
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 cross-file-type violation, got %v", got)
+	}
+	if !strings.Contains(got[0], "templates") ||
+		!strings.Contains(got[0], "html/template") || !strings.Contains(got[0], "text/template") {
+		t.Errorf("violation message should name the identifier and both imports, got: %s", got[0])
+	}
+}
+
+// TestCheckCrossFileTypeConsistency_SameImportPasses — the identifier is shared
+// but both files resolve it to the same import: no conflict.
+func TestCheckCrossFileTypeConsistency_SameImportPasses(t *testing.T) {
+	dir := t.TempDir()
+	writeGoFile(t, dir, "main.go", "package main\n\nimport \"html/template\"\n\nvar templates *template.Template\n")
+	writeGoFile(t, dir, "render.go", "package main\n\nimport \"html/template\"\n\nvar templates *template.Template\n")
+	manifest := &SurveySpecOutput{Files: []SurveyManifestFile{{Path: "main.go"}, {Path: "render.go"}}}
+	if got := checkCrossFileTypeConsistency(dir, manifest); len(got) != 0 {
+		t.Errorf("expected no violation when both files agree on the import, got %v", got)
+	}
+}
+
+// TestCheckCrossFileTypeConsistency_SingleFilePasses — an identifier declared
+// in only one file cannot conflict.
+func TestCheckCrossFileTypeConsistency_SingleFilePasses(t *testing.T) {
+	dir := t.TempDir()
+	writeGoFile(t, dir, "main.go", "package main\n\nimport \"text/template\"\n\nvar templates *template.Template\n")
+	writeGoFile(t, dir, "other.go", "package main\n\nimport \"html/template\"\n\nvar page *template.Template\n")
+	manifest := &SurveySpecOutput{Files: []SurveyManifestFile{{Path: "main.go"}, {Path: "other.go"}}}
+	if got := checkCrossFileTypeConsistency(dir, manifest); len(got) != 0 {
+		t.Errorf("expected no violation for distinct identifiers, got %v", got)
 	}
 }
 

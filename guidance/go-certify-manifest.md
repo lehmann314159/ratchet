@@ -5,6 +5,12 @@ You are certifying a Go project manifest. Apply these language-specific rules:
   3. compile: go test -c -o /dev/null ./... exits 0 (imports, types, and stub signatures are valid)
   4. api_check: do_not_use_this_test.go was generated with at least one package-level exported symbol
      assertion (var _ = form at file scope — assertions inside test functions are insufficient)
+  6. cross_file_type: no package-level identifier is scaffolded with a type from a different imported
+     package in two files. The classic trigger is `var templates *template.Template` scaffolded as
+     html/template in one file and text/template in another — go build cannot see the conflict (each
+     file declares its own identifier), but a later bead that ties them together cannot compile. If
+     this fails, reject and tell SURVEY which import the design doc mandates for the named symbol and
+     that every file declaring it must list that same import.
 
 **Compile-time assertions:**
 The do_not_use_this_test.go file locks exported symbol existence using package-level

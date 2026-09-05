@@ -41,7 +41,8 @@ func (h *CertifyManifest) Run(ctx context.Context, d *db.DB, oc *ollama.Client, 
 	// Preliminary decision: any failed check → reject.
 	preliminary := "approve"
 	if !verify.FilePresencePass || !verify.NoBehavioralTestsPass ||
-		!verify.CompilePass || !verify.APICheckPass || !verify.StubPurityPass {
+		!verify.CompilePass || !verify.APICheckPass || !verify.StubPurityPass ||
+		!verify.CrossFileTypePass {
 		preliminary = "reject"
 	}
 
@@ -92,6 +93,7 @@ func buildCertifyUserMsg(verify *VerifyManifestOutput, preliminary string, manif
 	fmt.Fprintf(&sb, "- compile: %s\n", passFailStr(verify.CompilePass))
 	fmt.Fprintf(&sb, "- api_check: %s\n", passFailStr(verify.APICheckPass))
 	fmt.Fprintf(&sb, "- stub_purity: %s\n", passFailStr(verify.StubPurityPass))
+	fmt.Fprintf(&sb, "- cross_file_type: %s\n", passFailStr(verify.CrossFileTypePass))
 
 	if len(verify.Violations) > 0 {
 		sb.WriteString("\n## Violations\n\n")
@@ -108,7 +110,11 @@ func buildCertifyUserMsg(verify *VerifyManifestOutput, preliminary string, manif
 	sb.WriteString("\n## SURVEY Manifest\n\n")
 	fmt.Fprintf(&sb, "module: %s  package: %s\n\n", manifest.Module, manifest.Package)
 	for _, f := range manifest.Files {
-		fmt.Fprintf(&sb, "### %s\n\n```go\n%s\n```\n\n", f.Path, f.Declarations)
+		if len(f.Imports) > 0 {
+			fmt.Fprintf(&sb, "### %s\n\nimports: %s\n\n```go\n%s\n```\n\n", f.Path, strings.Join(f.Imports, ", "), f.Declarations)
+		} else {
+			fmt.Fprintf(&sb, "### %s\n\n```go\n%s\n```\n\n", f.Path, f.Declarations)
+		}
 	}
 
 	return sb.String()

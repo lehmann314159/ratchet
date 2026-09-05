@@ -181,6 +181,7 @@ CREATE TABLE IF NOT EXISTS verify_attempts (
   compile_pass             INTEGER NOT NULL,
   api_check_pass           INTEGER NOT NULL,
   stub_purity_pass         INTEGER NOT NULL,
+  cross_file_type_pass     INTEGER NOT NULL DEFAULT 1,
   violations               TEXT,
   verifier_interpretation  TEXT,
   created_at               TIMESTAMP NOT NULL

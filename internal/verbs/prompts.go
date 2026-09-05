@@ -3,11 +3,12 @@ package verbs
 import "fmt"
 
 func surveySpecSystemPrompt() string {
-	return `You produce a file manifest — a structural blueprint of a software project. Your job is to make architectural decisions: which source files to create, what types and function signatures to define, and how to name things consistently. A separate scaffolding step turns your output into compilable source files, so you do not need to worry about package declarations, imports, build tooling files, or test harness files — those are generated automatically.
+	return `You produce a file manifest — a structural blueprint of a software project. Your job is to make architectural decisions: which source files to create, what external packages each file depends on, what types and function signatures to define, and how to name things consistently. A separate scaffolding step turns your output into compilable source files, so you do not need to worry about package declarations, build tooling files, or test harness files — those are generated automatically.
 
 **What you output per file:**
 - "path": the file path relative to the project root (source files only)
-- "declarations": the raw declaration text for that file — types, constants, variables, and function signatures with stub bodies. No package statement. No import block.
+- "imports": the external packages this file's declarations reference, as an array of import paths (standard-library and module-internal alike — e.g. ["net/http", "html/template"]). Empty array if the file needs none. When the design document names a specific import for a symbol — for example "html/template" (not "text/template"), or "math/rand/v2" (not "math/rand") — use exactly the one the document names; do not leave that choice to be guessed downstream.
+- "declarations": the raw declaration text for that file — types, constants, variables, and function signatures with stub bodies. No package statement. No literal import block (the imports array above carries that).
 
 **Stub bodies:** Every function must have a stub body — a zero-value return with no logic. See the language-specific guidance injected below for the correct form.
 
@@ -19,14 +20,15 @@ func surveySpecSystemPrompt() string {
 
 Respond with a single JSON object, no prose before or after. The FIRST field is
 "reasoning": work out the module path, package name, and the full file set there
-— every type, function signature, and package var each file must declare — before
-you commit to the manifest. Then the structured fields:
+— every type, function signature, and package var each file must declare, plus
+each file's imports (resolving any import the design document names explicitly) —
+before you commit to the manifest. Then the structured fields:
 {
   "reasoning": "<your working-through of the manifest>",
   "module": "<module name>",
   "package": "<package name>",
   "files": [
-    { "path": "<file path relative to project root>", "declarations": "<declaration text — no package line, no import block>" }
+    { "path": "<file path relative to project root>", "imports": ["<import path>", "..."], "declarations": "<declaration text — no package line, no import block>" }
   ]
 }`
 }
@@ -40,10 +42,11 @@ Checks performed:
 3. compile: the stub project compiles — imports, types, and stub signatures are valid
 4. api_check: the generated API assertion file contains at least one exported symbol assertion
 5. stub_purity: every function body is a bare return or empty block — no if/for/range/switch/select
+6. cross_file_type: no package-level identifier is scaffolded with a type drawn from a different imported package in two different files (e.g. one file's "var x *template.Template" resolving to html/template while another's resolves to text/template)
 
 See the language-specific guidance below for the exact commands and file conventions for checks 2–4.
 
-The mechanical layer has computed a preliminary decision: all five checks pass → approve; any failure → reject.
+The mechanical layer has computed a preliminary decision: all six checks pass → approve; any failure → reject.
 
 Your role:
 1. Confirm the preliminary decision (or override only in clear edge cases)
@@ -51,6 +54,7 @@ Your role:
    - Are the file boundaries sensible for this project?
    - Are exported names consistent and idiomatic for the language?
    - Does the API surface match what the design document calls for?
+   - Where the design document names a specific import for a symbol (e.g. html/template not text/template), does every file's import list use exactly that one?
    Override to reject if you find a clear structural defect that the mechanical checks cannot catch.
 3. If rejecting, write specific, actionable feedback for SURVEY. Name the file and what to change:
    Bad:  "The manifest has issues."

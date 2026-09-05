@@ -10,10 +10,20 @@ import (
 // SurveyManifestFile is one file entry in the SURVEY_SPEC manifest.
 // Declarations holds raw Go declaration text (types, consts, vars, function
 // signatures with stub bodies) — no package statement and no import block.
-// The scaffolding step in VERIFY generates those mechanically.
+// Imports lists the external packages that file's declarations reference
+// (stdlib import paths plus module-internal ones). SURVEY owns this list
+// because it is the only step that reads the design doc: when the doc names a
+// specific import for an otherwise-ambiguous symbol (e.g. html/template vs
+// text/template, math/rand/v2 vs math/rand), the choice is a doc-derived
+// decision, not one a context-free mechanical import resolver can make.
+// The scaffolding step in VERIFY renders the import block and the package
+// statement from these fields. Older stored manifests have no imports key —
+// it unmarshals to nil and the scaffolder falls back to goimports exactly as
+// before.
 type SurveyManifestFile struct {
-	Path         string `json:"path"`
-	Declarations string `json:"declarations"`
+	Path         string   `json:"path"`
+	Imports      []string `json:"imports"`
+	Declarations string   `json:"declarations"`
 }
 
 // SurveySpecOutput is the structured output of SURVEY_SPEC.
@@ -28,13 +38,17 @@ type SurveySpecOutput struct {
 // --- VERIFY_MANIFEST ---
 
 // VerifyManifestOutput is the structured output of VERIFY_MANIFEST.
-// The five boolean fields mirror the verify_attempts table columns.
+// The six boolean fields mirror the verify_attempts table columns.
 type VerifyManifestOutput struct {
 	FilePresencePass       bool     `json:"file_presence_pass"`
 	NoBehavioralTestsPass  bool     `json:"no_behavioral_tests_pass"`
 	CompilePass            bool     `json:"compile_pass"`
 	APICheckPass           bool     `json:"api_check_pass"`
 	StubPurityPass         bool     `json:"stub_purity_pass"`
+	// CrossFileTypePass is false when the same package-level identifier is
+	// scaffolded with a type from a different imported package in two files
+	// (the html/template vs text/template shared-symbol conflict).
+	CrossFileTypePass      bool     `json:"cross_file_type_pass"`
 	Violations             []string `json:"violations,omitempty"`
 	VerifierInterpretation string   `json:"verifier_interpretation,omitempty"`
 }

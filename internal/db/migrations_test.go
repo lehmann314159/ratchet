@@ -425,6 +425,7 @@ func TestBackfillPauseColumns(t *testing.T) {
 	mustExec(t, d, `CREATE TABLE beads (id INTEGER PRIMARY KEY)`)
 	mustExec(t, d, `CREATE TABLE handoff_jobs (id INTEGER PRIMARY KEY)`)
 	mustExec(t, d, `CREATE TABLE test_refinements (id INTEGER PRIMARY KEY)`)
+	mustExec(t, d, `CREATE TABLE verify_attempts (id INTEGER PRIMARY KEY)`)
 
 	if err := d.applyMigrations(); err != nil {
 		t.Fatalf("applyMigrations: %v", err)
