@@ -26,10 +26,11 @@ import (
 const apiCheckTestFilename = "do_not_use_this_test.go"
 
 // scaffoldGoProject materializes a Go project from SURVEY_SPEC declaration-only
-// files. For each source file it computes required imports from the declaration
-// text and writes a complete syntactically valid .go file. It then generates
-// go.mod (using the host Go runtime version) and apiCheckTestFilename (existence
-// checks for all exported symbols).
+// files. For each source file it renders SURVEY's declared import block (with a
+// goimports pass to reconcile it against the declarations) and writes a
+// complete syntactically valid .go file. It then generates go.mod (using the
+// host Go runtime version) and apiCheckTestFilename (existence checks for all
+// exported symbols).
 func scaffoldGoProject(pkg, module, folderPath string, files []SurveyManifestFile) error {
 	goVer := goRuntimeVersion()
 
@@ -37,7 +38,7 @@ func scaffoldGoProject(pkg, module, folderPath string, files []SurveyManifestFil
 		if !strings.HasSuffix(f.Path, ".go") || filepath.Base(f.Path) == apiCheckTestFilename {
 			continue
 		}
-		content := buildGoFile(pkg, f.Declarations)
+		content := buildGoFile(pkg, f.Imports, f.Declarations)
 		fullPath := filepath.Join(folderPath, f.Path)
 		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 			return fmt.Errorf("mkdir for %s: %w", f.Path, err)
@@ -113,9 +114,9 @@ func hasNonTestFile(outputFiles []string) bool {
 }
 
 func writeScaffoldStubsFromManifest(manifest *SurveySpecOutput, folderPath string, outputFiles []string) (stubbed, deleted []string, err error) {
-	declByPath := make(map[string]string, len(manifest.Files))
+	fileByPath := make(map[string]SurveyManifestFile, len(manifest.Files))
 	for _, mf := range manifest.Files {
-		declByPath[mf.Path] = mf.Declarations
+		fileByPath[mf.Path] = mf
 	}
 	for _, f := range outputFiles {
 		if strings.HasSuffix(f, "_test.go") {
@@ -136,7 +137,7 @@ func writeScaffoldStubsFromManifest(manifest *SurveySpecOutput, folderPath strin
 			stubbed = append(stubbed, f)
 			continue
 		}
-		decl, ok := declByPath[f]
+		mf, ok := fileByPath[f]
 		if !ok {
 			path := filepath.Join(folderPath, f)
 			if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
@@ -145,7 +146,7 @@ func writeScaffoldStubsFromManifest(manifest *SurveySpecOutput, folderPath strin
 			deleted = append(deleted, f)
 			continue
 		}
-		content := buildGoFile(manifest.Package, decl)
+		content := buildGoFile(manifest.Package, mf.Imports, mf.Declarations)
 		if err := os.WriteFile(filepath.Join(folderPath, f), []byte(content), 0644); err != nil {
 			return stubbed, deleted, fmt.Errorf("write scaffold %s: %w", f, err)
 		}
@@ -174,14 +175,25 @@ func restoreMissingScaffolds(ctx context.Context, d *db.DB, projectID int64, fol
 	return err
 }
 
-// buildGoFile prepends the package declaration and resolves imports for the
-// declaration text via goimports, which consults the real stdlib package
-// index rather than a hand-maintained name table. If import resolution or
-// gofmt fails (the model produced a syntax error), the unformatted source is
-// returned so the compile check can surface a precise error message.
-func buildGoFile(pkg, declarations string) string {
+// buildGoFile assembles a scaffold source file: the package declaration, an
+// explicit import block from imports (SURVEY's list — the layer that read the
+// design doc, so it owns any doc-mandated import disambiguation such as
+// html/template vs text/template), then the declaration text. goimports still
+// runs over the result: it keeps SURVEY's used imports, prunes any it listed
+// but the declarations don't reference, and back-fills an unambiguous import
+// SURVEY missed — but it will not introduce a competitor for an import SURVEY
+// already pinned. When imports is nil (older stored manifests, pre-dating the
+// field), no explicit block is emitted and goimports resolves everything as
+// it did before. If import resolution fails (the model produced a syntax
+// error), the unformatted source is returned so the compile check can surface
+// a precise error message.
+func buildGoFile(pkg string, importPaths []string, declarations string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "package %s\n\n", pkg)
+	if block := renderImportBlock(importPaths); block != "" {
+		sb.WriteString(block)
+		sb.WriteString("\n")
+	}
 	sb.WriteString(declarations)
 	src := sb.String()
 
@@ -190,6 +202,32 @@ func buildGoFile(pkg, declarations string) string {
 		return src
 	}
 	return string(formatted)
+}
+
+// renderImportBlock returns a formatted `import ( ... )` block for the given
+// paths, or "" if there are none. Blank/whitespace entries are dropped;
+// duplicates are collapsed.
+func renderImportBlock(paths []string) string {
+	seen := make(map[string]bool, len(paths))
+	var uniq []string
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		uniq = append(uniq, p)
+	}
+	if len(uniq) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("import (\n")
+	for _, p := range uniq {
+		fmt.Fprintf(&sb, "\t%q\n", p)
+	}
+	sb.WriteString(")\n")
+	return sb.String()
 }
 
 // writeAPICheckTest generates apiCheckTestFilename containing one "var _ = X"

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -94,6 +95,15 @@ func (h *VerifyManifest) Run(ctx context.Context, d *db.DB, _ *ollama.Client, jo
 		violations = append(violations, "stub_purity: "+v)
 	}
 
+	// Check 6: no package-level identifier is scaffolded with a type drawn from
+	// a different imported package across two files (the html/template vs
+	// text/template shared-symbol conflict that go build cannot see).
+	crossFileViolations := checkCrossFileTypeConsistency(project.FolderPath, manifest)
+	out.CrossFileTypePass = len(crossFileViolations) == 0
+	for _, v := range crossFileViolations {
+		violations = append(violations, "cross_file_type: "+v)
+	}
+
 	out.Violations = violations
 
 	data, err := json.Marshal(out)
@@ -128,13 +138,14 @@ func (h *VerifyManifest) Commit(ctx context.Context, tx *sql.Tx, job *db.Handoff
 		INSERT INTO verify_attempts (
 			project_id, job_id, attempt_number,
 			file_presence_pass, no_behavioral_tests_pass, compile_pass,
-			api_check_pass, stub_purity_pass, violations, verifier_interpretation,
+			api_check_pass, stub_purity_pass, cross_file_type_pass,
+			violations, verifier_interpretation,
 			created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.ProjectID, job.ID, attemptNumber,
 		boolToInt(out.FilePresencePass), boolToInt(out.NoBehavioralTestsPass),
 		boolToInt(out.CompilePass), boolToInt(out.APICheckPass),
-		boolToInt(out.StubPurityPass),
+		boolToInt(out.StubPurityPass), boolToInt(out.CrossFileTypePass),
 		string(violationsJSON), nullableStr(out.VerifierInterpretation),
 		now,
 	)
@@ -288,6 +299,129 @@ func findControlFlow(body *ast.BlockStmt) string {
 		return true
 	})
 	return found
+}
+
+// crossFileTypeUse records one package-level identifier's declared type being
+// backed by an imported package in a specific scaffolded file.
+type crossFileTypeUse struct {
+	file       string
+	importPath string
+	selector   string // e.g. "template.Template", for the message
+}
+
+// checkCrossFileTypeConsistency returns one violation per package-level
+// identifier declared in two different scaffolded files with its type drawn
+// from two DIFFERENT imported packages. This is the shape that lets a bare
+// `var templates *template.Template` land on html/template in one file and
+// text/template in another — a semantic conflict `go build` never sees,
+// because each file declares its own identifier. Only var and const
+// declarations are examined (where the real incidents live: baseline-3 bead
+// 246, baseline-12 bead 318). Parse errors are skipped; the compile check
+// surfaces those. It works off whichever import each file resolved to at
+// scaffold time, so it is agnostic to how that import was chosen (SURVEY's
+// list, goimports, or a later hand edit).
+func checkCrossFileTypeConsistency(folderPath string, manifest *SurveySpecOutput) []string {
+	uses := make(map[string][]crossFileTypeUse)
+	fset := token.NewFileSet()
+	for _, f := range manifest.Files {
+		if !strings.HasSuffix(f.Path, ".go") || filepath.Base(f.Path) == apiCheckTestFilename {
+			continue
+		}
+		astFile, err := parser.ParseFile(fset, filepath.Join(folderPath, f.Path), nil, 0)
+		if err != nil {
+			continue
+		}
+		importByName := fileImportsByLocalName(astFile)
+		for _, decl := range astFile.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || (gd.Tok != token.VAR && gd.Tok != token.CONST) {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok || vs.Type == nil {
+					continue
+				}
+				pkgIdent, sel := firstPackageSelector(vs.Type)
+				if pkgIdent == "" {
+					continue
+				}
+				importPath, ok := importByName[pkgIdent]
+				if !ok {
+					continue
+				}
+				for _, name := range vs.Names {
+					if name.Name == "_" {
+						continue
+					}
+					uses[name.Name] = append(uses[name.Name], crossFileTypeUse{
+						file: f.Path, importPath: importPath, selector: pkgIdent + "." + sel,
+					})
+				}
+			}
+		}
+	}
+
+	var violations []string
+	for ident, us := range uses {
+		for i := 1; i < len(us); i++ {
+			if us[i].importPath != us[0].importPath && us[i].file != us[0].file {
+				violations = append(violations, fmt.Sprintf(
+					"package-level %q is scaffolded as %s (import %q) in %s but %s (import %q) in %s — the design doc must name one import for this symbol and SURVEY must list that same import for every file that declares it",
+					ident, us[0].selector, us[0].importPath, us[0].file,
+					us[i].selector, us[i].importPath, us[i].file))
+				break
+			}
+		}
+	}
+	sort.Strings(violations)
+	return violations
+}
+
+// fileImportsByLocalName maps each import's local name (explicit alias, or the
+// final path segment when unqualified) to its import path. Blank and dot
+// imports are skipped — they bind no usable qualifier. The final-segment
+// heuristic is exact for the ambiguous stdlib pairs this check targets
+// (html/template and text/template both qualify as `template`).
+func fileImportsByLocalName(f *ast.File) map[string]string {
+	m := make(map[string]string, len(f.Imports))
+	for _, imp := range f.Imports {
+		path := strings.Trim(imp.Path.Value, `"`)
+		name := path
+		if idx := strings.LastIndex(path, "/"); idx >= 0 {
+			name = path[idx+1:]
+		}
+		if imp.Name != nil {
+			if imp.Name.Name == "_" || imp.Name.Name == "." {
+				continue
+			}
+			name = imp.Name.Name
+		}
+		m[name] = path
+	}
+	return m
+}
+
+// firstPackageSelector returns the package qualifier and selected name of the
+// first `pkg.Name` selector expression anywhere in a type expression
+// (`*[]template.Template` → "template", "Template"), or "", "" if none.
+func firstPackageSelector(expr ast.Expr) (pkg, sel string) {
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if pkg != "" {
+			return false
+		}
+		se, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		id, ok := se.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		pkg, sel = id.Name, se.Sel.Name
+		return false
+	})
+	return pkg, sel
 }
 
 // verifyAPICheck returns "" if apiCheckTestFilename contains at least one

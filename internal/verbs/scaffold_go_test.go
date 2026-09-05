@@ -188,7 +188,7 @@ func SetPixel(img *image.RGBA, x, y int, c color.RGBA) {}
 
 func EncodePNG(img image.Image, w io.Writer) error { return nil }
 `
-	content := buildGoFile("fractal", decl)
+	content := buildGoFile("fractal", nil, decl)
 	if err := os.WriteFile(filepath.Join(dir, "canvas.go"), []byte(content), 0644); err != nil {
 		t.Fatalf("write canvas.go: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestBuildGoFile_UnlistedStdlibPackageCompiles(t *testing.T) {
 
 func NewProtoReader(r io.Reader) *textproto.Reader { return textproto.NewReader(bufio.NewReader(r)) }
 `
-	content := buildGoFile("fractal", decl)
+	content := buildGoFile("fractal", nil, decl)
 	if err := os.WriteFile(filepath.Join(dir, "hash.go"), []byte(content), 0644); err != nil {
 		t.Fatalf("write hash.go: %v", err)
 	}
@@ -233,6 +233,81 @@ func NewProtoReader(r io.Reader) *textproto.Reader { return textproto.NewReader(
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("generated file does not compile: %v\n%s\n--- generated content ---\n%s", err, out, content)
+	}
+}
+
+// TestBuildGoFile_PinnedAmbiguousImportWins is the regression test for the
+// scaffold-import bug (memory/project_survey_scaffold_designdoc_compliance,
+// exprvm-web baseline-3 bead 246 and baseline-12 bead 318). goimports cannot
+// tell html/template from text/template given a bare *template.Template and
+// picks non-deterministically across runs (~50/50, x/tools v0.33.0). When
+// SURVEY lists the import the design doc mandates, buildGoFile must honor it
+// and goimports must not add the competitor.
+func TestBuildGoFile_PinnedAmbiguousImportWins(t *testing.T) {
+	content := buildGoFile("main", []string{"html/template"}, "var templates *template.Template\n")
+	if !strings.Contains(content, `"html/template"`) {
+		t.Errorf("expected html/template in output, got:\n%s", content)
+	}
+	if strings.Contains(content, `"text/template"`) {
+		t.Errorf("goimports must not add the competing text/template when SURVEY pinned html/template, got:\n%s", content)
+	}
+}
+
+// TestBuildGoFile_NilImportsUnchanged confirms back-compat: a manifest stored
+// before the Imports field existed unmarshals it as nil, and buildGoFile then
+// behaves exactly as it did before — no explicit import block, goimports does
+// all the work.
+func TestBuildGoFile_NilImportsUnchanged(t *testing.T) {
+	if got := buildGoFile("p", nil, "type A struct{}\n"); got != "package p\n\ntype A struct{}\n" {
+		t.Errorf("nil-imports output changed: %q", got)
+	}
+	// A decl that references an unambiguous stdlib package still self-heals.
+	got := buildGoFile("main", nil, "func H(w http.ResponseWriter, r *http.Request) {}\n")
+	if !strings.Contains(got, `"net/http"`) {
+		t.Errorf("goimports should still back-fill net/http with nil imports, got:\n%s", got)
+	}
+}
+
+// TestBuildGoFile_UnusedListedImportPruned confirms an import SURVEY listed but
+// the declarations never reference is dropped by goimports rather than left to
+// break the compile.
+func TestBuildGoFile_UnusedListedImportPruned(t *testing.T) {
+	content := buildGoFile("main", []string{"html/template", "net/http"}, "var templates *template.Template\n")
+	if strings.Contains(content, `"net/http"`) {
+		t.Errorf("unused net/http should have been pruned, got:\n%s", content)
+	}
+	if !strings.Contains(content, `"html/template"`) {
+		t.Errorf("used html/template should remain, got:\n%s", content)
+	}
+}
+
+// TestWriteScaffoldStubs_CarriesImportsThroughRewindPath confirms the rewind /
+// reset-to-baseline path (writeScaffoldStubsFromManifest) renders SURVEY's
+// pinned import, not a goimports guess.
+func TestWriteScaffoldStubs_CarriesImportsThroughRewindPath(t *testing.T) {
+	d := openTestDB(t)
+	seedProject(t, d, 1, "scaffold-stubs-imports")
+	seedSurveyManifest(t, d, 1, SurveySpecOutput{
+		Module: "example.com/m", Package: "main",
+		Files: []SurveyManifestFile{{
+			Path:         "templates.go",
+			Imports:      []string{"html/template"},
+			Declarations: "var templates *template.Template\n",
+		}},
+	})
+
+	dir := t.TempDir()
+	writeGoFile(t, dir, "templates.go", "package main\n\nvar templates *template.Template\n")
+
+	if _, _, err := WriteScaffoldStubs(context.Background(), d, 1, dir, []string{"templates.go"}); err != nil {
+		t.Fatalf("WriteScaffoldStubs: %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(dir, "templates.go"))
+	if err != nil {
+		t.Fatalf("read templates.go: %v", err)
+	}
+	if !strings.Contains(string(content), `"html/template"`) || strings.Contains(string(content), `"text/template"`) {
+		t.Errorf("rewind stub did not carry the pinned import, got:\n%s", content)
 	}
 }
 

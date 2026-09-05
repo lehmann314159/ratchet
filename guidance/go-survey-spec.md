@@ -22,6 +22,26 @@ Example — if game.go declares:
 then Piece, Color, and CastlingRights must each appear as a type declaration in game.go
 (or another file). Omitting them produces "undefined: Piece" compile errors.
 
+**Imports — you choose them, and you resolve every ambiguity:**
+List each file's imports in its `imports` array as full import paths, e.g.
+`["net/http", "html/template", "example.com/mymod/store"]`. The scaffolder
+renders the import block from this list — it does NOT guess for you, and a
+context-free guesser cannot tell `html/template` from `text/template` given a
+bare `*template.Template`. When the design document names a specific import
+for a symbol, transcribe exactly that one:
+
+  - `html/template` vs `text/template` — a web project rendering HTML uses
+    `html/template`; only use `text/template` if the doc explicitly says so.
+  - `math/rand/v2` vs `math/rand`
+  - `crypto/rand` vs `math/rand`
+  - `log/slog` vs `log`
+
+If a package-level symbol's type comes from an imported package (e.g.
+`var templates *template.Template`), every file that declares or references
+that symbol must list the SAME import path for it. A split — one file's
+`templates` backed by `html/template`, another's by `text/template` — is a
+hard VERIFY_MANIFEST failure (check 6, cross_file_type).
+
 **var declarations — one space between `var` and the name:**
 Write `var templates *template.Template`, not `vartemplates *template.Template`.
 The `var` keyword and the variable name are always separated by a space.
