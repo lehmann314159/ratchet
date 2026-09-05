@@ -1169,14 +1169,21 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 	coveredCases := map[string]bool{}
 	numPredict := 0
 	lengthCapStrikes := 0
+	// No `format` constraint at all here (OmitFormat). qwen3:32b's template
+	// requires tool calls as literal `<tool_call>` text in the content stream
+	// — `<` isn't a valid JSON start token, so format:"json"'s GBNF grammar
+	// structurally forbade CRITIQUE from ever emitting one (0/139 captured
+	// calls across the whole corpus history; root-caused 2026-09-04/05,
+	// see docs/format-json-tool-turn.md). NOT schema-mode: this is still the
+	// ChatWithTools path (run_go_snippet loop), pending a deliberate
+	// re-approach to tool-loop schema-mode (see
+	// docs/schema-mode-reasoning-field.md — WRITE showed the tool loop is
+	// where schema-mode breaks).
+	baseOpts := &ollama.Options{OmitFormat: true}
 	for turn := 1; turn <= maxTurns; turn++ {
-		// NOT schema-mode: this is the ChatWithTools path (run_go_snippet loop).
-		// Reverted to bare "json" pending a deliberate re-approach to tool-loop
-		// schema-mode (see docs/schema-mode-reasoning-field.md — WRITE showed the
-		// tool loop is where schema-mode breaks).
-		turnOpts := (*ollama.Options)(nil)
+		turnOpts := baseOpts
 		if numPredict > 0 {
-			turnOpts = withNumPredict(nil, numPredict)
+			turnOpts = withNumPredict(baseOpts, numPredict)
 		}
 		msg, toolErr := oc.ChatWithTools(ctx, model, messages, []ollama.Tool{runGoSnippetCaseTool}, turnOpts, nil)
 		if toolErr != nil {
@@ -1185,7 +1192,7 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 		if isLengthCapEmpty(msg) {
 			lengthCapStrikes++
 			if lengthCapStrikes >= 2 {
-				return forceStrippedFinalAnswer(ctx, oc, model, messages[0].Content, messages[1].Content, nil)
+				return forceStrippedFinalAnswer(ctx, oc, model, messages[0].Content, messages[1].Content, baseOpts)
 			}
 			numPredict = lengthCapRetryNumPredict
 			messages = append(messages, msg)
@@ -1241,7 +1248,7 @@ func (h *RefineTestsCritique) Run(ctx context.Context, d *db.DB, oc *ollama.Clie
 	// directly for the decision instead of trusting empty leftover state
 	// (see turnCapFinalizeNudge's doc comment).
 	logTurnCapFallthrough("REFINE_TESTS_CRITIQUE", job.BeadID.Int64, maxTurns)
-	return forceFinalizeAfterTurnCap(ctx, oc, model, messages, nil)
+	return forceFinalizeAfterTurnCap(ctx, oc, model, messages, baseOpts)
 }
 
 // missingVerificationCases parses content as a tentative RefineTestsCritiqueOutput

@@ -246,13 +246,72 @@ func TestRefineTestsCritiqueTurnCapFallthroughForcesFinalize(t *testing.T) {
 	}
 }
 
+// TestRefineTestsCritiqueLengthCapRetryPreservesOmitFormat mirrors
+// TestRefineTestsJudgeLengthCapRetryPreservesOmitFormat below, for
+// REFINE_TESTS_CRITIQUE's own base Options (&ollama.Options{OmitFormat: true}
+// — see its Run() doc comment: qwen3:32b's template requires tool calls as
+// literal `<tool_call>` text in the content stream, which format:"json"'s
+// GBNF grammar structurally forbids). withNumPredict must preserve that flag
+// when bumping the budget on a length-cap retry, not silently drop back to
+// the default grammar this verb has deliberately opted out of.
+func TestRefineTestsCritiqueLengthCapRetryPreservesOmitFormat(t *testing.T) {
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var gotBody map[string]any
+		if err := json.Unmarshal(body, &gotBody); err != nil {
+			t.Fatalf("unmarshal request body: %v", err)
+		}
+		bodies = append(bodies, gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		switch len(bodies) {
+		case 1:
+			w.Write(lengthCapEmptyBody())
+		case 2:
+			w.Write(toolCallBody())
+		default:
+			w.Write([]byte(`{"message":{"role":"assistant","content":"{\"all_correct\":true,\"findings\":[],\"verified_functions\":[],\"summary\":\"ok\"}"},"done":true,"done_reason":"stop"}`))
+		}
+	}))
+	defer srv.Close()
+
+	d, job, oc := seedCritiqueFixture(t, srv.URL)
+	h := &RefineTestsCritique{}
+	out, err := h.Run(context.Background(), d, oc, job)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(bodies) != 3 {
+		t.Fatalf("got %d requests, want exactly 3", len(bodies))
+	}
+	if _, parsed := h.Validate(out); parsed == nil {
+		t.Fatalf("Validate rejected recovered output: %q", out)
+	}
+	// The very first turn, not just the retry, must already omit the format
+	// constraint — that's the actual fix (previously CRITIQUE's first turn
+	// carried format:"json", which qwen3:32b's <tool_call>-tag template can
+	// never satisfy).
+	if f, present := bodies[0]["format"]; present && f != nil {
+		t.Errorf("first turn carries format=%#v, want the key absent", f)
+	}
+	if f, present := bodies[1]["format"]; present && f != nil {
+		t.Errorf("retry turn carries format=%#v, want the key absent (OmitFormat must survive withNumPredict)", f)
+	}
+	opts := bodies[1]["options"].(map[string]any)
+	if np, _ := opts["num_predict"].(float64); int(np) != lengthCapRetryNumPredict {
+		t.Errorf("retry turn num_predict = %v, want %d", opts["num_predict"], lengthCapRetryNumPredict)
+	}
+}
+
 // TestRefineTestsJudgeLengthCapRetryPreservesOmitFormat exercises the same
 // recovery path through REFINE_TESTS_JUDGE specifically, because unlike
-// ADJUDICATE/CRITIQUE its base Options is non-nil (&ollama.Options{OmitFormat:
-// true} — see its Run() doc comment on why the bare grammar is required for
-// this verb's model). withNumPredict must preserve that flag when bumping the
-// budget, not silently drop back to the default `format:"json"` grammar that
-// this verb has deliberately opted out of.
+// ADJUDICATE (whose base Options stays nil — qwen3.6:35b-a3b's native
+// tool-calling is unaffected by format:"json") its base Options is non-nil
+// (&ollama.Options{OmitFormat: true} — see its Run() doc comment on why the
+// bare grammar is required for this verb's model). withNumPredict must
+// preserve that flag when bumping the budget, not silently drop back to the
+// default `format:"json"` grammar that this verb has deliberately opted out
+// of.
 func TestRefineTestsJudgeLengthCapRetryPreservesOmitFormat(t *testing.T) {
 	var bodies []map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
