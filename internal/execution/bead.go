@@ -141,7 +141,20 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 
 	slog.Info("execute-bead started", "execution_id", execID, "model", model, "budget_s", budget)
 
-	contextFiles := loadContextFiles(folderPath, parsedBead.OutputFiles)
+	// Sandbox all scratch work. write_file / read_file / run_command and the
+	// in-loop exit-criteria check operate in a per-attempt temp dir seeded from
+	// the live folder; on every exit path only the files the model was allowed
+	// to write this attempt are copied back. A stray repro program or a botched
+	// run_command therefore cannot poison the shared tree.
+	// See docs/execute-workspace-sandbox-plan.md.
+	ws, err := newExecWorkspace(folderPath)
+	if err != nil {
+		return fmt.Errorf("execution %d: %w", execID, err)
+	}
+	defer ws.cleanup()
+	workDir := ws.dir
+
+	contextFiles := loadContextFiles(workDir, parsedBead.OutputFiles)
 	priorHistory := loadPriorAttemptSummary(ctx, d, beadID)
 	resumeNote := sameRevisionResumeNote(ctx, d, beadID, revisionID, execID)
 
@@ -149,8 +162,8 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	// test-first mode: tests absent → list only test files.
 	// tests-locked mode: tests present, impl absent → list only impl files (tests are certified).
 	// normal mode: list all output files.
-	testFirst := isTestFirstMode(folderPath, parsedBead.OutputFiles)
-	testsLocked := !testFirst && isTestsLockedMode(folderPath, parsedBead.OutputFiles)
+	testFirst := isTestFirstMode(workDir, parsedBead.OutputFiles)
+	testsLocked := !testFirst && isTestsLockedMode(workDir, parsedBead.OutputFiles)
 	var expectedFiles []string
 	switch {
 	case testFirst:
@@ -189,9 +202,27 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	// degenerate non-terminating thinking stream (exprvm-web bakeoff, 2026-09-02).
 	execOpts := &ollama.Options{OmitFormat: true, NumPredict: 16384}
 	messages := []ollama.Message{
-		{Role: "system", Content: guidance.InjectForVerbPath(executeBeadSystemPrompt, folderPath, db.VerbExecuteBead, "")},
-		{Role: "user", Content: buildBeadUserMsg(parsedBead.FullText, parsedBead.OutputFiles, parsedBead.ExitCriteria, contextFiles, priorHistory, resumeNote, folderPath)},
+		{Role: "system", Content: guidance.InjectForVerbPath(executeBeadSystemPrompt, workDir, db.VerbExecuteBead, "")},
+		{Role: "user", Content: buildBeadUserMsg(parsedBead.FullText, parsedBead.OutputFiles, parsedBead.ExitCriteria, contextFiles, priorHistory, resumeNote, workDir)},
 	}
+
+	// Flush the sandbox back to the live folder on every exit path. Registered
+	// after defer ws.cleanup() so it runs first (LIFO). Only expectedFiles (the
+	// files the model may write this attempt) are copied back; anything else the
+	// model created or modified is discarded and named in the trace for
+	// ANALYZE_EXECUTION to surface as behavioral signal.
+	defer func() {
+		discarded, cbErr := ws.copyBack(expectedFiles)
+		if cbErr != nil {
+			slog.Warn("execute-bead: copy sandbox output files back to project folder",
+				"execution_id", execID, "error", cbErr)
+		}
+		if line := discardedFilesTraceLine(discarded); line != "" {
+			writeLine(traceFile, line)
+			slog.Info("execute-bead: discarded out-of-scope workspace files",
+				"execution_id", execID, "count", len(discarded))
+		}
+	}()
 
 	var writeFileCount int
 	var stubWarningInjected bool
@@ -233,7 +264,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 			// or terminating as a false 'no_write'. This is the same ground-truth
 			// check ADJUDICATE's declare_success gate uses, run here instead of
 			// only after the fact.
-			if ok, _ := execcheck.VerifyExitCriteria(ctx, folderPath, parsedBead.ExitCriteria); ok {
+			if ok, _ := execcheck.VerifyExitCriteria(ctx, workDir, parsedBead.ExitCriteria); ok {
 				writeLine(traceFile, "[done — exit criteria already satisfied on disk; no write needed]")
 				return writeTerminationCause(d, execID, "success")
 			}
@@ -270,7 +301,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 				writeFileCount++
 			}
 			writeLine(traceFile, fmt.Sprintf("[tool: %s %v]", tc.Function.Name, tc.Function.Arguments))
-			result := executeTool(ctx, tc, folderPath)
+			result := executeTool(ctx, tc, workDir)
 			writeLine(traceFile, fmt.Sprintf("[result]\n%s", result))
 			if tc.Function.Name == "write_file" && strings.Contains(result, "write_file requires a 'path' argument") {
 				missingPathDetected = true
