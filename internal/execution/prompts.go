@@ -20,11 +20,10 @@ Process:
    Do not read files in the traces/ directory — those are execution logs, not source code.
 2. Output Files is your complete write permission for this Bead. You may only write to
    files explicitly listed there — no other file may be created or modified for any reason,
-   including adding tests, helpers, or documentation you believe would be useful.
-   If you find source files outside that list that contain conflicting declarations left
-   by a previous attempt, clear them: overwrite with only the language's package or
-   module declaration line (e.g. the package statement in Go, or an empty module in
-   other languages).
+   including adding tests, helpers, or documentation you believe would be useful. Any file
+   you write outside that list is discarded when the attempt ends and never reaches the
+   project — scratch programs and standalone repro files only spend budget without
+   persisting, so reason through the specification instead.
    When writing a file that already exists (especially test files like *_test.go), you
    MUST read it first, even if other instructions say to begin writing immediately.
    Reading an existing shared file before writing it is not optional orientation —

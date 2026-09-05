@@ -8,6 +8,24 @@ import (
 	"testing"
 )
 
+func TestCheckDiscardedWorkspaceFiles(t *testing.T) {
+	trace := "[TURN 1]\n[tool: write_file map[content:... path:game.go]]\n" +
+		"[result]\nok: wrote 10 bytes to game.go\n" +
+		"[workspace] discarded 2 file(s) written/modified outside output_files (not copied to project): scratch.go, sibling.go\n" +
+		"[done — no further tool calls]\n"
+	got := checkDiscardedWorkspaceFiles([]byte(trace))
+	if !strings.HasPrefix(got, "workspace note (non-blocking): discarded 2 file(s)") {
+		t.Errorf("unexpected finding: %q", got)
+	}
+	if !strings.Contains(got, "scratch.go") || !strings.Contains(got, "sibling.go") {
+		t.Errorf("finding should name the files: %q", got)
+	}
+
+	if checkDiscardedWorkspaceFiles([]byte("[TURN 1]\n[done — no further tool calls]\n")) != "" {
+		t.Errorf("expected empty finding when no discard line present")
+	}
+}
+
 // TestCheckOutputFiles_InlinesContent reproduces the exprvm-v1 bead-22
 // incident: ADJUDICATE_NEXT_EXECUTION claimed a fully-correct one-line
 // NewVM() was "still a stub" for four rounds running, because nothing in its

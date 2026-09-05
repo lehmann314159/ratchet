@@ -91,6 +91,10 @@ func (h *AnalyzeExecution) Run(ctx context.Context, d *db.DB, oc *ollama.Client,
 		mechanicalFindings += "\n\n" + pkgErr
 	}
 
+	if strayNote := checkDiscardedWorkspaceFiles(traceData); strayNote != "" {
+		mechanicalFindings += "\n\n" + strayNote
+	}
+
 	model, err := loadVerbModel(ctx, d, job.ProjectID, db.VerbAnalyzeExecution)
 	if err != nil {
 		return "", err
@@ -319,6 +323,22 @@ func checkUndeclaredFiles(folderPath, designDocPath string, allBeads []beadState
 	sort.Strings(undeclared)
 	return "undeclared files (present on disk but absent from all bead output_files): " +
 		strings.Join(undeclared, ", ")
+}
+
+// checkDiscardedWorkspaceFiles surfaces the EXECUTE_BEAD sandbox's report that
+// the model wrote or modified files outside its declared output_files. Those
+// changes were discarded — they never reached the project folder — so this is
+// behavioral signal about the model's process, not a workspace problem to
+// repair. (Before the sandbox, such files persisted and broke every later
+// compile with "main redeclared"; see docs/execute-workspace-sandbox-plan.md.)
+func checkDiscardedWorkspaceFiles(traceData []byte) string {
+	for _, line := range strings.Split(string(traceData), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.HasPrefix(line, "[workspace] discarded ") {
+			return "workspace note (non-blocking): " + strings.TrimPrefix(line, "[workspace] ")
+		}
+	}
+	return ""
 }
 
 // checkPackageMain verifies that main.go (if in output_files) declares "package main".
