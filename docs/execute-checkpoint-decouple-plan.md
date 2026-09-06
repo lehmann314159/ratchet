@@ -1,5 +1,10 @@
 # Decouple EXECUTE_BEAD progress cadence from `execution_budget`
 
+**Status:** MERGED to `main` 2026-09-06 as commit `57224fc` (part of the PR #8
+bundle). Decoupled cadence VALIDATED live no-regression at exprvm-web-baseline-16
+(`checkpoint_s=720 ceiling_s=2700` in the logs, independent of `budget_s`);
+timeout-doubling path emitted nothing.
+
 Follow-up #1 (+ #2 folded in, #3 closed as moot) from
 `memory/project_execute_progress_detection`. Built on top of PR #8
 (`feat/execute-progress-detection`) — this makes PR #8's stall detection the

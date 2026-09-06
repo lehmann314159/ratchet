@@ -1,10 +1,21 @@
 # EXECUTE_BEAD progress / stall detection — build plan
 
-**Status:** IMPLEMENTED 2026-09-05 on branch `feat/execute-progress-detection`
-(off `main` `7aa8c02`). All four phases done, full suite + `go vet ./...` green.
-Sign-off received on the four design questions (time-anchored predicate; include
-the budget-extension bonus; escalate at 2 consecutive stalls; write this plan
-first).
+**Status:** MERGED to `main` 2026-09-06 (PR #8, commits `0077893` + `57224fc`,
+fast-forwarded to `7e3952a` together with PR #9). Full suite + `go vet ./...` +
+`-race` green. Live no-regression validated exprvm-web-baseline-15 (`0077893`
+only) and baseline-16 (full bundle); the `termination_cause='stalled'` path
+itself had no live coverage at merge and is expected to arrive organically —
+merged on the fake-Ollama e2e + `-race` coverage per the "keep branch structure
+simple" call. Live `ratchet.db` gets `migrateExecutionsTerminationCauseStalled`
+on the next daemon start (dry-run validated against a copy: 247 execs preserved,
+idempotent, integrity ok).
+
+**Superseded detail:** the "One deviation" note below (budget checkpoint extends
+with no cap; absolute `execCeiling` = 3×budget ≤ 60m) was itself superseded by
+`57224fc` (`docs/execute-checkpoint-decouple-plan.md`) — checkpoint cadence and
+ceiling are now **fixed constants** (`execCheckpointInterval` = 12m,
+`execAbsoluteCeiling` = 45m), not budget-derived, and the timeout-doubling
+machinery is retired entirely.
 
 One deviation from the design below, decided during Phase 2: the budget
 checkpoint **extends on any forward progress, with no `execMaxBudgetExtensions`

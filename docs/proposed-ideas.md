@@ -180,6 +180,22 @@ of "what should ratchet work on next" should weigh against new-feature work:
   single-project-at-a-time, not a critical bug — don't inflate it. Directly
   relevant to 1a/1b/1c above: any of those escalation-smarter ideas will
   interact with this queue behavior. Not fixed.
+- **EXECUTE_BEAD budget-doubling loop.** `EXECUTE_BEAD`'s only stop condition
+  was the wall-clock `execution_budget`; on `termination_cause=timeout`,
+  ADJUDICATE mechanically doubled it (`900→1800→3600`) and retried the identical
+  spec — burning hours on a reasoning spiral that more time couldn't fix.
+  **RESOLVED — PR #8 (`0077893` + `57224fc`, merged to `main` 2026-09-06).**
+  Mechanical stall detection (`internal/execution/progress.go` `progressTracker`
+  / `wall()`) replaces the fixed-budget loop; checkpoint cadence (12m) and
+  ceiling (45m) are fixed constants, no longer derived from `execution_budget`
+  (which is now inert but kept). A stalled attempt ends
+  `termination_cause='stalled'` → ADJUDICATE `stalledExecutionNote` (never
+  double-and-retry) + `escalateOnRepeatedStall` at 2 consecutive; `timeout` is
+  now a scope signal (`escalateOnRepeatedTimeout` mirrors it), not a
+  doubling trigger. Live no-regression validated baseline-15/16; the `stalled`
+  path itself awaits organic live coverage. Design:
+  `docs/execute-progress-detection-plan.md`,
+  `docs/execute-checkpoint-decouple-plan.md`.
 - **UI job elapsed-time includes queue-pending wait, not just model-call
   duration.** `queryRecentJobs` computes elapsed as
   `updated_at - created_at`, which includes time a job sat `pending` (most
@@ -191,13 +207,19 @@ of "what should ratchet work on next" should weigh against new-feature work:
   single shared DB connection (`SetMaxOpenConns(1)`) between the orchestrator's
   tick loop and the UI's HTTP handlers, not confirmed. Worked around via direct
   SQL for the one cleanup that hit it; root cause still open.
-- **`NewUnbounded()`'s zero per-turn timeout** means one hung/zero-token model
-  turn can consume an entire bead's execution budget, with no faster
-  detect-and-retry path than the full budget expiring. Deliberate tradeoff
-  (genuinely slow generations shouldn't be killed by an arbitrary timeout), but
-  the observed failure signature (zero tokens, not slow generation) suggests a
-  short per-turn watchdog distinct from the overall budget could recover
-  faster. Flagged, not designed, not blocking anything currently.
+- **`NewUnbounded()`'s zero per-turn timeout** meant one hung/zero-token model
+  turn could consume an entire bead's execution budget, with no faster
+  detect-and-retry path than the full budget expiring. **ADDRESSED — PR #9
+  (`8336a43`, merged to `main` 2026-09-06).** `ChatWithTools` now runs a
+  mid-stream idle watchdog: `streamFirstChunkTimeout` (10m) before the first
+  chunk, `streamIdleTimeout` (3m) per inter-chunk gap thereafter, firing
+  `ollama.ErrStreamIdle`. A genuinely slow-but-streaming generation keeps
+  resetting the timer, so the deliberate "don't kill slow generations" tradeoff
+  is preserved; only total silence trips it. `ollama.IsTransient` +
+  `recordTransientRunFailure` keep the resulting error off the `verbTolerance`
+  strike budget (bounded by `transientRetryCap=5`). Design:
+  `docs/ollama-stream-idle-timeout.md`. `Chat` (non-streaming) still unbounded
+  per-turn — out of scope, no observed failure there.
 
 ---
 

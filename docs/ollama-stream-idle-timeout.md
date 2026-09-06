@@ -1,5 +1,13 @@
 # Ollama stream idle timeout + transient-error retry
 
+**Status:** MERGED to `main` 2026-09-06 as commit `8336a43` (PR #9, fast-forwarded
+to `7e3952a` together with PR #8). Full suite + `go vet` + `-race` green. At
+exprvm-web-baseline-16 the watchdog ran on live traffic without false-positiving
+on slow reasoning streams (`ChatWithTools: streaming still in progress chunks=N`
+throughout, no spurious `ErrStreamIdle`); the catch path — a real mid-stream
+stall classified `transient:` with no strike — had no live coverage at merge
+(baseline-15's stall did not recur) and is expected to arrive organically.
+
 Follow-ups #4 and #5 from `project_execute_progress_detection` (exprvm-web-baseline-15,
 2026-09-05).
 
