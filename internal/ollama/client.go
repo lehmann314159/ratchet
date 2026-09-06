@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -49,6 +53,83 @@ const (
 // to its normal (eventually escalating) path instead of hanging. Callers that
 // legitimately need more can override via Options.NumPredict.
 const toolLoopNumPredict = 8192
+
+// Stream-liveness bounds for ChatWithTools' streaming decode loop. They exist
+// to abort a stalled Ollama response in minutes instead of letting it waste the
+// full whole-response client timeout (handoffClientTimeout, 60m) — the concrete
+// incident: qwen3.6:35b-a3b went silent mid-generation during ADJUDICATE while
+// Ollama itself stayed responsive to other requests, 38+ minutes each time,
+// twice in one run (exprvm-web-baseline-15, 2026-09-05).
+//
+//   - streamIdleTimeout bounds the gap between decoded chunks once tokens are
+//     already flowing. On this fleet a large model streams ~9 tok/s (≈ one
+//     chunk sub-second), and a reasoning model streams its `thinking` channel
+//     incrementally too (ChatWithTools tees those chunks), so a long
+//     muse-glimmer think keeps resetting the timer — 3 minutes of total silence
+//     is an unambiguously dead stream.
+//   - streamFirstChunkTimeout loosely bounds the initial prompt-eval / first-
+//     token wait, which legitimately takes longer than an inter-chunk gap and
+//     varies with prompt size. Warmup has already made the model resident, so
+//     10 minutes is far past anything real while still closing the pre-first-
+//     token stall gap that streamIdleTimeout (which only arms after chunk one)
+//     cannot see.
+//
+// Both are var, not const, so tests can shrink them.
+var (
+	streamIdleTimeout       = 3 * time.Minute
+	streamFirstChunkTimeout = 10 * time.Minute
+	streamIdlePollInterval  = 15 * time.Second
+)
+
+// ErrStreamIdle is returned by ChatWithTools when its streaming response
+// produced no data for longer than streamIdleTimeout (or streamFirstChunkTimeout
+// before the first chunk). It is classified transient by IsTransient.
+var ErrStreamIdle = errors.New("ollama stream idle timeout")
+
+// HTTPStatusError is returned by Chat and ChatWithTools when Ollama responds
+// with a non-200 status. Typed rather than a formatted string so the
+// orchestrator can classify a 5xx/429 as a transient infrastructure error
+// (see IsTransient) instead of a deterministic verb failure.
+type HTTPStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("ollama %d: %s", e.StatusCode, truncate(e.Body, 200))
+}
+
+// IsTransient reports whether err is an infrastructure hiccup a retry might
+// clear — a stalled or reset stream, an Ollama 5xx/429, a request-level timeout
+// — as opposed to a deterministic verb or output error. The orchestrator uses
+// this to keep such failures off the fixed verbTolerance strike budget
+// (dispatch.recordRunFailure): three mid-generation stream stalls on one job
+// must not add up to an escalation with nothing actually wrong
+// (exprvm-web-baseline-15, 2026-09-05).
+//
+// Deliberately narrow: a connection *refused* or a DNS failure is a persistent
+// misconfiguration (Ollama down, wrong URL, model never pulled) and still
+// strikes so it escalates promptly.
+func IsTransient(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrStreamIdle) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	var hse *HTTPStatusError
+	if errors.As(err, &hse) {
+		return hse.StatusCode == http.StatusTooManyRequests || hse.StatusCode >= 500
+	}
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return ne.Timeout()
+	}
+	return false
+}
 
 // streamProgressLogEvery is how many stream chunks ChatWithTools consumes
 // between "still in progress" log lines. At ~1 token/chunk and a large model's
@@ -401,7 +482,7 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("ollama %d: %s", resp.StatusCode, truncate(string(raw), 200))
+		return "", &HTTPStatusError{StatusCode: resp.StatusCode, Body: string(raw)}
 	}
 
 	var cr chatResponse
@@ -533,7 +614,14 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		return Message{}, fmt.Errorf("marshal: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/chat", bytes.NewReader(body))
+	// Request-scoped context: the idle watchdog below cancels it (which aborts
+	// the transport and unblocks a dec.Decode() stuck in a kernel read) without
+	// disturbing the caller's ctx. A parent-ctx cancellation still propagates
+	// through it.
+	reqCtx, cancelReq := context.WithCancel(ctx)
+	defer cancelReq()
+
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.BaseURL+"/api/chat", bytes.NewReader(body))
 	if err != nil {
 		return Message{}, err
 	}
@@ -545,23 +633,52 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 	}
 	defer resp.Body.Close()
 
-	// Close the response body immediately when ctx is cancelled. This interrupts
-	// any blocking dec.Decode() call without waiting for the transport's async
-	// cancellation path to drain the kernel TCP receive buffer first.
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			resp.Body.Close()
-		case <-done:
-		}
-	}()
-
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
-		return Message{}, fmt.Errorf("ollama %d: %s", resp.StatusCode, truncate(string(raw), 200))
+		return Message{}, &HTTPStatusError{StatusCode: resp.StatusCode, Body: string(raw)}
 	}
+
+	// Watchdog: cancel the request (unblocking any in-flight dec.Decode() below)
+	// when the stream goes idle. This catches an Ollama stall that
+	// handoffClientTimeout (60m, whole-response) would otherwise let waste up to
+	// an hour — see streamIdleTimeout. streamStarted selects which bound
+	// applies: a large first-token / prompt-eval wait is legitimate and only
+	// loosely bounded; once chunks (content OR thinking) are flowing, any gap
+	// past streamIdleTimeout is a dead stream. (A parent-ctx cancellation
+	// already reaches the request through reqCtx and needs no arm here.)
+	done := make(chan struct{})
+	watchdogDone := make(chan struct{})
+	// Stop the watchdog and wait for it to exit before returning, so it can't
+	// touch reqCtx (or, in tests, the stream-timeout vars) after the call ends.
+	defer func() {
+		close(done)
+		<-watchdogDone
+	}()
+	var idleFired atomic.Bool
+	var streamStarted atomic.Bool
+	var lastActivityNano atomic.Int64
+	lastActivityNano.Store(time.Now().UnixNano())
+	go func() {
+		defer close(watchdogDone)
+		t := time.NewTicker(streamIdlePollInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				limit := streamFirstChunkTimeout
+				if streamStarted.Load() {
+					limit = streamIdleTimeout
+				}
+				if time.Since(time.Unix(0, lastActivityNano.Load())) > limit {
+					idleFired.Store(true)
+					cancelReq()
+					return
+				}
+			}
+		}
+	}()
 
 	var contentSB strings.Builder
 	var thinkingSB strings.Builder
@@ -582,8 +699,22 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 			if err == io.EOF {
 				break
 			}
+			if idleFired.Load() {
+				limit := streamIdleTimeout
+				if !streamStarted.Load() {
+					limit = streamFirstChunkTimeout
+				}
+				return Message{}, fmt.Errorf("%w: no stream data for %s (model %s)", ErrStreamIdle, limit, model)
+			}
+			// A parent-ctx cancellation reaches Decode through reqCtx — report
+			// it as the plain context error, not a stream-decode failure.
+			if cerr := ctx.Err(); cerr != nil {
+				return Message{}, cerr
+			}
 			return Message{}, fmt.Errorf("decode stream: %w", err)
 		}
+		lastActivityNano.Store(time.Now().UnixNano())
+		streamStarted.Store(true)
 		if chunk.Error != "" {
 			return Message{}, fmt.Errorf("ollama: %s", chunk.Error)
 		}

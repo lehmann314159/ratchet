@@ -178,20 +178,40 @@ func verbSkipsModelWarmup(verb string) bool {
 	return verb == db.VerbVerifyManifest
 }
 
+// transientRetryCap bounds how many times a job may fail on a transient
+// infrastructure error (stalled stream, Ollama 5xx/429, request timeout) and
+// still be retried without a strike. Set generously — enough to ride out a
+// multi-minute Ollama hiccup or a model-reload storm — but finite, so a
+// genuinely dead endpoint escalates within minutes-to-tens-of-minutes instead
+// of looping forever.
+const transientRetryCap = 5
+
 // recordRunFailure applies the strike/tolerance decision to a handler.Run
 // error exactly like a malformed Validate result would, instead of the old
 // unconditional 'pending' reset that retried forever with no attempt record
 // and no escalation path. Mirrors recordCommitFailure below.
+//
+// A transient infrastructure error (ollama.IsTransient — e.g. a mid-generation
+// stream stall, an Ollama 5xx, a request timeout) is routed to
+// recordTransientRunFailure instead: retried without touching the fixed
+// verbTolerance strike budget, bounded by transientRetryCap. Three stream
+// stalls on one job must not add up to an escalation with nothing wrong
+// (exprvm-web-baseline-15, 2026-09-05).
 func recordRunFailure(ctx context.Context, d *db.DB, job *db.HandoffJob, startedAt time.Time, runErr error) error {
 	slog.Error("verb Run failed", "verb", job.Verb, "job_id", job.ID, "project_id", job.ProjectID, "bead_id", job.BeadID, "error", runErr)
+
+	attemptNum, err := nextAttemptNumber(ctx, d, job.ID)
+	if err != nil {
+		return fmt.Errorf("next attempt number: %w", err)
+	}
+
+	if ollama.IsTransient(runErr) {
+		return recordTransientRunFailure(ctx, d, job, attemptNum, startedAt, runErr)
+	}
 
 	strikes, err := strikeCount(ctx, d, job.ID)
 	if err != nil {
 		return fmt.Errorf("count strikes: %w", err)
-	}
-	attemptNum, err := nextAttemptNumber(ctx, d, job.ID)
-	if err != nil {
-		return fmt.Errorf("next attempt number: %w", err)
 	}
 	tolerance := verbTolerance(job.Verb)
 
@@ -216,6 +236,45 @@ func recordRunFailure(ctx context.Context, d *db.DB, job *db.HandoffJob, started
 	} else {
 		slog.Warn("job attempt failed at Run, will retry",
 			"verb", job.Verb, "job_id", job.ID, "strikes", strikes+1, "next_status", nextStatus)
+	}
+	return runErr
+}
+
+// recordTransientRunFailure records a Run failure caused by a transient
+// infrastructure error. The attempt is written with a 'transient: …'
+// validation_result (visible in handoff_attempts, and excluded from
+// strikeCount) and the job returns to 'failed_retry' for another attempt — no
+// strike against verbTolerance. Only once transientRetryCap such attempts have
+// accumulated does the job escalate, so a persistently unreachable/broken
+// Ollama endpoint still surfaces to a human rather than looping.
+func recordTransientRunFailure(ctx context.Context, d *db.DB, job *db.HandoffJob, attemptNum int, startedAt time.Time, runErr error) error {
+	prior, err := transientRetryCount(ctx, d, job.ID)
+	if err != nil {
+		return fmt.Errorf("count transient retries: %w", err)
+	}
+
+	nextStatus := "failed_retry"
+	shouldEscalate := prior+1 > transientRetryCap
+	if shouldEscalate {
+		nextStatus = "escalated"
+	}
+
+	txErr := withTx(ctx, d, func(tx *sql.Tx) error {
+		return commitAttempt(ctx, tx, job.ID, attemptNum, "", "transient: "+runErr.Error(), nextStatus, startedAt)
+	})
+	if txErr != nil {
+		return txErr
+	}
+
+	if shouldEscalate {
+		slog.Error("ESCALATION — requires human review (persistent infrastructure failure)",
+			"project_id", job.ProjectID, "job_id", job.ID, "verb", job.Verb,
+			"bead_id", job.BeadID, "transient_retries", prior+1, "cap", transientRetryCap,
+		)
+	} else {
+		slog.Warn("job attempt failed on a transient infrastructure error, retrying without a strike",
+			"verb", job.Verb, "job_id", job.ID, "transient_retries", prior+1, "cap", transientRetryCap,
+			"error", runErr)
 	}
 	return runErr
 }

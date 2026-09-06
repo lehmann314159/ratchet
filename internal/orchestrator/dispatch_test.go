@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -143,6 +144,80 @@ func TestRecordRunFailure_UnderTolerance(t *testing.T) {
 	}
 	if validationResult == "valid" {
 		t.Errorf("a Run failure must not be recorded as a valid attempt")
+	}
+}
+
+// TestRecordRunFailure_TransientDoesNotStrike: a transient infrastructure
+// error (here a stalled stream, ollama.ErrStreamIdle) is recorded as a
+// 'transient: …' attempt, the job stays retryable, and — crucially — it does
+// NOT count toward the verbTolerance strike budget. Three stream stalls on one
+// job must not add up to an escalation with nothing actually wrong
+// (exprvm-web-baseline-15).
+func TestRecordRunFailure_TransientDoesNotStrike(t *testing.T) {
+	d := openTestDB(t)
+	job := seedRunningJob(t, d)
+	ctx := context.Background()
+
+	transientErr := fmt.Errorf("chat: %w", ollama.ErrStreamIdle)
+
+	// Well past verbTolerance (2) worth of transient failures.
+	for i := 0; i < 4; i++ {
+		if err := recordRunFailure(ctx, d, job, time.Now(), transientErr); err == nil {
+			t.Fatal("recordRunFailure: expected the original runErr back")
+		}
+	}
+
+	var status string
+	if err := d.QueryRowContext(ctx, `SELECT status FROM handoff_jobs WHERE id = ?`, job.ID).Scan(&status); err != nil {
+		t.Fatalf("query job status: %v", err)
+	}
+	if status != "failed_retry" {
+		t.Fatalf("after 4 transient failures status = %q, want 'failed_retry' (no strike, still retrying)", status)
+	}
+
+	strikes, err := strikeCount(ctx, d, job.ID)
+	if err != nil {
+		t.Fatalf("strikeCount: %v", err)
+	}
+	if strikes != 0 {
+		t.Errorf("strikeCount = %d after only transient failures, want 0", strikes)
+	}
+
+	// The transient cap is still a backstop: enough of them escalates.
+	for i := 0; i < transientRetryCap; i++ {
+		_ = recordRunFailure(ctx, d, job, time.Now(), transientErr)
+	}
+	if err := d.QueryRowContext(ctx, `SELECT status FROM handoff_jobs WHERE id = ?`, job.ID).Scan(&status); err != nil {
+		t.Fatalf("query job status: %v", err)
+	}
+	if status != "escalated" {
+		t.Errorf("status = %q after exceeding transientRetryCap, want 'escalated'", status)
+	}
+}
+
+// TestRecordRunFailure_DeterministicStillStrikesAfterTransient: transient
+// attempts don't shield a genuine deterministic Run error — it still strikes
+// and escalates at verbTolerance regardless of how many transient retries
+// preceded it.
+func TestRecordRunFailure_DeterministicStillStrikesAfterTransient(t *testing.T) {
+	d := openTestDB(t)
+	job := seedRunningJob(t, d)
+	ctx := context.Background()
+
+	_ = recordRunFailure(ctx, d, job, time.Now(), fmt.Errorf("chat: %w", ollama.ErrStreamIdle))
+	_ = recordRunFailure(ctx, d, job, time.Now(), fmt.Errorf("chat: %w", ollama.ErrStreamIdle))
+
+	// Now three deterministic failures (tolerance is 2 → 3rd escalates).
+	_ = recordRunFailure(ctx, d, job, time.Now(), errAssertRunFailure)
+	_ = recordRunFailure(ctx, d, job, time.Now(), errAssertRunFailure)
+	_ = recordRunFailure(ctx, d, job, time.Now(), errAssertRunFailure)
+
+	var status string
+	if err := d.QueryRowContext(ctx, `SELECT status FROM handoff_jobs WHERE id = ?`, job.ID).Scan(&status); err != nil {
+		t.Fatalf("query job status: %v", err)
+	}
+	if status != "escalated" {
+		t.Errorf("status = %q, want 'escalated' — a deterministic Run error must still escalate at tolerance", status)
 	}
 }
 
