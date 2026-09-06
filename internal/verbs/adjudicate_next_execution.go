@@ -253,6 +253,72 @@ func countTrailingTimeouts(ctx context.Context, d *db.DB, beadID int64) int {
 	return run
 }
 
+// countTrailingStalls returns how many of the most recent consecutive
+// executions for beadID (current lineage, real attempts only) ended with
+// termination_cause='stalled' — EXECUTE_BEAD's progress tracker detecting no
+// forward progress and the model not responding to the graceful-finalize
+// directive (see internal/execution/progress.go). Unlike a timeout, a stall
+// means more wall-clock will not help, so ADJUDICATE must not double the budget
+// and retry; two in a row escalates to the user (bead is likely too large —
+// see memory/project_decompose_precision bead-sizing).
+func countTrailingStalls(ctx context.Context, d *db.DB, beadID int64) int {
+	lineageIDs, err := currentLineageRevisionIDs(ctx, d, beadID)
+	if err != nil {
+		return 0
+	}
+	rows, err := d.QueryContext(ctx, `
+		SELECT termination_cause, bead_revision_id
+		FROM executions
+		WHERE bead_id = ? AND infra_failure = 0 AND test_first_attempt = 0
+		  AND termination_cause IS NOT NULL
+		ORDER BY id DESC`, beadID)
+	if err != nil {
+		return 0
+	}
+	defer rows.Close()
+	run := 0
+	for rows.Next() {
+		var cause string
+		var revID int64
+		if err := rows.Scan(&cause, &revID); err != nil {
+			return run
+		}
+		if !lineageIDs[revID] {
+			continue
+		}
+		if cause != "stalled" {
+			break
+		}
+		run++
+	}
+	return run
+}
+
+// stalledExecutionNote fires when the latest qualifying execution for beadID
+// ended termination_cause='stalled'. It steers ADJUDICATE away from
+// double-the-budget-and-retry (the timeout reflex) toward the decisions that
+// actually fit a no-progress attempt.
+func stalledExecutionNote(ctx context.Context, d *db.DB, beadID int64) string {
+	var cause string
+	if err := d.QueryRowContext(ctx, `
+		SELECT termination_cause FROM executions
+		WHERE bead_id = ? AND infra_failure = 0 AND test_first_attempt = 0
+		  AND termination_cause IS NOT NULL
+		ORDER BY id DESC LIMIT 1`, beadID).Scan(&cause); err != nil || cause != "stalled" {
+		return ""
+	}
+	return "[Stalled execution] The previous attempt made no measurable forward progress " +
+		"(no output file changed on disk, no exit criterion newly passed) and did not respond to a " +
+		"graceful-finalize directive. This is NOT a wall-clock-budget problem: the budget was not " +
+		"increased and must not be. Do NOT choose execute_revised with a substantively unchanged " +
+		"spec — that is exactly what produced the stall.\n\n" +
+		"Choose by what the disk shows:\n" +
+		"  - Output files already satisfy the exit criteria → declare_success.\n" +
+		"  - The spec is too large or too vague for one attempt → execute_revised with a MATERIALLY " +
+		"narrowed spec (fewer output files, a sharper and shorter contract), or full_stop if it " +
+		"cannot be narrowed. A second consecutive stall escalates to the user automatically."
+}
+
 // enforcedTimeoutBudget is the execution_budget a retry gets after any run of
 // consecutive timeouts (>=1): double the just-executed revision's value, capped
 // at 8x the project default (900s default -> 7200s ceiling). Compounds
@@ -962,6 +1028,13 @@ type AdjudicateNextExecution struct {
 	// collapses the historical rev2-timeout -> rev3-timeout -> rev4-success
 	// ratchet (projects 40/41/42 parser) into a single execute_revised round.
 	trailingTimeouts int
+
+	// trailingStalls caches, from Run, how many of the most recent consecutive
+	// in-lineage executions ended termination_cause='stalled' (EXECUTE_BEAD's
+	// progress tracker walled the attempt). >=2 means a revised-spec retry has
+	// already failed to un-stall the bead once — Commit's execute_as_is /
+	// execute_revised paths escalate to the user instead of trying a third time.
+	trailingStalls int
 }
 
 func (h *AdjudicateNextExecution) Verb() string { return db.VerbAdjudicateNextExecution }
@@ -1025,6 +1098,7 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 	h.budgetDefault = project.ExecutionBudgetDefault
 	h.folderPath = project.FolderPath
 	h.trailingTimeouts = countTrailingTimeouts(ctx, d, beadID)
+	h.trailingStalls = countTrailingStalls(ctx, d, beadID)
 
 	model, err := loadVerbModel(ctx, d, job.ProjectID, db.VerbAdjudicateNextExecution)
 	if err != nil {
@@ -1049,6 +1123,9 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 		findings += "\n\n" + note
 	}
 	if note := orientationOnlyNote(ctx, d, beadID); note != "" {
+		findings += "\n\n" + note
+	}
+	if note := stalledExecutionNote(ctx, d, beadID); note != "" {
 		findings += "\n\n" + note
 	}
 	if h.trailingTimeouts >= 1 {
@@ -1491,6 +1568,9 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 		if atCap, err := h.atExecutionCap(ctx, tx, job.ProjectID, beadID, now, job.ID); err != nil || atCap {
 			return err
 		}
+		if stopped, err := h.escalateOnRepeatedStall(ctx, tx, job.ProjectID, beadID, now, job.ID); err != nil || stopped {
+			return err
+		}
 		// Same trailing-timeout escalation as execute_revised, but execute_as_is
 		// makes no new revision — bump the current revision's budget in place so
 		// the identical retry isn't handed the same wall clock that already
@@ -1516,6 +1596,9 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 
 	case "execute_revised":
 		if atCap, err := h.atExecutionCap(ctx, tx, job.ProjectID, beadID, now, job.ID); err != nil || atCap {
+			return err
+		}
+		if stopped, err := h.escalateOnRepeatedStall(ctx, tx, job.ProjectID, beadID, now, job.ID); err != nil || stopped {
 			return err
 		}
 		// Write a new bead_revision for the revised spec. Use the bead-wide max,
@@ -1840,6 +1923,31 @@ func regenerateAPICheckTest(ctx context.Context, tx *sql.Tx, projectID int64, fo
 	if err := writeAPICheckTest(manifest.Package, folderPath, manifest.Files); err != nil {
 		slog.Warn("regenerateAPICheckTest: write failed", "project_id", projectID, "error", err)
 	}
+}
+
+// escalateOnRepeatedStall escalates the ADJUDICATE job when the bead has ended
+// termination_cause='stalled' on two or more consecutive in-lineage executions
+// (h.trailingStalls, from Run). A stall means "no forward progress and no
+// response to the graceful-finalize directive" — a revised spec has already
+// failed to un-stall it once, and a third EXECUTE attempt is unlikely to help;
+// the bead most probably needs splitting (memory/project_decompose_precision).
+// Called from the execute_as_is / execute_revised branches only — declare_success
+// (files may genuinely be done, gated mechanically) and full_stop are unaffected.
+// Returns true when it escalated.
+func (h *AdjudicateNextExecution) escalateOnRepeatedStall(ctx context.Context, tx *sql.Tx, projectID, beadID int64, now string, jobID int64) (bool, error) {
+	if h.trailingStalls < 2 {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE handoff_jobs SET status = 'escalated', updated_at = ? WHERE id = ?`, now, jobID,
+	); err != nil {
+		return true, fmt.Errorf("escalate on repeated stall: %w", err)
+	}
+	slog.Error("ESCALATION — repeated EXECUTE_BEAD stall",
+		"project_id", projectID, "bead_id", beadID,
+		"trailing_stalls", h.trailingStalls, "job_id", jobID)
+	report.WriteBead(ctx, tx, h.folderPath, beadID, "escalated")
+	return true, nil
 }
 
 // atExecutionCap returns true if the bead has reached the project's

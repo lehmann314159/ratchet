@@ -143,7 +143,7 @@ type Execution struct {
 	BeadID           int64
 	BeadRevisionID   int64
 	TracePath        string
-	TerminationCause sql.NullString // 'success' | 'timeout' | 'monitor_terminated' | 'monitor_force_killed'
+	TerminationCause sql.NullString // 'success' | 'timeout' | 'monitor_terminated' | 'monitor_force_killed' | 'no_write' | 'stalled'
 	MonitorFired     sql.NullBool
 	MonitorHonored   sql.NullBool
 	StartedAt        time.Time

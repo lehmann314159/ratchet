@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 )
 
@@ -409,6 +410,86 @@ func TestMigrateExecutionsTerminationCausePreservesData(t *testing.T) {
 	}
 	mustExec(t, d, `INSERT INTO executions (id,project_id,bead_id,bead_revision_id,trace_path,termination_cause,monitor_fired,monitor_honored,started_at,ended_at)
 	  VALUES (2,1,1,1,'/tmp/trace-2.log','no_write',0,1,'2026-01-01T00:00:00Z','2026-01-01T00:05:00Z')`)
+}
+
+func TestMigrateExecutionsTerminationCauseStalledPreservesData(t *testing.T) {
+	ctx := context.Background()
+	d := openRawTestDB(t)
+	mustExec(t, d, `CREATE TABLE projects (id INTEGER PRIMARY KEY)`)
+	mustExec(t, d, `INSERT INTO projects (id) VALUES (1)`)
+	mustExec(t, d, `CREATE TABLE beads (id INTEGER PRIMARY KEY)`)
+	mustExec(t, d, `INSERT INTO beads (id) VALUES (1)`)
+	mustExec(t, d, `CREATE TABLE bead_revisions (id INTEGER PRIMARY KEY)`)
+	mustExec(t, d, `INSERT INTO bead_revisions (id) VALUES (1)`)
+	// Start from the post-'no_write' shape (what migrateExecutionsTerminationCause leaves).
+	mustExec(t, d, `CREATE TABLE executions (
+	  id INTEGER PRIMARY KEY,
+	  project_id INTEGER NOT NULL REFERENCES projects(id),
+	  bead_id INTEGER NOT NULL REFERENCES beads(id),
+	  bead_revision_id INTEGER NOT NULL REFERENCES bead_revisions(id),
+	  trace_path TEXT NOT NULL,
+	  termination_cause TEXT CHECK (termination_cause IN ('success','timeout','monitor_terminated','monitor_force_killed','no_write')),
+	  monitor_fired INTEGER,
+	  monitor_honored INTEGER,
+	  started_at TIMESTAMP NOT NULL,
+	  ended_at TIMESTAMP,
+	  infra_failure INTEGER NOT NULL DEFAULT 0,
+	  test_first_attempt INTEGER NOT NULL DEFAULT 0
+	)`)
+	mustExec(t, d, `INSERT INTO executions (id,project_id,bead_id,bead_revision_id,trace_path,termination_cause,monitor_fired,monitor_honored,started_at,ended_at,infra_failure)
+	  VALUES (1,1,1,1,'/tmp/trace-1.log','no_write',0,1,'2026-01-01T00:00:00Z','2026-01-01T00:05:00Z',1)`)
+	mustExec(t, d, `CREATE TABLE analyses (
+	  id INTEGER PRIMARY KEY,
+	  execution_id INTEGER NOT NULL REFERENCES executions(id)
+	)`)
+	mustExec(t, d, `INSERT INTO analyses (id, execution_id) VALUES (1, 1)`)
+
+	// Idempotent: a second call is a no-op once 'stalled' is present.
+	for i := 0; i < 2; i++ {
+		if err := d.migrateExecutionsTerminationCauseStalled(); err != nil {
+			t.Fatalf("migrateExecutionsTerminationCauseStalled (call %d): %v", i+1, err)
+		}
+	}
+
+	var tracePath string
+	var infraFailure int
+	if err := d.QueryRowContext(ctx, `SELECT trace_path, infra_failure FROM executions WHERE id = 1`).
+		Scan(&tracePath, &infraFailure); err != nil {
+		t.Fatalf("row lost after migration: %v", err)
+	}
+	if tracePath != "/tmp/trace-1.log" || infraFailure != 1 {
+		t.Errorf("data corrupted: trace_path=%q infra_failure=%d", tracePath, infraFailure)
+	}
+	var execID int64
+	if err := d.QueryRowContext(ctx, `SELECT execution_id FROM analyses WHERE id = 1`).Scan(&execID); err != nil || execID != 1 {
+		t.Fatalf("analyses.execution_id FK broke: err=%v execID=%d", err, execID)
+	}
+	// 'stalled' now accepted; a bogus value still rejected.
+	mustExec(t, d, `INSERT INTO executions (id,project_id,bead_id,bead_revision_id,trace_path,termination_cause,started_at)
+	  VALUES (2,1,1,1,'/tmp/trace-2.log','stalled','2026-01-01T00:00:00Z')`)
+	if _, err := d.ExecContext(ctx, `INSERT INTO executions (id,project_id,bead_id,bead_revision_id,trace_path,termination_cause,started_at)
+	  VALUES (3,1,1,1,'/tmp/trace-3.log','bogus','2026-01-01T00:00:00Z')`); err == nil {
+		t.Errorf("CHECK constraint should reject an unknown termination_cause")
+	}
+}
+
+// TestFreshSchemaHasStalledInCheck confirms a brand-new DB (schema.sql, no
+// migrations) already carries 'stalled' in the executions CHECK constraint.
+func TestFreshSchemaHasStalledInCheck(t *testing.T) {
+	d, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	var createSQL string
+	if err := d.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type='table' AND name='executions'`,
+	).Scan(&createSQL); err != nil {
+		t.Fatalf("query executions schema: %v", err)
+	}
+	if !strings.Contains(createSQL, "'stalled'") {
+		t.Errorf("fresh executions schema missing 'stalled' in CHECK:\n%s", createSQL)
+	}
 }
 
 // TestBackfillPauseColumns confirms applyMigrations adds pause_after_verb and

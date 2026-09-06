@@ -93,7 +93,12 @@ CREATE TABLE IF NOT EXISTS executions (
   trace_path        TEXT    NOT NULL,
   -- 'monitor_force_killed' is written by the orchestrator, not EXECUTE_BEAD,
   -- because EXECUTE_BEAD didn't get to write anything before the hard kill.
-  termination_cause TEXT    CHECK (termination_cause IN ('success', 'timeout', 'monitor_terminated', 'monitor_force_killed', 'no_write')),
+  -- 'stalled' is written by EXECUTE_BEAD when its progress tracker detects no
+  -- forward progress (no output file changed, no exit criterion newly passed)
+  -- and the model did not respond to the graceful-finalize directive — distinct
+  -- from 'timeout' so ADJUDICATE does not double the budget and retry the
+  -- identical spec (see internal/execution/progress.go).
+  termination_cause TEXT    CHECK (termination_cause IN ('success', 'timeout', 'monitor_terminated', 'monitor_force_killed', 'no_write', 'stalled')),
   monitor_fired     INTEGER,  -- BOOLEAN: 0/1/NULL
   monitor_honored   INTEGER,  -- BOOLEAN: read off bead_revisions.monitor_override at execution time
   started_at        TIMESTAMP NOT NULL,

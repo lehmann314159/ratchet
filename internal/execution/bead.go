@@ -2,6 +2,8 @@ package execution
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -24,6 +26,12 @@ import (
 // ChatWithTools call finish so any in-flight write_file arguments can fully
 // stream in before we exit. A hard cancel fires after this window regardless.
 const writeGracePeriod = 2 * time.Minute
+
+// testExecBudget, when non-zero, overrides the wall-clock budget interval used
+// by runExecuteBeadReal's soft checkpoint / absolute ceiling timers. Tests set
+// it to a sub-second value so the stall-detection paths are reachable without
+// waiting minutes. Zero (the default) means: use the bead's execution_budget.
+var testExecBudget time.Duration
 
 // RunExecuteBeadMain is the entry point for the "ratchet execute-bead" subcommand.
 //
@@ -112,34 +120,79 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// Progress / stall detection. The tracker accumulates per-turn mechanical
+	// signal (see progress.go); the wall-clock goroutine below reads its
+	// atomic lastProductive time. Both replace the old "fixed budget -> timeout
+	// -> ADJUDICATE doubles the budget and retries the identical spec" loop,
+	// which burned hours to no effect on a stalled attempt (baseline-14 bead
+	// 318 — memory/project_execute_progress_detection).
+	tracker := newProgressTracker(time.Now())
+
+	budgetDur := time.Duration(budget) * time.Second
+	if testExecBudget > 0 {
+		budgetDur = testExecBudget
+	}
+	ceilingDur := execCeiling(budgetDur)
+
 	terminationCh := make(chan string, 1)
-	// softStopCh is closed when the budget fires, signalling the turn loop to
-	// exit cleanly after the current ChatWithTools call finishes. This lets an
-	// in-flight write_file argument complete before we stop. A hard cancel fires
-	// writeGracePeriod later as a backstop so we never hang indefinitely.
-	softStopCh := make(chan struct{})
+	// budgetCheckpointCh: the wall-clock goroutine pings this once per budget
+	// interval. The loop decides, between turns, whether to extend (forward
+	// progress this interval) or request a graceful finalize (none).
+	budgetCheckpointCh := make(chan struct{}, 1)
+	// extendCh / finalizeCh: loop -> goroutine. extend resets the soft timer for
+	// another interval; finalize tightens the hard timer to execFinalizeGrace
+	// and makes its expiry terminate as "stalled" rather than "timeout".
+	extendCh := make(chan struct{}, 1)
+	finalizeCh := make(chan struct{}, 1)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM)
-	budgetTimer := time.NewTimer(time.Duration(budget) * time.Second)
-	defer budgetTimer.Stop()
 
 	go func() {
-		select {
-		case <-sigCh:
-			terminationCh <- "monitor_terminated"
-			cancel()
-		case <-budgetTimer.C:
-			close(softStopCh)
-			time.AfterFunc(writeGracePeriod, func() {
-				terminationCh <- "timeout"
+		soft := time.NewTimer(budgetDur)
+		defer soft.Stop()
+		hard := time.NewTimer(ceilingDur)
+		defer hard.Stop()
+		finalizing := false
+		drainReset := func(t *time.Timer, d time.Duration) {
+			if !t.Stop() {
+				select {
+				case <-t.C:
+				default:
+				}
+			}
+			t.Reset(d)
+		}
+		for {
+			select {
+			case <-sigCh:
+				trySendCause(terminationCh, "monitor_terminated")
 				cancel()
-			})
-		case <-ctx.Done():
+				return
+			case <-ctx.Done():
+				return
+			case <-extendCh:
+				drainReset(soft, budgetDur)
+			case <-finalizeCh:
+				finalizing = true
+				drainReset(hard, execFinalizeGrace)
+			case <-soft.C:
+				trySignal(budgetCheckpointCh)
+				soft.Reset(budgetDur)
+			case <-hard.C:
+				cause := "timeout"
+				if finalizing || time.Since(tracker.lastProductive()) > execStallWindow {
+					cause = "stalled"
+				}
+				trySendCause(terminationCh, cause)
+				cancel()
+				return
+			}
 		}
 	}()
 
-	slog.Info("execute-bead started", "execution_id", execID, "model", model, "budget_s", budget)
+	slog.Info("execute-bead started", "execution_id", execID, "model", model,
+		"budget_s", budget, "ceiling_s", int(ceilingDur.Seconds()))
 
 	// Sandbox all scratch work. write_file / read_file / run_command and the
 	// in-loop exit-criteria check operate in a per-attempt temp dir seeded from
@@ -227,6 +280,22 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	var writeFileCount int
 	var stubWarningInjected bool
 	var missingPathWarningInjected bool
+	var finalizeInjected bool // the one graceful-finalize directive has been sent
+	var extensionsUsed int
+	prevTurnSig := ""
+	lastCheckpoint := time.Now()
+	ledger := newHashLedger()
+	expectedSet := make(map[string]bool, len(expectedFiles))
+	for _, f := range expectedFiles {
+		expectedSet[filepath.Clean(f)] = true
+	}
+
+	injectFinalize := func(reason string) {
+		finalizeInjected = true
+		writeLine(traceFile, fmt.Sprintf("[progress] %s — requesting graceful finalize", reason))
+		messages = append(messages, ollama.Message{Role: "user", Content: buildStallFinalizeDirective(expectedFiles)})
+		trySignal(finalizeCh)
+	}
 
 	for turn := 1; ; turn++ {
 		writeLine(traceFile, fmt.Sprintf("[TURN %d]", turn))
@@ -245,34 +314,42 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 		// Content was already streamed to traceFile token-by-token during the call.
 		messages = append(messages, msg)
 
-		// Budget fired while we were streaming — now that the response is complete,
-		// stop cleanly rather than starting another turn.
+		// Monitor SIGTERM or the hard wall-clock ceiling fired while we streamed.
 		select {
-		case <-softStopCh:
-			writeLine(traceFile, "[terminated: timeout]")
-			return writeTerminationCause(d, execID, "timeout")
+		case cause := <-terminationCh:
+			writeLine(traceFile, fmt.Sprintf("[terminated: %s]", cause))
+			return writeTerminationCause(d, execID, cause)
 		default:
 		}
 
+		lengthCapEmpty := msg.DoneReason == "length" && len(msg.ToolCalls) == 0 &&
+			strings.TrimSpace(msg.Content) == ""
+
 		if len(msg.ToolCalls) == 0 {
-			// Before treating a zero-tool-call turn as a stall, check whether the
-			// bead's own exit criteria already pass on disk — a prior attempt may
-			// have already finished the job (e.g. after ADJUDICATE's "don't
-			// rewrite files that are already correct" guidance), in which case
-			// there is genuinely nothing left to write and the no-write warning
-			// below would force the model into rewriting already-correct files
-			// or terminating as a false 'no_write'. This is the same ground-truth
-			// check ADJUDICATE's declare_success gate uses, run here instead of
-			// only after the fact.
+			// A finished bead always wins over a stall verdict — check the exit
+			// criteria on disk first. A prior attempt may already have finished
+			// the job (e.g. after ADJUDICATE's "don't rewrite files that are
+			// already correct" guidance); this is the same ground-truth check
+			// ADJUDICATE's declare_success gate uses.
 			if ok, _ := execcheck.VerifyExitCriteria(ctx, workDir, parsedBead.ExitCriteria); ok {
 				writeLine(traceFile, "[done — exit criteria already satisfied on disk; no write needed]")
 				return writeTerminationCause(d, execID, "success")
 			}
 
-			// If the model declared done without calling write_file at all, it
-			// likely output code as prose instead of as a tool call. Inject a
-			// one-time warning and force another turn so it can correct itself
-			// without burning a whole attempt slot.
+			tracker.observe(time.Now(), turnObs{lengthCapEmpty: lengthCapEmpty})
+
+			// The single turn granted after a graceful-finalize directive is over.
+			if finalizeInjected {
+				writeLine(traceFile, "[terminated: stalled — no output after finalize directive]")
+				return writeTerminationCause(d, execID, "stalled")
+			}
+			if stall, reason := tracker.wall(time.Now(), turn); stall {
+				injectFinalize(reason)
+				continue
+			}
+
+			// Model declared done without ever calling write_file — likely
+			// emitted code as prose. One-time nudge, then label distinctly.
 			if !stubWarningInjected && writeFileCount == 0 && len(expectedFiles) > 0 {
 				stubWarningInjected = true
 				writeLine(traceFile, "[injected: no-write warning — model produced prose instead of calling write_file]")
@@ -296,6 +373,8 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 		}
 
 		var missingPathDetected bool
+		var turnResults []string
+		productive := false
 		for _, tc := range msg.ToolCalls {
 			if tc.Function.Name == "write_file" {
 				writeFileCount++
@@ -303,14 +382,34 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 			writeLine(traceFile, fmt.Sprintf("[tool: %s %v]", tc.Function.Name, tc.Function.Arguments))
 			result := executeTool(ctx, tc, workDir)
 			writeLine(traceFile, fmt.Sprintf("[result]\n%s", result))
-			if tc.Function.Name == "write_file" && strings.Contains(result, "write_file requires a 'path' argument") {
-				missingPathDetected = true
+			turnResults = append(turnResults, result)
+			if tc.Function.Name == "write_file" {
+				if strings.Contains(result, "write_file requires a 'path' argument") {
+					missingPathDetected = true
+				} else if strings.HasPrefix(result, "ok:") {
+					// Productive iff the write left an in-scope output file at a
+					// content hash it has not held before this attempt (rejects
+					// no-op rewrites and A->B->A reverts).
+					if p, _ := tc.Function.Arguments["path"].(string); p != "" {
+						clean := filepath.Clean(p)
+						if expectedSet[clean] {
+							if h := hashFileHex(filepath.Join(workDir, clean)); h != "" && ledger.recordWrite(clean, h) {
+								productive = true
+							}
+						}
+					}
+				}
 			}
 			messages = append(messages, ollama.Message{
 				Role:    "tool",
 				Content: result,
 			})
 		}
+
+		turnSig := toolTurnSignature(msg.ToolCalls, turnResults)
+		identicalCall := turnSig != "" && turnSig == prevTurnSig && !productive
+		prevTurnSig = turnSig
+		tracker.observe(time.Now(), turnObs{productive: productive, identicalCall: identicalCall})
 
 		if missingPathDetected && !missingPathWarningInjected {
 			missingPathWarningInjected = true
@@ -322,19 +421,114 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 			continue
 		}
 
+		// The single turn granted after a graceful-finalize directive is over:
+		// exit criteria decide success vs stalled; PR #7 copy-back has the disk
+		// state either way.
+		if finalizeInjected {
+			if ok, _ := execcheck.VerifyExitCriteria(ctx, workDir, parsedBead.ExitCriteria); ok {
+				writeLine(traceFile, "[done — exit criteria satisfied after finalize directive]")
+				return writeTerminationCause(d, execID, "success")
+			}
+			writeLine(traceFile, "[terminated: stalled — no forward progress after finalize directive]")
+			return writeTerminationCause(d, execID, "stalled")
+		}
+
+		if stall, reason := tracker.wall(time.Now(), turn); stall {
+			injectFinalize(reason)
+			continue
+		}
+
+		// Wall-clock checkpoint: extend if this interval saw forward progress,
+		// otherwise ask for a graceful finalize.
+		select {
+		case <-budgetCheckpointCh:
+			progressed := tracker.lastProductive().After(lastCheckpoint)
+			lastCheckpoint = time.Now()
+			switch {
+			case progressed:
+				// Forward progress this interval — keep going. The absolute
+				// wall-clock ceiling (execCeiling) is the real bound.
+				extensionsUsed++
+				writeLine(traceFile, fmt.Sprintf(
+					"[progress] budget checkpoint %d — forward progress detected, extending", extensionsUsed))
+				trySignal(extendCh)
+			case !finalizeInjected:
+				injectFinalize("no forward progress at budget checkpoint")
+			default:
+				writeLine(traceFile, "[terminated: stalled — no forward progress at budget checkpoint]")
+				return writeTerminationCause(d, execID, "stalled")
+			}
+		default:
+		}
+
 		select {
 		case cause := <-terminationCh:
 			writeLine(traceFile, fmt.Sprintf("[terminated: %s]", cause))
 			return writeTerminationCause(d, execID, cause)
 		default:
 		}
-		select {
-		case <-softStopCh:
-			writeLine(traceFile, "[terminated: timeout]")
-			return writeTerminationCause(d, execID, "timeout")
-		default:
-		}
 	}
+}
+
+// trySendCause does a non-blocking send of cause on ch (buffered, size 1).
+func trySendCause(ch chan string, cause string) {
+	select {
+	case ch <- cause:
+	default:
+	}
+}
+
+// trySignal does a non-blocking send on a buffered struct{} channel.
+func trySignal(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+// toolTurnSignature builds a stable string identifying one turn's tool calls and
+// their results, for detecting a turn that byte-for-byte repeats the previous
+// one. fmt's %v on map[string]any sorts keys, so the arguments render
+// deterministically. Empty when the turn made no tool calls.
+func toolTurnSignature(calls []ollama.ToolCall, results []string) string {
+	if len(calls) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, tc := range calls {
+		fmt.Fprintf(&b, "%s(%v)\x00", tc.Function.Name, tc.Function.Arguments)
+		if i < len(results) {
+			b.WriteString(results[i])
+		}
+		b.WriteByte('\x1e')
+	}
+	return b.String()
+}
+
+// hashFileHex returns the hex SHA-256 of the file at path, or "" if it cannot be
+// read.
+func hashFileHex(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// buildStallFinalizeDirective is the one user turn injected when the attempt has
+// walled. It tells the model to write its best current version of each output
+// file and stop — the execution ends after the next turn regardless.
+func buildStallFinalizeDirective(expectedFiles []string) string {
+	list := strings.Join(expectedFiles, ", ")
+	return fmt.Sprintf(
+		"No measurable progress has been made in the last several turns — no output file has "+
+			"changed on disk and no exit criterion has newly passed.\n\n"+
+			"Stop analyzing. In your next turn, call write_file once for each output file (%s) with "+
+			"your best current version of its complete contents, then stop. The execution ends after "+
+			"your next turn — this is your final opportunity to write.",
+		list,
+	)
 }
 
 // runExecuteBeadStub is the original stub implementation, preserved for smoke tests.

@@ -158,6 +158,9 @@ func (db *DB) applyTableMigrations() error {
 	if err := db.migrateExecutionsTerminationCause(); err != nil {
 		return err
 	}
+	if err := db.migrateExecutionsTerminationCauseStalled(); err != nil {
+		return err
+	}
 	if err := db.migrateProjectsStatusFixture(); err != nil {
 		return err
 	}
@@ -239,6 +242,67 @@ func (db *DB) migrateExecutionsTerminationCause() error {
 		if _, err := db.Exec(stmt); err != nil {
 			_, _ = db.Exec(`PRAGMA foreign_keys = ON`)
 			return fmt.Errorf("migrate executions termination_cause (%s): %w", truncate(stmt, 40), err)
+		}
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		return fmt.Errorf("re-enable foreign_keys: %w", err)
+	}
+	return nil
+}
+
+// migrateExecutionsTerminationCauseStalled adds 'stalled' to executions'
+// termination_cause CHECK constraint — written by EXECUTE_BEAD when its progress
+// tracker detects a walled attempt (no forward progress) that did not respond to
+// the graceful-finalize directive. Distinct from 'timeout' so ADJUDICATE does
+// not mechanically double the budget and retry the identical spec (see
+// internal/execution/progress.go, memory/project_execute_progress_detection).
+// Same rename+recreate+copy+drop shape as migrateExecutionsTerminationCause
+// (runs immediately after it, so 'no_write' is already present in the table by
+// the time this checks).
+func (db *DB) migrateExecutionsTerminationCauseStalled() error {
+	var createSQL string
+	if err := db.QueryRow(
+		`SELECT COALESCE(sql, '') FROM sqlite_master WHERE type='table' AND name='executions'`,
+	).Scan(&createSQL); err != nil {
+		return fmt.Errorf("query executions schema: %w", err)
+	}
+	if strings.Contains(createSQL, "stalled") {
+		return nil
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		return fmt.Errorf("disable foreign_keys: %w", err)
+	}
+	stmts := []string{
+		`PRAGMA legacy_alter_table = ON`,
+		`ALTER TABLE executions RENAME TO _executions_old`,
+		`PRAGMA legacy_alter_table = OFF`,
+		`CREATE TABLE executions (
+		  id                 INTEGER PRIMARY KEY,
+		  project_id         INTEGER NOT NULL REFERENCES projects(id),
+		  bead_id            INTEGER NOT NULL REFERENCES beads(id),
+		  bead_revision_id   INTEGER NOT NULL REFERENCES bead_revisions(id),
+		  trace_path         TEXT    NOT NULL,
+		  termination_cause  TEXT    CHECK (termination_cause IN ('success', 'timeout', 'monitor_terminated', 'monitor_force_killed', 'no_write', 'stalled')),
+		  monitor_fired      INTEGER,
+		  monitor_honored    INTEGER,
+		  started_at         TIMESTAMP NOT NULL,
+		  ended_at           TIMESTAMP,
+		  infra_failure      INTEGER NOT NULL DEFAULT 0,
+		  test_first_attempt INTEGER NOT NULL DEFAULT 0
+		)`,
+		`INSERT INTO executions
+		  (id, project_id, bead_id, bead_revision_id, trace_path, termination_cause,
+		   monitor_fired, monitor_honored, started_at, ended_at, infra_failure, test_first_attempt)
+		SELECT
+		  id, project_id, bead_id, bead_revision_id, trace_path, termination_cause,
+		  monitor_fired, monitor_honored, started_at, ended_at, infra_failure, test_first_attempt
+		FROM _executions_old`,
+		`DROP TABLE _executions_old`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			_, _ = db.Exec(`PRAGMA foreign_keys = ON`)
+			return fmt.Errorf("migrate executions termination_cause stalled (%s): %w", truncate(stmt, 40), err)
 		}
 	}
 	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {

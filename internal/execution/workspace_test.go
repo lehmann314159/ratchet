@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -170,21 +171,23 @@ func TestRunExecuteBeadReal_StrayFileIsDiscardedAndNextAttemptIsClean(t *testing
 	}
 }
 
-// TestRunExecuteBeadReal_PartialProgressSurvivesTimeout verifies the EXECUTE
-// prompt's promise: a file written before the budget fires is preserved.
-func TestRunExecuteBeadReal_PartialProgressSurvivesTimeout(t *testing.T) {
+// TestRunExecuteBeadReal_PartialProgressSurvivesStall: a model that writes one
+// file then stops making progress (only read_file calls) is walled — the one
+// finalize directive is injected, then the attempt ends as 'stalled' — and the
+// partial file it did write is still copied back (PR #7 flush on every path).
+func TestRunExecuteBeadReal_PartialProgressSurvivesStall(t *testing.T) {
+	withTestExecBudget(t, 30*time.Millisecond)
 	var turn atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch turn.Add(1) {
-		case 1:
+		if turn.Add(1) == 1 {
 			writeToolCalls(w, toolCall("write_file", map[string]any{
 				"path": "game.go", "content": "package main\n\nfunc Play() { /* partial */ }\n",
 			}))
-		default:
-			time.Sleep(1500 * time.Millisecond) // let the 1s budget fire mid-turn
-			writeToolCalls(w, toolCall("read_file", map[string]any{"path": "game.go"}))
+			return
 		}
+		time.Sleep(45 * time.Millisecond) // exceed the checkpoint interval
+		writeToolCalls(w, toolCall("read_file", map[string]any{"path": "game.go"}))
 	}))
 	defer srv.Close()
 
@@ -198,12 +201,124 @@ func TestRunExecuteBeadReal_PartialProgressSurvivesTimeout(t *testing.T) {
 		t.Fatalf("runExecuteBeadReal: %v", err)
 	}
 
-	if cause := terminationCause(t, d, execID); cause != "timeout" {
-		t.Errorf("termination_cause = %q, want timeout", cause)
+	if cause := terminationCause(t, d, execID); cause != "stalled" {
+		t.Errorf("termination_cause = %q, want stalled", cause)
+	}
+	tr := readFile(t, traceForExec(t, d, execID))
+	if !strings.Contains(tr, "requesting graceful finalize") {
+		t.Errorf("trace missing the graceful-finalize directive:\n%s", tr)
 	}
 	got := readFile(t, filepath.Join(folder, "game.go"))
 	if !strings.Contains(got, "partial") {
 		t.Errorf("partial progress lost — game.go = %q", got)
+	}
+}
+
+// TestRunExecuteBeadReal_StallToFinalizeToStalled: a model that only ever calls
+// read_file (never a productive write) is walled at the first budget checkpoint
+// with no progress, gets exactly one finalize directive, and terminates
+// 'stalled' — not 'success', not 'no_write'.
+func TestRunExecuteBeadReal_StallToFinalizeToStalled(t *testing.T) {
+	withTestExecBudget(t, 30*time.Millisecond)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		time.Sleep(45 * time.Millisecond)
+		writeToolCalls(w, toolCall("read_file", map[string]any{"path": "game.go"}))
+	}))
+	defer srv.Close()
+
+	d := openTestDB(t)
+	folder := t.TempDir()
+	seedRunProject(t, d, folder)
+	fullText := `{"title":"B01","full_text":"spec","output_files":["game.go"],"exit_criteria":["test -f game.go"]}`
+	execID := seedRunExecutionBudget(t, d, folder, fullText, 1)
+
+	if err := runExecuteBeadReal(d, execID, srv.URL); err != nil {
+		t.Fatalf("runExecuteBeadReal: %v", err)
+	}
+
+	if cause := terminationCause(t, d, execID); cause != "stalled" {
+		t.Errorf("termination_cause = %q, want stalled", cause)
+	}
+	tr := readFile(t, traceForExec(t, d, execID))
+	if !strings.Contains(tr, "requesting graceful finalize") {
+		t.Errorf("trace missing finalize directive:\n%s", tr)
+	}
+	if strings.Count(tr, "requesting graceful finalize") != 1 {
+		t.Errorf("finalize directive should be injected exactly once, trace:\n%s", tr)
+	}
+}
+
+// TestRunExecuteBeadReal_ReasoningSpiralIsStalled: two consecutive turns that
+// hit the per-turn token cap mid-think (done_reason "length", no tool call, no
+// content) trip the spiral predicate → finalize → stalled, regardless of
+// wall-clock.
+func TestRunExecuteBeadReal_ReasoningSpiralIsStalled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		writeLengthCapEmpty(w)
+	}))
+	defer srv.Close()
+
+	d := openTestDB(t)
+	folder := t.TempDir()
+	seedRunProject(t, d, folder)
+	fullText := `{"title":"B01","full_text":"spec","output_files":["game.go"],"exit_criteria":["test -f game.go"]}`
+	execID := seedRunExecution(t, d, folder, fullText) // default budget — spiral fires on turn count, not wall
+
+	if err := runExecuteBeadReal(d, execID, srv.URL); err != nil {
+		t.Fatalf("runExecuteBeadReal: %v", err)
+	}
+
+	if cause := terminationCause(t, d, execID); cause != "stalled" {
+		t.Errorf("termination_cause = %q, want stalled", cause)
+	}
+	tr := readFile(t, traceForExec(t, d, execID))
+	if !strings.Contains(tr, "reasoning spiral") {
+		t.Errorf("trace should name the reasoning-spiral stall reason:\n%s", tr)
+	}
+}
+
+// TestRunExecuteBeadReal_SteadyProgressIsNotStalled: a model writing a
+// materially-changed output file every turn is never walled — it extends past
+// budget checkpoints and finishes 'success'.
+func TestRunExecuteBeadReal_SteadyProgressIsNotStalled(t *testing.T) {
+	withTestExecBudget(t, 30*time.Millisecond)
+	var turn atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		n := turn.Add(1)
+		if n <= 5 {
+			time.Sleep(45 * time.Millisecond)
+			writeToolCalls(w, toolCall("write_file", map[string]any{
+				"path":    "game.go",
+				"content": fmt.Sprintf("package main\n\n// revision %d\nfunc Play() {}\n", n),
+			}))
+			return
+		}
+		writeDone(w)
+	}))
+	defer srv.Close()
+
+	d := openTestDB(t)
+	folder := t.TempDir()
+	seedRunProject(t, d, folder)
+	fullText := `{"title":"B01","full_text":"spec","output_files":["game.go"],"exit_criteria":["test -f game.go"]}`
+	execID := seedRunExecutionBudget(t, d, folder, fullText, 1)
+
+	if err := runExecuteBeadReal(d, execID, srv.URL); err != nil {
+		t.Fatalf("runExecuteBeadReal: %v", err)
+	}
+
+	if cause := terminationCause(t, d, execID); cause != "success" {
+		t.Errorf("termination_cause = %q, want success", cause)
+	}
+	tr := readFile(t, traceForExec(t, d, execID))
+	if strings.Contains(tr, "requesting graceful finalize") {
+		t.Errorf("a steadily-progressing model must not get a finalize directive:\n%s", tr)
+	}
+	if !strings.Contains(tr, "forward progress detected, extending") {
+		t.Errorf("expected at least one budget-checkpoint extension:\n%s", tr)
 	}
 }
 
@@ -256,6 +371,26 @@ func writeDone(w http.ResponseWriter) {
 		"message": map[string]any{"role": "assistant", "content": ""},
 		"done":    true,
 	})
+}
+
+// writeLengthCapEmpty simulates a turn that hit the per-turn token cap while
+// still reasoning: no content, no tool call, done_reason "length".
+func writeLengthCapEmpty(w http.ResponseWriter) {
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"message":     map[string]any{"role": "assistant", "content": ""},
+		"done":        true,
+		"done_reason": "length",
+	})
+}
+
+// withTestExecBudget overrides runExecuteBeadReal's wall-clock budget interval
+// for the duration of one test so the stall / checkpoint paths are reachable in
+// milliseconds.
+func withTestExecBudget(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := testExecBudget
+	testExecBudget = d
+	t.Cleanup(func() { testExecBudget = old })
 }
 
 func seedRunProject(t *testing.T, d *db.DB, folder string) {
