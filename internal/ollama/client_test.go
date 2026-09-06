@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -580,5 +583,167 @@ func TestChatWithToolsLogsStreamProgress(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "streaming still in progress") {
 		t.Errorf("expected a stream-progress log line, got: %s", buf.String())
+	}
+}
+
+// setStreamTimeouts shrinks the stream-liveness bounds for a test and restores
+// them afterward.
+func setStreamTimeouts(t *testing.T, idle, firstChunk, poll time.Duration) {
+	t.Helper()
+	oi, of, op := streamIdleTimeout, streamFirstChunkTimeout, streamIdlePollInterval
+	streamIdleTimeout, streamFirstChunkTimeout, streamIdlePollInterval = idle, firstChunk, poll
+	t.Cleanup(func() {
+		streamIdleTimeout, streamFirstChunkTimeout, streamIdlePollInterval = oi, of, op
+	})
+}
+
+// TestChatWithToolsIdleStreamAborts: once tokens are flowing, a stream that
+// then goes silent past streamIdleTimeout is aborted with ErrStreamIdle rather
+// than hanging until the 60-minute whole-response client timeout — the
+// exprvm-web-baseline-15 stall (qwen3.6:35b-a3b silent mid-generation for 38+
+// minutes, twice in one run).
+func TestChatWithToolsIdleStreamAborts(t *testing.T) {
+	setStreamTimeouts(t, 100*time.Millisecond, 5*time.Second, 15*time.Millisecond)
+
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fl, _ := w.(http.Flusher)
+		io.WriteString(w, `{"message":{"role":"assistant","content":"partial "}}`+"\n")
+		if fl != nil {
+			fl.Flush()
+		}
+		<-release // go silent mid-stream
+	}))
+	defer srv.Close()
+	defer close(release) // unblock the handler before srv.Close() waits on it
+
+	c := New(srv.URL)
+	_, err := c.ChatWithTools(context.Background(), "m",
+		[]Message{{Role: "user", Content: "hi"}}, nil, nil, nil)
+	if !errors.Is(err, ErrStreamIdle) {
+		t.Fatalf("want ErrStreamIdle, got %v", err)
+	}
+	if !IsTransient(err) {
+		t.Errorf("ErrStreamIdle must be classified transient")
+	}
+}
+
+// TestChatWithToolsFirstChunkTimeout: a stall before the very first chunk is
+// bounded by streamFirstChunkTimeout (the prompt-eval / first-token window).
+func TestChatWithToolsFirstChunkTimeout(t *testing.T) {
+	setStreamTimeouts(t, 5*time.Second, 100*time.Millisecond, 15*time.Millisecond)
+
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Ollama returns 200 headers immediately, then streams chunks only once
+		// generation starts (prompt eval happens in between). Simulate headers
+		// back but no first chunk.
+		w.WriteHeader(http.StatusOK)
+		if fl, ok := w.(http.Flusher); ok {
+			fl.Flush()
+		}
+		<-release // never send a chunk
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	c := New(srv.URL)
+	_, err := c.ChatWithTools(context.Background(), "m",
+		[]Message{{Role: "user", Content: "hi"}}, nil, nil, nil)
+	if !errors.Is(err, ErrStreamIdle) {
+		t.Fatalf("want ErrStreamIdle, got %v", err)
+	}
+}
+
+// TestChatWithToolsSlowButSteadyStreamSucceeds: a stream that keeps producing
+// chunks (here every ~40ms, under a 200ms idle bound) must not be aborted even
+// if its total runtime exceeds the idle bound — the muse-glimmer "long think
+// that still streams thinking tokens" case.
+func TestChatWithToolsSlowButSteadyStreamSucceeds(t *testing.T) {
+	setStreamTimeouts(t, 200*time.Millisecond, 5*time.Second, 15*time.Millisecond)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fl, _ := w.(http.Flusher)
+		for i := 0; i < 12; i++ {
+			io.WriteString(w, `{"message":{"role":"assistant","thinking":"tick "}}`+"\n")
+			if fl != nil {
+				fl.Flush()
+			}
+			time.Sleep(40 * time.Millisecond)
+		}
+		io.WriteString(w, `{"message":{"role":"assistant","content":"done"},"done":true,"done_reason":"stop"}`+"\n")
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	msg, err := c.ChatWithTools(context.Background(), "m",
+		[]Message{{Role: "user", Content: "hi"}}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("steady stream should succeed, got: %v", err)
+	}
+	if msg.Content != "done" {
+		t.Errorf("content = %q, want %q", msg.Content, "done")
+	}
+}
+
+type fakeTimeoutErr struct{}
+
+func (fakeTimeoutErr) Error() string   { return "i/o timeout" }
+func (fakeTimeoutErr) Timeout() bool   { return true }
+func (fakeTimeoutErr) Temporary() bool { return false }
+
+func TestIsTransient(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"stream idle wrapped", fmt.Errorf("chat: %w", ErrStreamIdle), true},
+		{"unexpected eof wrapped", fmt.Errorf("decode stream: %w", io.ErrUnexpectedEOF), true},
+		{"connection reset", fmt.Errorf("read: %w", syscall.ECONNRESET), true},
+		{"broken pipe", fmt.Errorf("write: %w", syscall.EPIPE), true},
+		{"http 503", &HTTPStatusError{StatusCode: 503}, true},
+		{"http 500 wrapped", fmt.Errorf("x: %w", &HTTPStatusError{StatusCode: 500}), true},
+		{"http 429", &HTTPStatusError{StatusCode: 429}, true},
+		{"http 400", &HTTPStatusError{StatusCode: 400}, false},
+		{"net timeout", fakeTimeoutErr{}, true},
+		{"connection refused stays a strike", fmt.Errorf("dial: %w", syscall.ECONNREFUSED), false},
+		{"deterministic verb error", errors.New("no test file paths for bead 42"), false},
+		{"context canceled", context.Canceled, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsTransient(tc.err); got != tc.want {
+				t.Errorf("IsTransient(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestChatReturnsTypedHTTPStatusError: a non-200 from Ollama surfaces as
+// *HTTPStatusError (so the orchestrator can classify a 5xx as transient),
+// not an opaque formatted string.
+func TestChatReturnsTypedHTTPStatusError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		io.WriteString(w, "model is loading")
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	_, err := c.Chat(context.Background(), "m", []Message{{Role: "user", Content: "hi"}}, nil)
+	var hse *HTTPStatusError
+	if !errors.As(err, &hse) {
+		t.Fatalf("want *HTTPStatusError, got %T: %v", err, err)
+	}
+	if hse.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("StatusCode = %d, want 503", hse.StatusCode)
+	}
+	if !IsTransient(err) {
+		t.Errorf("a 503 should be transient")
 	}
 }

@@ -168,11 +168,30 @@ func resetStaleRunning(ctx context.Context, d *db.DB) error {
 }
 
 // strikeCount returns the number of invalid (malformed) attempts for a job.
+// Transient-infrastructure attempts (validation_result 'transient: …', written
+// by recordRunFailure for a stalled stream / Ollama 5xx / request timeout) are
+// excluded — they are retried without a strike and bounded separately by
+// transientRetryCount / transientRetryCap.
 func strikeCount(ctx context.Context, d *db.DB, jobID int64) (int, error) {
 	var n int
 	err := d.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM handoff_attempts
-		 WHERE job_id = ? AND validation_result != 'valid'`,
+		 WHERE job_id = ? AND validation_result != 'valid'
+		   AND validation_result NOT LIKE 'transient: %'`,
+		jobID,
+	).Scan(&n)
+	return n, err
+}
+
+// transientRetryCount returns the number of transient-infrastructure attempts
+// recorded for a job. These retry without a strike (see
+// dispatch.recordRunFailure) but are still bounded: transientRetryCap of them
+// escalates, so a persistently dead Ollama endpoint can't loop forever.
+func transientRetryCount(ctx context.Context, d *db.DB, jobID int64) (int, error) {
+	var n int
+	err := d.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM handoff_attempts
+		 WHERE job_id = ? AND validation_result LIKE 'transient: %'`,
 		jobID,
 	).Scan(&n)
 	return n, err
