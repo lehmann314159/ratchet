@@ -752,28 +752,31 @@ in full detail in the revised spec.
 
 Budget guidance for execute_revised:
   - execution_budget and monitor_override must be explicitly stated, not inherited silently.
-  - For non-timeout failures, copy the "Actual execution budget" value from Input 1 unchanged
-    unless you have a specific reason to change it.
-  - On ANY timeout (termination_cause: timeout), the budget is the bottleneck: double the current
-    execution_budget in the revised bead. The orchestrator ALSO raises it mechanically from the
-    FIRST timeout on (double the last value each time, capped 900->1800->3600->7200), so your
-    number is a floor, not the final word — a "[Fast path — first timeout]" / "[Fast path —
-    repeated timeout]" note will say so. On that path never choose re_refine: a run that never
-    finished cannot have reached the tests.
+    Copy the "Actual execution budget" value from Input 1 unchanged unless you have a specific
+    reason to change monitor_override. execution_budget no longer controls the execution
+    window — EXECUTE_BEAD uses a fixed checkpoint cadence and a fixed wall-clock ceiling — so
+    do NOT spend the revision on the budget number, and raising it will not buy the agent time.
+  - A termination_cause=timeout means the agent kept producing new output across the ENTIRE
+    window but never converged (all files complete, tests run) before the fixed ceiling. That
+    is a SCOPE problem — the bead is doing too much for one attempt — not a time problem.
+    Respond with execute_revised that MATERIALLY narrows the spec: fewer output_files, a
+    shorter and sharper contract, name the slice to implement first. Or full_stop if it cannot
+    be narrowed. Never re_refine (the tests were never reached). A second consecutive timeout
+    escalates to the user automatically — a "[Timed-out execution]" note will say so.
   - Do NOT respond to a timeout by rewriting the spec into an implementation guide or adding a
     "state your approach first" instruction — on a timeout retry, extra prescriptiveness tends to
-    make the agent fixate and spiral rather than converge. The only spec change on a timeout is to
-    prepend one sentence telling the agent to write each output file as a minimal compiling
-    skeleton first and flesh it out in later turns. The fast-path note spells this out.
+    make the agent fixate and spiral rather than converge. Beyond narrowing scope, the only safe
+    spec change on a timeout is to prepend one sentence telling the agent to write each output
+    file as a minimal compiling skeleton first and flesh it out in later turns.
 
 Pre-implementation commitment for persistent capability failures:
   - When the agent has repeated the same NON-timeout mistake across multiple attempts (wrong
     algorithm, wrong types, same compile error), require it to state its approach for the failing
     area before writing any code. This surfaces misunderstandings in the trace early rather than
     after a full failed attempt.
-  - Do NOT apply this on a timeout retry: the agent ran out of wall-clock, and a "state your
-    approach first" preamble just consumes more of the budget it already lacked and tends to make
-    it spiral. On a timeout, the skeleton-first sentence is the only addition.
+  - Do NOT apply this on a timeout retry: a "state your approach first" preamble consumes window
+    the agent already could not fit the work into and tends to make it spiral. On a timeout,
+    narrow the scope; the skeleton-first sentence is the only other addition.
 
 Specificity ratchet for RECURRING failures:
   - For any failure class the compressed history tags RECURRING with 2 or more prior
@@ -781,10 +784,10 @@ Specificity ratchet for RECURRING failures:
     already read prose and failed. Escalate to verbatim code: include the exact function
     call, correct type, or a minimal working skeleton directly in the revised full_text.
     Write it literally so the agent can copy it without interpretation.
-  - Exception — timeouts: do NOT ratchet spec prescriptiveness on a timeout. The budget doubles
-    mechanically from the first timeout on, and added spec scaffolding on a timeout retry tends to
-    make the agent fixate and spiral. A timeout gets the bumped budget plus one skeleton-first
-    sentence, nothing more (see the "[Fast path — ... timeout]" note).
+  - Exception — timeouts: do NOT ratchet spec prescriptiveness on a timeout. A timeout is a
+    scope problem (see the Budget guidance above): narrow the spec, optionally add one
+    skeleton-first sentence, nothing more. Added scaffolding on a timeout retry tends to make
+    the agent fixate and spiral (see the "[Timed-out execution]" note).
   - Apply the verbatim-code ratchet to every RECURRING NON-timeout failure class, not just the
     most recent one.
 

@@ -138,21 +138,20 @@ func TestProgressTracker_ProgressWithin(t *testing.T) {
 	}
 }
 
-func TestExecCeiling(t *testing.T) {
-	cases := []struct {
-		budget time.Duration
-		want   time.Duration
-	}{
-		{15 * time.Minute, 45 * time.Minute}, // 3x
-		{5 * time.Minute, 15 * time.Minute},  // 3x=15m, above the budget+5m=10m floor
-		{60 * time.Second, 6 * time.Minute},  // 3x=3m below floor 60s+5m=6m -> 6m
-		{25 * time.Minute, 60 * time.Minute}, // 3x=75m capped at execMaxWall
-		{40 * time.Minute, 60 * time.Minute}, // capped
+// The EXECUTE_BEAD window is fixed now — the checkpoint cadence and the
+// absolute ceiling are constants, not derived from execution_budget (see
+// docs/execute-checkpoint-decouple-plan.md). Lock in the ordering the loop
+// relies on: a checkpoint fires before the per-turn stall window, and both
+// well inside the ceiling.
+func TestExecTimingConstantsOrdering(t *testing.T) {
+	if !(execCheckpointInterval < execStallWindow) {
+		t.Errorf("execCheckpointInterval (%v) must be < execStallWindow (%v)", execCheckpointInterval, execStallWindow)
 	}
-	for _, c := range cases {
-		if got := execCeiling(c.budget); got != c.want {
-			t.Errorf("execCeiling(%v) = %v, want %v", c.budget, got, c.want)
-		}
+	if !(execStallWindow < execAbsoluteCeiling) {
+		t.Errorf("execStallWindow (%v) must be < execAbsoluteCeiling (%v)", execStallWindow, execAbsoluteCeiling)
+	}
+	if !(execFinalizeGrace < execAbsoluteCeiling) {
+		t.Errorf("execFinalizeGrace (%v) must be < execAbsoluteCeiling (%v)", execFinalizeGrace, execAbsoluteCeiling)
 	}
 }
 

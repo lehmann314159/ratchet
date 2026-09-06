@@ -27,11 +27,17 @@ import (
 // stream in before we exit. A hard cancel fires after this window regardless.
 const writeGracePeriod = 2 * time.Minute
 
-// testExecBudget, when non-zero, overrides the wall-clock budget interval used
-// by runExecuteBeadReal's soft checkpoint / absolute ceiling timers. Tests set
-// it to a sub-second value so the stall-detection paths are reachable without
-// waiting minutes. Zero (the default) means: use the bead's execution_budget.
-var testExecBudget time.Duration
+// testExecCheckpointInterval / testExecCeiling, when non-zero, override
+// runExecuteBeadReal's soft checkpoint cadence and absolute ceiling. Tests set
+// them to sub-second values so the stall-detection paths are reachable without
+// waiting minutes. Zero (the default) means: use execCheckpointInterval /
+// execAbsoluteCeiling. These are fixed durations — EXECUTE_BEAD timing is no
+// longer derived from the bead's execution_budget (see
+// docs/execute-checkpoint-decouple-plan.md).
+var (
+	testExecCheckpointInterval time.Duration
+	testExecCeiling            time.Duration
+)
 
 // RunExecuteBeadMain is the entry point for the "ratchet execute-bead" subcommand.
 //
@@ -81,15 +87,16 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	ctx := context.Background()
 
 	var tracePath string
-	var budget int
 	var beadFullTextJSON string
 	var model string
 	var folderPath string
 	var beadID int64
 	var revisionID int64
 
+	// execution_budget is deliberately NOT selected: EXECUTE_BEAD timing is
+	// fixed (execCheckpointInterval / execAbsoluteCeiling), not budget-derived.
 	if err := d.QueryRowContext(ctx, `
-		SELECT e.trace_path, br.execution_budget, br.full_text, vma.model, p.folder_path, e.bead_id, br.id
+		SELECT e.trace_path, br.full_text, vma.model, p.folder_path, e.bead_id, br.id
 		FROM executions e
 		JOIN bead_revisions br ON br.id = e.bead_revision_id
 		JOIN beads b ON b.id = e.bead_id
@@ -97,7 +104,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 		JOIN verb_model_assignments vma
 		  ON vma.project_id = e.project_id AND vma.verb = 'EXECUTE_BEAD'
 		WHERE e.id = ?`, execID,
-	).Scan(&tracePath, &budget, &beadFullTextJSON, &model, &folderPath, &beadID, &revisionID); err != nil {
+	).Scan(&tracePath, &beadFullTextJSON, &model, &folderPath, &beadID, &revisionID); err != nil {
 		return fmt.Errorf("load execution %d: %w", execID, err)
 	}
 
@@ -128,14 +135,20 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	// 318 — memory/project_execute_progress_detection).
 	tracker := newProgressTracker(time.Now())
 
-	budgetDur := time.Duration(budget) * time.Second
-	if testExecBudget > 0 {
-		budgetDur = testExecBudget
+	// Fixed cadence + ceiling — NOT derived from execution_budget. A large budget
+	// used to push the first checkpoint out past the point of usefulness
+	// (baseline-15). See docs/execute-checkpoint-decouple-plan.md.
+	checkpointDur := execCheckpointInterval
+	if testExecCheckpointInterval > 0 {
+		checkpointDur = testExecCheckpointInterval
 	}
-	ceilingDur := execCeiling(budgetDur)
+	ceilingDur := execAbsoluteCeiling
+	if testExecCeiling > 0 {
+		ceilingDur = testExecCeiling
+	}
 
 	terminationCh := make(chan string, 1)
-	// budgetCheckpointCh: the wall-clock goroutine pings this once per budget
+	// budgetCheckpointCh: the wall-clock goroutine pings this once per checkpoint
 	// interval. The loop decides, between turns, whether to extend (forward
 	// progress this interval) or request a graceful finalize (none).
 	budgetCheckpointCh := make(chan struct{}, 1)
@@ -149,7 +162,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	signal.Notify(sigCh, syscall.SIGTERM)
 
 	go func() {
-		soft := time.NewTimer(budgetDur)
+		soft := time.NewTimer(checkpointDur)
 		defer soft.Stop()
 		hard := time.NewTimer(ceilingDur)
 		defer hard.Stop()
@@ -172,13 +185,13 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 			case <-ctx.Done():
 				return
 			case <-extendCh:
-				drainReset(soft, budgetDur)
+				drainReset(soft, checkpointDur)
 			case <-finalizeCh:
 				finalizing = true
 				drainReset(hard, execFinalizeGrace)
 			case <-soft.C:
 				trySignal(budgetCheckpointCh)
-				soft.Reset(budgetDur)
+				soft.Reset(checkpointDur)
 			case <-hard.C:
 				cause := "timeout"
 				if finalizing || time.Since(tracker.lastProductive()) > execStallWindow {
@@ -192,7 +205,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	}()
 
 	slog.Info("execute-bead started", "execution_id", execID, "model", model,
-		"budget_s", budget, "ceiling_s", int(ceilingDur.Seconds()))
+		"checkpoint_s", int(checkpointDur.Seconds()), "ceiling_s", int(ceilingDur.Seconds()))
 
 	// Sandbox all scratch work. write_file / read_file / run_command and the
 	// in-loop exit-criteria check operate in a per-attempt temp dir seeded from
@@ -447,7 +460,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 			switch {
 			case progressed:
 				// Forward progress this interval — keep going. The absolute
-				// wall-clock ceiling (execCeiling) is the real bound.
+				// wall-clock ceiling (execAbsoluteCeiling) is the real bound.
 				extensionsUsed++
 				writeLine(traceFile, fmt.Sprintf(
 					"[progress] budget checkpoint %d — forward progress detected, extending", extensionsUsed))

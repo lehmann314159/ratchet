@@ -6,11 +6,18 @@ import (
 )
 
 // Stall-detection tunables for one EXECUTE_BEAD attempt. See
-// docs/execute-progress-detection-plan.md and
+// docs/execute-progress-detection-plan.md,
+// docs/execute-checkpoint-decouple-plan.md, and
 // memory/project_execute_progress_detection for the rationale (baseline-14 bead
 // 318: the model's only stop condition was the wall-clock budget, and ADJUDICATE
 // mechanically doubled it on every timeout while retrying the identical spec —
 // nothing detected "same spec, same wall, no measurable progress").
+//
+// All fixed durations — they are NOT derived from the bead's execution_budget.
+// A large budget (from a pre-decouple fixture, or ADJUDICATE's old
+// timeout-doubling) used to push the first checkpoint out to 60 min and keep the
+// whole mechanism from firing (baseline-15). execution_budget no longer affects
+// EXECUTE_BEAD timing at all.
 const (
 	// execStallWindow: no productive turn (a write_file leaving an in-scope
 	// output file at a content hash it has not held before this attempt) for
@@ -18,18 +25,27 @@ const (
 	// 15m comfortably exceeds one full non-terminating muse-glimmer think turn
 	// (~16 384 tokens ≈ 30 min at ~9 tok/s would actually be longer — the
 	// window is measured from the last *productive* write, so a single long
-	// think that never writes still trips it after 15m).
+	// think that never writes still trips it after 15m). This per-turn check is
+	// the backstop for a stall that develops between checkpoint boundaries;
+	// execCheckpointInterval (below, 12m) is the primary trigger.
 	execStallWindow = 15 * time.Minute
 
-	// execHardCeilingFactor / execMaxWall bound the absolute wall-clock backstop
-	// (execCeiling): generous headroom over the ADJUDICATE-controlled budget for
-	// a model making steady progress, hard-capped so even a model that keeps
-	// writing (novel bytes every checkpoint) but never converges cannot run
-	// unbounded. This ceiling — not a checkpoint-extension count — is what
-	// bounds a steadily-progressing-but-slow attempt; it terminates as "timeout"
-	// (progress was seen), routing to ADJUDICATE's normal timeout handling.
-	execHardCeilingFactor = 3
-	execMaxWall           = 60 * time.Minute
+	// execCheckpointInterval: the soft wall-clock checkpoint cadence. Once per
+	// interval the loop decides — between turns — whether this interval saw
+	// forward progress (extend for another interval) or not (inject the one
+	// graceful-finalize directive). 12m is comfortably longer than one full
+	// non-terminating muse-glimmer think turn, and short enough that three
+	// checkpoint decisions fit inside execAbsoluteCeiling.
+	execCheckpointInterval = 12 * time.Minute
+
+	// execAbsoluteCeiling: the hard wall-clock backstop for one EXECUTE_BEAD
+	// attempt. A model making a novel write every checkpoint but never
+	// converging is extended past each soft checkpoint; this ceiling is what
+	// finally ends it, as "timeout" (progress was seen — routes to ADJUDICATE's
+	// repeated-timeout escalation, which treats a timeout as "bead too big",
+	// not "needs more wall-clock"). ≈ the old execMaxWall (60m) minus the
+	// headroom that existed only to absorb budget-doubling.
+	execAbsoluteCeiling = 45 * time.Minute
 
 	// execFinalizeGrace: after the one graceful-finalize directive is injected,
 	// the model gets a single turn; this bounds how long that turn may run
@@ -141,19 +157,6 @@ func (t *progressTracker) wall(now time.Time, turn int) (bool, string) {
 	default:
 		return false, ""
 	}
-}
-
-// execCeiling returns the absolute wall-clock backstop for one EXECUTE_BEAD
-// attempt, clamped to [budget+5m, execMaxWall].
-func execCeiling(budget time.Duration) time.Duration {
-	c := budget * execHardCeilingFactor
-	if lo := budget + 5*time.Minute; c < lo {
-		c = lo
-	}
-	if c > execMaxWall {
-		c = execMaxWall
-	}
-	return c
 }
 
 // hashLedger tracks, per in-scope output file, the set of content hashes it has

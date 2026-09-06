@@ -184,21 +184,6 @@ func RealWork() float64 { x := 2.0; return x * x }
 	}
 }
 
-func TestEnforcedTimeoutBudget(t *testing.T) {
-	cases := []struct{ prior, def, want int }{
-		{900, 900, 1800},  // first escalation
-		{1800, 900, 3600}, // compounds
-		{3600, 900, 7200}, // reaches ceiling (8x default)
-		{7200, 900, 7200}, // clamped at ceiling
-		{5000, 900, 7200}, // clamped from below the doubled value
-	}
-	for _, c := range cases {
-		if got := enforcedTimeoutBudget(c.prior, c.def); got != c.want {
-			t.Errorf("enforcedTimeoutBudget(%d, %d) = %d, want %d", c.prior, c.def, got, c.want)
-		}
-	}
-}
-
 func TestCountTrailingTimeouts(t *testing.T) {
 	d := openTestDB(t)
 	seedProject(t, d, -1, "fixture: trailing-timeout counting for ADJUDICATE budget escalation")
@@ -224,49 +209,44 @@ func TestCountTrailingTimeouts(t *testing.T) {
 	}
 }
 
-// TestAdjudicateCommit_TimeoutEscalatesBudget locks in the fail-fast fix born
-// from the exprvm-web-baseline-6 parser beads: a one-turn-generation timeout
-// where ADJUDICATE left execution_budget at 900 and ratcheted spec prose over
-// two rounds. Commit must now double the budget mechanically from the FIRST
-// timeout, regardless of the model's value, and compound on the next.
-func TestAdjudicateCommit_TimeoutEscalatesBudget(t *testing.T) {
-	run := func(t *testing.T, trailing, priorBudget, wantBudget int, decision string) {
+// TestAdjudicateCommit_TimeoutDoesNotChangeBudget: post-decouple
+// (docs/execute-checkpoint-decouple-plan.md) a timeout no longer doubles
+// execution_budget — the column is inert and EXECUTE_BEAD timing is fixed. A
+// single trailing timeout retries the bead normally; the stored budget is only
+// floored at the project default, never bumped past it.
+func TestAdjudicateCommit_TimeoutDoesNotChangeBudget(t *testing.T) {
+	run := func(t *testing.T, decision string) {
 		t.Helper()
 		d := openTestDB(t)
 		ctx := context.Background()
-		seedProject(t, d, -1, "fixture: ADJUDICATE mechanical budget escalation on timeout")
+		seedProject(t, d, -1, "fixture: timeout does not change budget")
 		beadID, revID := seedBead(t, d, -1, "parser")
-		for i := 0; i < trailing; i++ {
-			seedExecution(t, d, -1, beadID, revID, "timeout", nil)
-		}
-		// Put the just-executed revision's budget where the test wants it.
-		if _, err := d.ExecContext(ctx, `UPDATE bead_revisions SET execution_budget = ? WHERE id = ?`,
-			priorBudget, revID); err != nil {
-			t.Fatalf("set prior budget: %v", err)
+		seedExecution(t, d, -1, beadID, revID, "timeout", nil)
+		if _, err := d.ExecContext(ctx, `UPDATE bead_revisions SET execution_budget = 900 WHERE id = ?`, revID); err != nil {
+			t.Fatalf("set budget: %v", err)
 		}
 		job := seedJob(t, d, -1, db.VerbAdjudicateNextExecution, sql.NullInt64{Int64: beadID, Valid: true})
 
 		h := &AdjudicateNextExecution{
 			budgetDefault:    900,
 			folderPath:       t.TempDir(),
-			trailingTimeouts: trailing,
+			trailingTimeouts: 1,
 			currentBeadSpec: ParsedBead{
 				Title: "parser", FullText: "spec for parser",
 				OutputFiles: []string{"parser.go"}, ExitCriteria: []string{"go test ./..."},
-				ExecutionBudget: priorBudget,
+				ExecutionBudget: 900,
 			},
 		}
 		parsed := AdjudicateNextExecutionOutput{
 			Trend: "same", BeadSpecFit: "execution_capability_problem",
-			Reasoning: "timed out; the agent runs out of time before writing",
+			Reasoning: "timed out; narrowing the spec to the lexer only",
 			Decision:  decision,
 		}
 		if decision == "execute_revised" {
 			parsed.RevisedBead = &ParsedBead{
-				Title: "parser", FullText: "Write parser.go with a compiling skeleton first.",
+				Title: "parser", FullText: "Narrowed: implement only the lexer in parser.go.",
 				OutputFiles: []string{"parser.go"}, ExitCriteria: []string{"go test ./..."},
-				ExecutionBudget: priorBudget, // model left it unchanged — Commit must override
-				MonitorOverride: "honor",
+				ExecutionBudget: 900, MonitorOverride: "honor",
 			}
 		}
 
@@ -279,12 +259,67 @@ func TestAdjudicateCommit_TimeoutEscalatesBudget(t *testing.T) {
 			WHERE b.id = ?`, beadID).Scan(&budget); err != nil {
 			t.Fatalf("read current revision budget: %v", err)
 		}
-		if budget != wantBudget {
-			t.Errorf("execution_budget = %d, want %d", budget, wantBudget)
+		if budget != 900 {
+			t.Errorf("execution_budget = %d, want 900 — a timeout must not bump the budget any more", budget)
+		}
+		var status string
+		_ = d.QueryRowContext(ctx, `SELECT status FROM handoff_jobs WHERE id = ?`, job.ID).Scan(&status)
+		if status == "escalated" {
+			t.Errorf("a single trailing timeout must not escalate")
+		}
+		if n := countRows(t, d, `SELECT COUNT(*) FROM handoff_jobs WHERE verb = ? AND bead_id = ?`, db.VerbExecuteBead, beadID); n != 1 {
+			t.Errorf("EXECUTE_BEAD jobs enqueued = %d, want 1 (the retry)", n)
 		}
 	}
 
-	t.Run("first timeout, execute_revised", func(t *testing.T) { run(t, 1, 900, 1800, "execute_revised") })
-	t.Run("second timeout compounds", func(t *testing.T) { run(t, 2, 1800, 3600, "execute_revised") })
-	t.Run("first timeout, execute_as_is bumps in place", func(t *testing.T) { run(t, 1, 900, 1800, "execute_as_is") })
+	t.Run("execute_revised", func(t *testing.T) { run(t, "execute_revised") })
+	t.Run("execute_as_is", func(t *testing.T) { run(t, "execute_as_is") })
+}
+
+// TestAdjudicateEscalatesOnSecondConsecutiveTimeout: two consecutive in-lineage
+// timeouts escalate the ADJUDICATE job (mirrors the 2-stall escalation) — post-
+// decouple there is no "give it more wall-clock" retry for a timeout.
+func TestAdjudicateEscalatesOnSecondConsecutiveTimeout(t *testing.T) {
+	for _, decision := range []string{"execute_revised", "execute_as_is"} {
+		t.Run(decision, func(t *testing.T) {
+			d := openTestDB(t)
+			ctx := context.Background()
+			seedProject(t, d, -1, "fixture: repeated timeout escalation")
+			beadID, revID := seedBead(t, d, -1, "parser")
+			seedExecution(t, d, -1, beadID, revID, "timeout", nil)
+			seedExecution(t, d, -1, beadID, revID, "timeout", nil)
+			job := seedJob(t, d, -1, db.VerbAdjudicateNextExecution, sql.NullInt64{Int64: beadID, Valid: true})
+
+			h := &AdjudicateNextExecution{
+				budgetDefault:    900,
+				folderPath:       t.TempDir(),
+				trailingTimeouts: 2,
+				currentBeadSpec: ParsedBead{
+					Title: "parser", FullText: "spec", OutputFiles: []string{"parser.go"},
+					ExitCriteria: []string{"go test ./..."}, ExecutionBudget: 900,
+				},
+			}
+			parsed := AdjudicateNextExecutionOutput{
+				Trend: "same", BeadSpecFit: "execution_capability_problem",
+				Reasoning: "timed out again",
+				Decision:  decision,
+			}
+			if decision == "execute_revised" {
+				parsed.RevisedBead = &ParsedBead{
+					Title: "parser", FullText: "narrower", OutputFiles: []string{"parser.go"},
+					ExitCriteria: []string{"go test ./..."}, ExecutionBudget: 900, MonitorOverride: "honor",
+				}
+			}
+
+			inTx(t, d, func(tx *sql.Tx) error { return h.Commit(ctx, tx, job, parsed) })
+
+			var status string
+			if err := d.QueryRowContext(ctx, `SELECT status FROM handoff_jobs WHERE id = ?`, job.ID).Scan(&status); err != nil {
+				t.Fatalf("job status: %v", err)
+			}
+			if status != "escalated" {
+				t.Errorf("job status = %q, want escalated on the second consecutive timeout", status)
+			}
+		})
+	}
 }

@@ -176,7 +176,7 @@ func TestRunExecuteBeadReal_StrayFileIsDiscardedAndNextAttemptIsClean(t *testing
 // finalize directive is injected, then the attempt ends as 'stalled' — and the
 // partial file it did write is still copied back (PR #7 flush on every path).
 func TestRunExecuteBeadReal_PartialProgressSurvivesStall(t *testing.T) {
-	withTestExecBudget(t, 30*time.Millisecond)
+	withTestExecCheckpoint(t, 30*time.Millisecond)
 	var turn atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -219,7 +219,7 @@ func TestRunExecuteBeadReal_PartialProgressSurvivesStall(t *testing.T) {
 // with no progress, gets exactly one finalize directive, and terminates
 // 'stalled' — not 'success', not 'no_write'.
 func TestRunExecuteBeadReal_StallToFinalizeToStalled(t *testing.T) {
-	withTestExecBudget(t, 30*time.Millisecond)
+	withTestExecCheckpoint(t, 30*time.Millisecond)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		time.Sleep(45 * time.Millisecond)
@@ -283,7 +283,7 @@ func TestRunExecuteBeadReal_ReasoningSpiralIsStalled(t *testing.T) {
 // materially-changed output file every turn is never walled — it extends past
 // budget checkpoints and finishes 'success'.
 func TestRunExecuteBeadReal_SteadyProgressIsNotStalled(t *testing.T) {
-	withTestExecBudget(t, 30*time.Millisecond)
+	withTestExecCheckpoint(t, 30*time.Millisecond)
 	var turn atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -383,14 +383,16 @@ func writeLengthCapEmpty(w http.ResponseWriter) {
 	})
 }
 
-// withTestExecBudget overrides runExecuteBeadReal's wall-clock budget interval
+// withTestExecCheckpoint overrides runExecuteBeadReal's fixed checkpoint cadence
 // for the duration of one test so the stall / checkpoint paths are reachable in
-// milliseconds.
-func withTestExecBudget(t *testing.T, d time.Duration) {
+// milliseconds. The absolute ceiling is left at its real value (tests exercise
+// the finalize→stalled path, not the hard timer); pass testExecCeiling directly
+// if a test needs the ceiling to fire.
+func withTestExecCheckpoint(t *testing.T, interval time.Duration) {
 	t.Helper()
-	old := testExecBudget
-	testExecBudget = d
-	t.Cleanup(func() { testExecBudget = old })
+	old := testExecCheckpointInterval
+	testExecCheckpointInterval = interval
+	t.Cleanup(func() { testExecCheckpointInterval = old })
 }
 
 func seedRunProject(t *testing.T, d *db.DB, folder string) {

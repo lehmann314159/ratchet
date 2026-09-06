@@ -63,8 +63,31 @@ func TestStalledExecutionNote(t *testing.T) {
 	}
 	seedExecution(t, d, -1, beadID, revID, "stalled", &zero)
 	note := stalledExecutionNote(ctx, d, beadID)
-	if !strings.Contains(note, "Stalled execution") || !strings.Contains(note, "must not be") {
+	if !strings.Contains(note, "Stalled execution") || !strings.Contains(note, "NOT a wall-clock problem") {
 		t.Errorf("stalled note missing expected guidance:\n%s", note)
+	}
+}
+
+func TestTimeoutExecutionNote(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "fixture: timeout note")
+	beadID, revID := seedBead(t, d, -1, "B01")
+	zero := 0
+
+	if note := timeoutExecutionNote(ctx, d, beadID); note != "" {
+		t.Fatalf("no executions: note = %q, want empty", note)
+	}
+	seedExecution(t, d, -1, beadID, revID, "stalled", &zero)
+	if note := timeoutExecutionNote(ctx, d, beadID); note != "" {
+		t.Errorf("latest is stalled: timeout note should be empty, got %q", note)
+	}
+	seedExecution(t, d, -1, beadID, revID, "timeout", &zero)
+	note := timeoutExecutionNote(ctx, d, beadID)
+	if !strings.Contains(note, "Timed-out execution") ||
+		!strings.Contains(note, "SCOPE") ||
+		!strings.Contains(note, "no budget to increase") {
+		t.Errorf("timeout note missing expected guidance:\n%s", note)
 	}
 }
 
