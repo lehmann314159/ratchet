@@ -192,20 +192,40 @@ checks catch their (revised) targets with no fractalviz false positives.
 incumbent metrics; the re_refine loop's per-cycle cost drops without catch-rate
 regression.
 
+### Pre-lsystem gate — CLEARED 2026-09-07
+
+**Decision (Mike, 2026-09-07): the landed stack is sufficient to attempt the next
+lsystem run now, as an explicit settling run — do NOT wait for CRITIQUE (C).**
+
+What clears the gate:
+
+| lsystem blocker | addressed by | landed |
+|---|---|---|
+| baseline-1: DECOMPOSE garbled the "head before the first `(`" rule | the verbatim head-vs-params **pin** | `abac583` (pre-session) |
+| demo-run #1: EXECUTE/MONITOR GPU-contention stall | safe-subset MONITOR cap + transient routing | `893b156` |
+| demo-run #2: `F[+]`→3 locked test → EXECUTE spiral → escalation | Phase 0 (E) `re_refine`-from-stall + (F) content-stall watchdog | `7315948` |
+| pin carry-through (2 `grammar` pins, only last injected) | Phase 1 (A) core multi-pin injection | `b4ae16e` |
+
+**Not** cleared / deliberately deferred past this run: CRITIQUE (C) *prevents*
+the bad `F[+]` test; Phase 0 (E) only *recovers* from it. Running lsystem now is
+the end-to-end test of that recovery path — the `qual-corpus-lsystem-2` fixture
+cannot replay it (all its bead-2 executions are `infra_failure` or incomplete,
+pre-`893b156`). If E fires correctly on the `F[+]` class the run validates it; if
+not, that is the highest-value next finding.
+
 ### Phase 3 — integration (the only place full-run confounding is allowed)
 
-7. **Build the offline integration fixture.** `save-fixture` from
-   `qual-corpus-lsystem-2` at the bead-2 boundary (bead 1 succeeded, bead 2
-   pending). Replay bead 2 through each affected verb with the full Phase 0–2
-   stack landed. Acceptance — all three known grammar defects resolved offline:
-   - the "before the first `(`" head clause survives DECOMPOSE verbatim;
-   - CRITIQUE (or `cmd/checkdesigndoc` upstream) flags the `F[+]`→3 test;
-   - if a bad locked test still slips through, ADJUDICATE routes it to
-     `re_refine`, not escalation.
+7. ~~**Build the offline integration fixture.**~~ **Not feasible** — the
+   `qual-corpus-lsystem-2` fixture's bead-2 executions are all infra-masked or
+   incomplete (pre-`893b156`), so there is no clean `stalled` execution to
+   replay. The live run in step 8 is the integration test instead.
 
-8. **One full from-scratch lsystem run.** Expect 1–2 settling findings from
-   cross-change interactions that no offline replay surfaced. This is planned,
-   not a failure — do not call the first post-chain run "done."
+8. **One full from-scratch lsystem run** (settling run — see the pre-lsystem gate
+   above). Expect 1–2 settling findings from cross-change interactions. This is
+   planned, not a failure — do not call the first post-chain run "done." Watch:
+   does bead 2 (`grammar`) still get a doc-contradicting locked test, and if so
+   does ADJUDICATE route the resulting stall to `re_refine` (Phase 0 E) rather
+   than burning retries to escalation? Does (F) cap the spiral near ~10 min?
 
 9. **Settle.** Fix the settling findings → second full run → if clean,
    `save-fixture` + promote to a fleet baseline. Until then, **fractalviz**
