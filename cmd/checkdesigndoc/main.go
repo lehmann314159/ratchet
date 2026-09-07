@@ -37,7 +37,7 @@ import (
 
 func main() {
 	docPath := flag.String("doc", "", "path to the design doc markdown file (required)")
-	checks := flag.String("checks", "all", "comma-separated checks to run: pins, ambiguity, all")
+	checks := flag.String("checks", "all", "comma-separated checks to run: pins, ambiguity, construction-form, all")
 	flag.Parse()
 	if *docPath == "" {
 		fmt.Fprintln(os.Stderr, "checkdesigndoc: --doc is required")
@@ -51,29 +51,41 @@ func main() {
 	}
 	content := string(data)
 
-	runPins, runAmbiguity := false, false
+	runPins, runAmbiguity, runConstructionForm := false, false, false
 	for _, c := range strings.Split(*checks, ",") {
 		switch strings.TrimSpace(c) {
 		case "all":
-			runPins, runAmbiguity = true, true
+			runPins, runAmbiguity, runConstructionForm = true, true, true
 		case "pins":
 			runPins = true
 		case "ambiguity":
 			runAmbiguity = true
+		case "construction-form":
+			runConstructionForm = true
 		case "":
 		default:
-			fmt.Fprintf(os.Stderr, "checkdesigndoc: unknown check %q (want: pins, ambiguity, all)\n", c)
+			fmt.Fprintf(os.Stderr, "checkdesigndoc: unknown check %q (want: pins, ambiguity, construction-form, all)\n", c)
 			os.Exit(2)
 		}
 	}
 
-	if runAmbiguity {
-		reportAmbiguity(os.Stdout, *docPath, content)
-	}
-	if runPins {
-		if runAmbiguity {
+	printed := false
+	sep := func() {
+		if printed {
 			fmt.Fprintln(os.Stdout)
 		}
+		printed = true
+	}
+	if runAmbiguity {
+		sep()
+		reportAmbiguity(os.Stdout, *docPath, content)
+	}
+	if runConstructionForm {
+		sep()
+		reportConstructionForm(os.Stdout, *docPath, content)
+	}
+	if runPins {
+		sep()
 		reportPins(os.Stdout, content)
 	}
 }
@@ -178,6 +190,147 @@ func extractPins(section string) []string {
 // into a single display line.
 func collapseWhitespace(s string) string {
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// ---------------------------------------------------------------------------
+// construction-form check
+// ---------------------------------------------------------------------------
+//
+// A Cross-Bead Contract that hands a slice of a polymorphic type ([]Stmt, []Expr,
+// []Shape — a named type that is never constructed directly, only via ≥2 concrete
+// brace-literal variants) across a bead boundary, without stating whether the
+// elements are struct values or pointers, is the b314 defect: exprvm-web's
+// `parser → compiler` contract lists `[]Stmt` with `AssignStmt{…}` /
+// `PrintStmt{…}` / `ExprStmt{…}` all as value-form literals but never says
+// value-not-pointer. The scaffold used value receivers, so `T` and `*T` both
+// satisfy the interface; the impl picked `*ExprStmt`, the test picked `ExprStmt`,
+// and REFINE_TESTS burned a re_refine on it — twice in one run (b314 and the
+// b316 replay). This flags the site so the doc gets a value/pointer pin (a
+// hand-off to design-doc precision guidance, which covers the wording).
+
+var (
+	// contractSubheadingRe splits the Cross-Bead Contracts section into its
+	// "### <producer> → <consumer>" blocks.
+	contractSubheadingRe = regexp.MustCompile(`(?m)^### .+$`)
+	// polymorphicEnumRe matches the "`Name` is `A{…}`, `B{…}`, or `C{…}`" shape a
+	// contract uses to enumerate an interface/sum type's concrete variants —
+	// exprvm-web's "where `Stmt` is `AssignStmt{Name string, Value Expr}`,
+	// `PrintStmt{Value Expr}`, or `ExprStmt{Value Expr}`". The capture is the
+	// polymorphic type name; the trailing brace-literal count is checked
+	// separately so a two-line soft wrap doesn't defeat the match.
+	polymorphicEnumRe = regexp.MustCompile("`([A-Z]\\w*)`\\s+is\\s+`[A-Z]\\w*\\{")
+)
+
+func reportConstructionForm(w *os.File, path, content string) {
+	fmt.Fprintln(w, "== construction-form ==")
+	fmt.Fprintln(w, "Cross-Bead Contracts that enumerate a polymorphic type's concrete variants")
+	fmt.Fprintln(w, "(\"`Stmt` is `AssignStmt{…}`, `PrintStmt{…}`, or `ExprStmt{…}`\") without saying")
+	fmt.Fprintln(w, "whether instances are struct values or pointers. Each hit needs a value/pointer")
+	fmt.Fprintln(w, "line in the contract (or a Decomposition Notes pin). See the b314 incident.")
+	fmt.Fprintln(w)
+
+	if extractSection(content, "Cross-Bead Contracts") == "" {
+		fmt.Fprintln(w, "SKIPPED: no \"## Cross-Bead Contracts\" section.")
+		return
+	}
+	findings := scanConstructionForm(content)
+	if len(findings) == 0 {
+		fmt.Fprintln(w, "0 site(s) flagged.")
+		return
+	}
+	for _, f := range findings {
+		fmt.Fprintf(w, "  %s:%d  %s\n", path, f.line, f.quote)
+	}
+	fmt.Fprintf(w, "\n%d site(s) flagged.\n", len(findings))
+}
+
+// scanConstructionForm returns one finding per polymorphic type enumerated in a
+// Cross-Bead Contract block that has no value-vs-pointer statement.
+func scanConstructionForm(content string) []finding {
+	section := extractSection(content, "Cross-Bead Contracts")
+	if section == "" {
+		return nil
+	}
+	sectionStart := strings.Index(content, section)
+
+	var findings []finding
+	for _, blk := range splitContractBlocks(section) {
+		body := blk.text
+		if constructionFormDisambiguated(body) {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, m := range polymorphicEnumRe.FindAllStringSubmatchIndex(body, -1) {
+			name := body[m[2]:m[3]]
+			if seen[name] {
+				continue
+			}
+			// Require at least two distinct brace-literal variants in the ~240
+			// chars after "`Name` is " — the enumeration, not a one-off.
+			tail := body[m[0]:min(len(body), m[0]+240)]
+			variants := map[string]bool{}
+			for _, v := range braceLiteralNameRe.FindAllStringSubmatch(tail, -1) {
+				if v[1] != name {
+					variants[v[1]] = true
+				}
+			}
+			if len(variants) < 2 {
+				continue
+			}
+			seen[name] = true
+			idx := sectionStart + blk.offset + m[0]
+			findings = append(findings, finding{
+				line:  lineNumber(content, idx),
+				quote: fmt.Sprintf("%s — `%s` (polymorphic, %d+ variants) has no value/pointer statement", strings.TrimSpace(blk.heading), name, len(variants)),
+			})
+		}
+	}
+	return findings
+}
+
+var braceLiteralNameRe = regexp.MustCompile(`([A-Z]\w*)\{`)
+
+type contractBlock struct {
+	heading string
+	text    string
+	offset  int // byte offset of text within the Cross-Bead Contracts section
+}
+
+// splitContractBlocks divides the Cross-Bead Contracts section body into its
+// "### " subsections. A leading preamble before the first "### " is ignored.
+func splitContractBlocks(section string) []contractBlock {
+	locs := contractSubheadingRe.FindAllStringIndex(section, -1)
+	var blocks []contractBlock
+	for i, m := range locs {
+		end := len(section)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		headingLine := section[m[0]:m[1]]
+		blocks = append(blocks, contractBlock{
+			heading: strings.TrimPrefix(headingLine, "### "),
+			text:    section[m[0]:end],
+			offset:  m[0],
+		})
+	}
+	return blocks
+}
+
+// constructionFormDisambiguated reports whether a contract block already says,
+// somewhere, whether its polymorphic-slice elements are values or pointers.
+func constructionFormDisambiguated(block string) bool {
+	// Phrases that state value-vs-pointer. Deliberately NOT a bare "value" —
+	// "Value Expr" is a common field name in exactly these contracts.
+	if regexp.MustCompile(`(?i)\bpointers?\b|\bby value\b|\bas values?\b|\bvalue type\b|\bvalue semantics\b|\bnon-pointer\b`).MatchString(block) {
+		return true
+	}
+	// A "&Name{" construction example, or a "[]*Name" slice-of-pointer element
+	// type, anywhere in the block resolves it. (A bare "*Program{" does NOT —
+	// that disambiguates Program, not the polymorphic Stmt/Expr elements.)
+	if regexp.MustCompile(`&[A-Z]\w*\{|\[\]\*[A-Z]\w*`).MatchString(block) {
+		return true
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------

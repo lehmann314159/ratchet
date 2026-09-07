@@ -252,7 +252,30 @@ skip it.
 
 ### Phase 2 — promote scenario/behavioral literals to enforced pins
 
-Attacks gap #3.
+**Status: construction-form check LANDED 2026-09-07 (`main`), unpinned-literal
+check DEFERRED to design-doc guidance (B).** Scope chosen with Mike: the
+construction-form check targets a corpus-verified recurring bug (b314 + the
+independent b316 replay) with a small false-positive surface; the unpinned-literal
+check is tuning-heavy and its output feeds B, which is not being built yet, and
+the second gate target ("trailing-newline trim direction") is not conservatively
+mechanically catchable (prose, no quoted literal).
+
+What shipped: `cmd/checkdesigndoc --checks=construction-form` (also in `all`).
+`scanConstructionForm` flags a Cross-Bead Contract `### ` block that enumerates a
+polymorphic type's concrete variants — the `` `Stmt` is `AssignStmt{…}`,
+`PrintStmt{…}`, or `ExprStmt{…}` `` shape (`polymorphicEnumRe` + a ≥2-distinct-
+brace-variant check) — with no value/pointer disambiguation
+(`constructionFormDisambiguated`: `pointer(s)`, `by value`, `as value(s)`, `value
+type/semantics`, `non-pointer`, a `&T{` example, or a `[]*T` element type). Report
+only. Gate met: flags exprvm-web's `parser → compiler` `Stmt` **and** `Expr`; 0 on
+fractalviz / lsystem / connect-four-v1 / tictactoe-v1 / checkers / kafka / tasklist
+(the haiku `historyView{Items []Haiku}` false positive was designed out — a
+concrete slice type has no enumeration shape). Tests: `main_test.go`
+`TestConstructionForm_*` incl. `_realDocs`. `check-design-doc` skill step 2 updated.
+
+---
+
+Original plan (attacks gap #3):
 
 - Extend `checkdesigndoc` (new check, or extend `pins`): flag every exact quoted
   string literal and `X = <number>` equation inside Domain-Specific Test

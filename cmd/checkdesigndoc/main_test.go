@@ -171,6 +171,71 @@ func TestFixtureDocs_regressionAnchors(t *testing.T) {
 	}
 }
 
+// --- construction-form check ---
+
+const stmtContract = "## Cross-Bead Contracts\n\n### parser → compiler (format)\n\n" +
+	"- **interface**: `*Program{Statements []Stmt}`, where `Stmt` is " +
+	"`AssignStmt{Name string, Value Expr}`, `PrintStmt{Value Expr}`, or `ExprStmt{Value Expr}`.\n" +
+	"- **notes**: `parser.go` performs no variable-definedness checking.\n"
+
+func TestConstructionForm_flagsPolymorphicEnumWithoutPointerStatement(t *testing.T) {
+	got := scanConstructionForm(stmtContract)
+	if len(got) != 1 {
+		t.Fatalf("want 1 finding, got %d: %+v", len(got), got)
+	}
+	if !strings.Contains(got[0].quote, "`Stmt`") {
+		t.Errorf("finding should name Stmt: %q", got[0].quote)
+	}
+}
+
+func TestConstructionForm_clearedByValueStatement(t *testing.T) {
+	doc := stmtContract + "  Elements of `[]Stmt` are struct values, not pointers.\n"
+	if got := scanConstructionForm(doc); len(got) != 0 {
+		t.Fatalf("an explicit value/pointer statement must clear it, got %+v", got)
+	}
+}
+
+func TestConstructionForm_clearedByPointerConstructionExample(t *testing.T) {
+	doc := "## Cross-Bead Contracts\n\n### parser → compiler (format)\n\n" +
+		"- **interface**: `*Program{Statements []Stmt}`, where `Stmt` is " +
+		"`&AssignStmt{...}`, `&PrintStmt{...}`, or `&ExprStmt{...}` (heap-allocated).\n"
+	if got := scanConstructionForm(doc); len(got) != 0 {
+		t.Fatalf("a &T{} construction example must clear it, got %+v", got)
+	}
+}
+
+// TestConstructionForm_ignoresConcreteSliceType is the haiku-generator
+// false-positive regression: `historyView{Items []Haiku}` is a slice of a
+// concrete domain struct, not an enumerated polymorphic type — no "`Haiku` is
+// `X{…}`, `Y{…}`" shape, so no finding.
+func TestConstructionForm_ignoresConcreteSliceType(t *testing.T) {
+	doc := "## Cross-Bead Contracts\n\n### handlers → templates (data-shape)\n\n" +
+		"- **interface**: `panelView{Theme string; Haiku *haikuView}` and " +
+		"`historyView{Items []Haiku}` and `emailStatusView{OK bool}`.\n"
+	if got := scanConstructionForm(doc); len(got) != 0 {
+		t.Fatalf("a concrete slice type must not flag, got %+v", got)
+	}
+}
+
+func TestConstructionForm_realDocs(t *testing.T) {
+	cases := map[string]int{
+		"../../docs/fixture-design-docs/exprvm-web.md":         2, // Stmt + Expr
+		"../../docs/design-docs/fractalviz-design-doc.md":      0,
+		"../../docs/design-docs/lsystem-studio-design-doc.md":  0,
+		"../../docs/design-docs/connect-four-v1-design-doc.md": 0,
+		"../../docs/design-docs/tictactoe-v1-design-doc.md":    0,
+	}
+	for path, want := range cases {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Skipf("%s: %v", path, err)
+		}
+		if got := len(scanConstructionForm(string(data))); got != want {
+			t.Errorf("%s: %d flagged, want %d", filepath.Base(path), got, want)
+		}
+	}
+}
+
 func TestPins_recognizesBoldScenarioLeadIns(t *testing.T) {
 	section := `
 **Scenario A — first tier only (` + "`--usage 500`" + `):**

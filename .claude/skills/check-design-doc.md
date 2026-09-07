@@ -25,8 +25,14 @@ structural sections, say so and stop — there is nothing to check yet.
 ### 2. Mechanical pass
 
 Run `go run ./cmd/checkdesigndoc --doc <path> --checks=all` and capture the full
-report: the pin-vs-scenario counts and the class 1/2/6/7/17 ambiguity hits. Keep the
-exact `path:line` references.
+report: the pin-vs-scenario counts, the class 1/2/6/7/17 ambiguity hits, and any
+`construction-form` hits. Keep the exact `path:line` references.
+
+A `construction-form` hit means a Cross-Bead Contract enumerates a polymorphic
+type's variants (`` `Stmt` is `AssignStmt{…}`, `PrintStmt{…}`, … ``) without
+saying whether instances are struct values or pointers — the b314 defect. Carry
+it as a NEEDS DECISION row; resolve it by adding one sentence to the contract
+(and, if the value crosses into a test assertion, a Decomposition Notes pin).
 
 ### 3. Judgment pass — independent
 
