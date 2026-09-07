@@ -95,6 +95,14 @@ var (
 // before the first chunk). It is classified transient by IsTransient.
 var ErrStreamIdle = errors.New("ollama stream idle timeout")
 
+// ErrContentStall is returned by ChatWithTools when Options.ContentStallTimeout
+// is set and the stream produced only `thinking` tokens (no assistant content,
+// no tool-call delta) for that long. Unlike ErrStreamIdle it is a genuine
+// model-behavior signal — a reasoning spiral that never converges — so it is
+// NOT classified transient: the caller (EXECUTE_BEAD) routes it to a 'stalled'
+// termination that reaches ADJUDICATE, rather than silently retrying.
+var ErrContentStall = errors.New("ollama content stall: only thinking tokens")
+
 // HTTPStatusError is returned by Chat and ChatWithTools when Ollama responds
 // with a non-200 status. Typed rather than a formatted string so the
 // orchestrator can classify a 5xx/429 as a transient infrastructure error
@@ -320,6 +328,20 @@ type Options struct {
 	// content and never call the tool (root-caused 2026-08-31,
 	// docs/format-json-tool-turn.md).
 	OmitFormat bool
+	// ContentStallTimeout, when > 0, aborts a ChatWithTools turn with
+	// ErrContentStall if this much wall-clock passes with the stream producing
+	// only `thinking` tokens — no assistant content, no tool-call delta — after
+	// the first chunk. It sits between streamIdleTimeout (3m, which a live
+	// thinking stream keeps resetting) and a caller's turn-boundary checks
+	// (which cannot fire mid-turn): the muse-glimmer planning spiral is a single
+	// 25+ minute think turn with content_chars flat.
+	//
+	// Only honored by ChatWithTools. Leave zero for a verb whose turn
+	// legitimately thinks for many minutes and then emits its whole JSON answer
+	// at once (ADJUDICATE_NEXT_EXECUTION, REFINE_TESTS_CRITIQUE) — there the
+	// content genuinely arrives only at the end. EXECUTE_BEAD sets it because a
+	// productive turn there streams content and/or a tool call along the way.
+	ContentStallTimeout time.Duration
 }
 
 type chatRequest struct {
@@ -578,6 +600,7 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 	var format any = "json"
 	var think *bool
 	omitFormat := false
+	var contentStallTimeout time.Duration
 
 	// Per-call recording for the qualification harness / capture instrumentation.
 	// One record per ChatWithTools call (== one turn; the caller runs the loop).
@@ -615,6 +638,9 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		if opts.OmitFormat {
 			format = nil
 			omitFormat = true
+		}
+		if opts.ContentStallTimeout > 0 {
+			contentStallTimeout = opts.ContentStallTimeout
 		}
 		think = opts.Think
 	}
@@ -705,9 +731,17 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		<-watchdogDone
 	}()
 	var idleFired atomic.Bool
+	var contentStallFired atomic.Bool
 	var streamStarted atomic.Bool
 	var lastActivityNano atomic.Int64
 	lastActivityNano.Store(time.Now().UnixNano())
+	// lastContentNano tracks the last stream event that was NOT purely thinking
+	// — the first chunk, an assistant-content token, or a tool-call delta. When
+	// contentStallTimeout is set, a gap past it means the model has been
+	// streaming only `thinking` for that long (a non-converging reasoning
+	// spiral). Seeded on the first chunk, so the model gets the full timeout of
+	// thinking room after prompt-eval completes.
+	var lastContentNano atomic.Int64
 	go func() {
 		defer close(watchdogDone)
 		t := time.NewTicker(streamIdlePollInterval)
@@ -723,6 +757,12 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 				}
 				if time.Since(time.Unix(0, lastActivityNano.Load())) > limit {
 					idleFired.Store(true)
+					cancelReq()
+					return
+				}
+				if contentStallTimeout > 0 && streamStarted.Load() &&
+					time.Since(time.Unix(0, lastContentNano.Load())) > contentStallTimeout {
+					contentStallFired.Store(true)
 					cancelReq()
 					return
 				}
@@ -749,6 +789,9 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 			if err == io.EOF {
 				break
 			}
+			if contentStallFired.Load() {
+				return Message{}, fmt.Errorf("%w for %s (model %s)", ErrContentStall, contentStallTimeout, model)
+			}
 			if idleFired.Load() {
 				limit := streamIdleTimeout
 				if !streamStarted.Load() {
@@ -763,8 +806,16 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 			}
 			return Message{}, fmt.Errorf("decode stream: %w", err)
 		}
-		lastActivityNano.Store(time.Now().UnixNano())
-		streamStarted.Store(true)
+		nowNano := time.Now().UnixNano()
+		lastActivityNano.Store(nowNano)
+		if !streamStarted.Swap(true) {
+			// First chunk: start the content-stall clock now (not at call
+			// entry), so a long prompt-eval doesn't eat into the budget.
+			lastContentNano.Store(nowNano)
+		}
+		if chunk.Message.Content != "" || len(chunk.Message.ToolCalls) > 0 {
+			lastContentNano.Store(nowNano)
+		}
 		if chunk.Error != "" {
 			return Message{}, fmt.Errorf("ollama: %s", chunk.Error)
 		}

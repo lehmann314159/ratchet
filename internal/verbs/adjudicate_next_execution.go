@@ -300,15 +300,15 @@ func countTrailingStalls(ctx context.Context, d *db.DB, beadID int64) int {
 // double-the-budget-and-retry (the timeout reflex) toward the decisions that
 // actually fit a no-progress attempt.
 func stalledExecutionNote(ctx context.Context, d *db.DB, beadID int64) string {
-	var cause string
+	var cause, tracePath string
 	if err := d.QueryRowContext(ctx, `
-		SELECT termination_cause FROM executions
+		SELECT termination_cause, trace_path FROM executions
 		WHERE bead_id = ? AND infra_failure = 0 AND test_first_attempt = 0
 		  AND termination_cause IS NOT NULL
-		ORDER BY id DESC LIMIT 1`, beadID).Scan(&cause); err != nil || cause != "stalled" {
+		ORDER BY id DESC LIMIT 1`, beadID).Scan(&cause, &tracePath); err != nil || cause != "stalled" {
 		return ""
 	}
-	return "[Stalled execution] The previous attempt made no measurable forward progress " +
+	note := "[Stalled execution] The previous attempt made no measurable forward progress " +
 		"(no output file changed on disk, no exit criterion newly passed) and did not respond to a " +
 		"graceful-finalize directive. This is NOT a wall-clock problem — EXECUTE_BEAD timing is " +
 		"fixed and there is no budget to raise. Do NOT choose execute_revised with a substantively " +
@@ -318,6 +318,50 @@ func stalledExecutionNote(ctx context.Context, d *db.DB, beadID int64) string {
 		"  - The spec is too large or too vague for one attempt → execute_revised with a MATERIALLY " +
 		"narrowed spec (fewer output files, a sharper and shorter contract), or full_stop if it " +
 		"cannot be narrowed. A second consecutive stall escalates to the user automatically."
+
+	// Fourth branch: a locked-test (REFINE_TESTS) bead that stalled without
+	// writing anything is the signature of an unsatisfiable LOCKED assertion —
+	// the agent read the test, could not see how any correct implementation
+	// would pass it, and spiralled. None of the three options above recover
+	// that: a narrower spec cannot fix a wrong assertion, and the tests are
+	// LOCKED during EXECUTE. Offered only for the FIRST stall in the lineage
+	// (countTrailingStalls < 2); if the re_refined tests stall again the note
+	// reverts to narrow/full_stop and the execute_revised path escalates via
+	// escalateOnRepeatedStall. re_refine out of a stall does not create a
+	// bead_revision, so refinementCycleCap (Commit's re_refine branch) is the
+	// loop backstop. Concrete driver: lsystem grammar bead, grammar_test.go:135
+	// asserting axiom "F[+]" -> 3 modules where the design doc says 4
+	// (memory/project_precision_chain_plan).
+	if countTrailingStalls(ctx, d, beadID) < 2 &&
+		beadHasRefinements(ctx, d, beadID) &&
+		latestExecutionWroteNothing(tracePath) {
+		note += "\n\n" +
+			"  - This bead's tests were written by REFINE_TESTS and are LOCKED — EXECUTE cannot " +
+			"create, modify, or add setup to any *_test.go file, and an execute_revised spec cannot " +
+			"direct it to. The previous attempt wrote NOTHING to disk before stalling, which is the " +
+			"classic signature of a LOCKED test assertion that no correct implementation can " +
+			"satisfy: the agent read the test, could not see how to make it pass, and spiralled. " +
+			"Read the locked test assertions against the authoritative design excerpt (Input 5). If " +
+			"a specific assertion contradicts the design document or is otherwise unsatisfiable by " +
+			"any correct implementation, choose re_refine and put in re_refine_guidance: the test " +
+			"function name, the exact wrong expected value, and what the design document says it " +
+			"should be. Only do this when you can point to the specific defective assertion — not " +
+			"as a generic way out of a hard bead."
+	}
+	return note
+}
+
+// latestExecutionWroteNothing reports whether the trace at tracePath contains no
+// write_file calls at all — the "spiralled without ever writing" shape. Any
+// write_file call (even a failed one) means the agent began the task and this is
+// a different failure mode, so it returns false. Returns false on any read/parse
+// failure (safe default: do not add the re_refine branch).
+func latestExecutionWroteNothing(tracePath string) bool {
+	data, err := os.ReadFile(tracePath)
+	if err != nil {
+		return false
+	}
+	return len(trace.Parse(data).WriteFiles) == 0
 }
 
 // timeoutExecutionNote fires when the latest qualifying execution for beadID

@@ -723,6 +723,86 @@ func TestChatWithToolsSlowButSteadyStreamSucceeds(t *testing.T) {
 	}
 }
 
+// TestChatWithToolsContentStallAborts: with Options.ContentStallTimeout set, a
+// turn that streams only `thinking` (no content, no tool call) for that long is
+// aborted with ErrContentStall — the muse-glimmer planning spiral inside one
+// continuous think turn that streamIdleTimeout (reset by every thinking chunk)
+// never catches. ErrContentStall is NOT transient.
+func TestChatWithToolsContentStallAborts(t *testing.T) {
+	setStreamTimeouts(t, 5*time.Second, 5*time.Second, 15*time.Millisecond)
+
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fl, _ := w.(http.Flusher)
+		for {
+			select {
+			case <-release:
+				return
+			default:
+			}
+			io.WriteString(w, `{"message":{"role":"assistant","thinking":"still reconsidering "}}`+"\n")
+			if fl != nil {
+				fl.Flush()
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	c := New(srv.URL)
+	_, err := c.ChatWithTools(context.Background(), "m",
+		[]Message{{Role: "user", Content: "hi"}}, nil,
+		&Options{ContentStallTimeout: 200 * time.Millisecond}, nil)
+	if !errors.Is(err, ErrContentStall) {
+		t.Fatalf("want ErrContentStall, got %v", err)
+	}
+	if IsTransient(err) {
+		t.Errorf("ErrContentStall must NOT be classified transient")
+	}
+}
+
+// TestChatWithToolsContentStallResetsOnToolCall: a tool-call delta mid-stream
+// resets the content-stall clock — the model is being productive even without
+// emitting assistant content.
+func TestChatWithToolsContentStallResetsOnToolCall(t *testing.T) {
+	setStreamTimeouts(t, 5*time.Second, 5*time.Second, 15*time.Millisecond)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fl, _ := w.(http.Flusher)
+		think := func() {
+			for i := 0; i < 6; i++ {
+				io.WriteString(w, `{"message":{"role":"assistant","thinking":"t "}}`+"\n")
+				if fl != nil {
+					fl.Flush()
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+		}
+		think()
+		io.WriteString(w, `{"message":{"role":"assistant","tool_calls":[{"function":{"name":"read_file","arguments":{"path":"x.go"}}}]}}`+"\n")
+		if fl != nil {
+			fl.Flush()
+		}
+		think()
+		io.WriteString(w, `{"message":{"role":"assistant","content":"ok"},"done":true,"done_reason":"stop"}`+"\n")
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	msg, err := c.ChatWithTools(context.Background(), "m",
+		[]Message{{Role: "user", Content: "hi"}}, nil,
+		&Options{ContentStallTimeout: 250 * time.Millisecond}, nil)
+	if err != nil {
+		t.Fatalf("a tool-call delta should reset the content-stall clock, got: %v", err)
+	}
+	if len(msg.ToolCalls) != 1 {
+		t.Errorf("tool calls = %d, want 1", len(msg.ToolCalls))
+	}
+}
+
 type fakeTimeoutErr struct{}
 
 func (fakeTimeoutErr) Error() string   { return "i/o timeout" }
@@ -737,6 +817,7 @@ func TestIsTransient(t *testing.T) {
 	}{
 		{"nil", nil, false},
 		{"stream idle wrapped", fmt.Errorf("chat: %w", ErrStreamIdle), true},
+		{"content stall wrapped", fmt.Errorf("chat: %w", ErrContentStall), false},
 		{"unexpected eof wrapped", fmt.Errorf("decode stream: %w", io.ErrUnexpectedEOF), true},
 		{"connection reset", fmt.Errorf("read: %w", syscall.ECONNRESET), true},
 		{"broken pipe", fmt.Errorf("write: %w", syscall.EPIPE), true},

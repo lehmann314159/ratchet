@@ -64,40 +64,64 @@ downstream recovery path**; it escalates.
 
 ## Order of operations
 
-### Phase 0 — safety nets (small, localized, unit-testable, no run required)
+### Phase 0 — safety nets (small, localized, unit-testable, no run required) — **DONE 2026-09-07**
 
-Do these first. They make the pipeline fail *toward* `re_refine` instead of
-escalation while the larger upstream work is in flight — which is precisely what
-shrinks the Phase 3 settling risk. Both are self-contained and independently
-unit-testable.
+Both landed on `main`. They make the pipeline fail *toward* `re_refine` instead
+of escalation while the larger upstream work is in flight.
 
-1. **`stalledExecutionNote` gains a `re_refine` branch (E).**
-   - Change: in `internal/verbs/adjudicate_next_execution.go`, add a fourth
-     option to the note — when the disk shows nothing written *and* the bead went
-     through REFINE_TESTS (`beadHasRefinements`), instruct ADJUDICATE that an
-     unsatisfiable locked assertion is a possibility and `re_refine` is on the
-     table, with `re_refine_guidance` naming the suspect assertion. Keep the
-     "second consecutive stall escalates" backstop.
-   - Interaction to get right: `escalateOnRepeatedStall` currently only runs in
-     the `execute_as_is` / `execute_revised` decision branches
-     (`adjudicate_next_execution.go:1540,1560`). Adding a `re_refine` path out of
-     a stall must not let a bead loop forever — cap via the existing
-     `refinementCycleCap` check (line 1713).
-   - Validation: unit test (`stalled_execution_test.go` companion); offline
-     replay of the current grammar stall (Phase 3 fixture) — ADJUDICATE should
-     now be *able* to choose `re_refine` given the doc + test.
+1. **`stalledExecutionNote` gains a `re_refine` branch (E).** **DONE.**
+   `internal/verbs/adjudicate_next_execution.go` — `stalledExecutionNote` now
+   appends a fourth paragraph when **all three** hold: the latest execution's
+   trace shows zero `write_file` calls (`latestExecutionWroteNothing`, new
+   helper), the bead went through REFINE_TESTS (`beadHasRefinements`), and it is
+   the **first** stall in the lineage (`countTrailingStalls < 2`). The paragraph
+   tells ADJUDICATE that a stall with nothing written on a locked-test bead is
+   the signature of an unsatisfiable LOCKED assertion, to check the locked
+   assertions against Input 5 (the authoritative design excerpt), and to choose
+   `re_refine` naming the specific defective assertion (test fn + wrong expected
+   value + what the doc says) — only when it can point to the specific defect.
+   - Interaction decisions (per Mike, 2026-09-07): **`refinementCycleCap` (5,
+     Commit's `re_refine` branch) is the only loop backstop.** `re_refine` out of
+     a stall does not create a `bead_revision`, so `countTrailingStalls` keeps
+     climbing across cycles; gating the paragraph on `< 2` means it only nudges
+     the first stall. `escalateOnRepeatedStall` was **not** added to the
+     `re_refine` branch — a legitimate re_refine that found a real bad assertion
+     shouldn't be blocked by a second stall (could be a second bad assertion).
+   - Tests: `stalled_execution_test.go` — `TestStalledExecutionNote_ReRefineBranch`
+     (4 subtests: branch present / suppressed on 2nd stall / absent for non-
+     refinement bead / absent when a write happened).
+   - Offline replay status: the `qual-corpus-lsystem-2` fixture `-1` predates the
+     `893b156` infra fix, so all its bead-2 executions are `infra_failure=1` or
+     incomplete — there is **no clean `stalled` execution to replay against**.
+     Confirmed the real bead-2 traces (attempts 1–5) all have **zero write_file
+     calls** and the bead has `test_refinements` rows, so the branch *would* fire
+     on a clean re-run. The "does ADJUDICATE actually pick re_refine" end-to-end
+     check needs a live model and is folded into Phase 3 step 7.
 
-2. **Mid-stream content-stall watchdog (F).**
-   - Finish PR #11's in-pocket item: a watchdog that trips when a single turn
-     streams for more than N minutes with `content_chars` not advancing (pure
-     thinking, no `write_file`), faster than the 20m `execEmptyAttemptCeiling`
-     and independent of turn boundaries.
-   - Validation: the offline stall fixture from the PR #10/#11 work; unit test on
-     the watchdog trigger condition.
+2. **Mid-stream content-stall watchdog (F).** **DONE.**
+   - `internal/ollama`: new opt-in `Options.ContentStallTimeout`. When > 0,
+     `ChatWithTools`'s stream watchdog also trips when the stream produces only
+     `thinking` tokens (no content, no tool-call delta) for that long after the
+     first chunk → returns the new sentinel `ErrContentStall`. **Not** transient
+     (`IsTransient` unchanged) — it is real non-convergence signal. The clock is
+     seeded on the first chunk (so prompt-eval doesn't eat the budget) and reset
+     by any content token or tool-call delta.
+   - `internal/execution`: `execContentStallTimeout = 10m` (`progress.go`), passed
+     via `execOpts`; `testExecContentStallTimeout` override. `runExecuteBeadReal`
+     maps `ollama.ErrContentStall` to a `stalled` termination (feeds
+     `stalledExecutionNote` + `escalateOnRepeatedStall`, same as the
+     turn-boundary ceilings). Sits below `execEmptyAttemptCeiling` (20m,
+     turn-boundary only) and above `streamIdleTimeout` (3m, reset by every
+     thinking chunk).
+   - Tests: `internal/ollama/client_test.go` —
+     `TestChatWithToolsContentStallAborts`, `…ResetsOnToolCall`, + `TestIsTransient`
+     case. `internal/execution/workspace_test.go` —
+     `TestRunExecuteBeadReal_MidTurnContentStallIsStalled`,
+     `…ContentStallNotTrippedByProductiveTurn`. `go test ./... -race` + `go vet` green.
 
-**Exit Phase 0 when:** both land on `main` with unit tests; the grammar stall
-fixture (built in Phase 3 step 7, or a throwaway early cut) shows ADJUDICATE can
-reach `re_refine`.
+**Phase 0 exit:** both landed on `main` with unit tests. The one deferred item
+(live confirmation ADJUDICATE reaches `re_refine` on the real grammar stall) is
+Phase 3 step 7 — the existing fixture cannot exercise it.
 
 ### Phase 1 — upstream precision, source-first
 

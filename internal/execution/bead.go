@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -39,6 +40,8 @@ var (
 	testExecCeiling            time.Duration
 	// testExecEmptyAttemptCeiling overrides execEmptyAttemptCeiling for tests.
 	testExecEmptyAttemptCeiling time.Duration
+	// testExecContentStallTimeout overrides execContentStallTimeout for tests.
+	testExecContentStallTimeout time.Duration
 )
 
 // RunExecuteBeadMain is the entry point for the "ratchet execute-bead" subcommand.
@@ -167,6 +170,10 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	if testExecEmptyAttemptCeiling > 0 {
 		emptyCeilingDur = testExecEmptyAttemptCeiling
 	}
+	contentStallDur := execContentStallTimeout
+	if testExecContentStallTimeout > 0 {
+		contentStallDur = testExecContentStallTimeout
+	}
 
 	terminationCh := make(chan string, 1)
 	// budgetCheckpointCh: the wall-clock goroutine pings this once per checkpoint
@@ -287,7 +294,13 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	// turn plus thinking — the 8192 cap clips a legitimate one-shot
 	// implementation mid-file. 16384 gives headroom while still bounding a
 	// degenerate non-terminating thinking stream (exprvm-web bakeoff, 2026-09-02).
-	execOpts := &ollama.Options{OmitFormat: true, NumPredict: 16384}
+	// ContentStallTimeout: abort a turn that streams only `thinking` for
+	// contentStallDur (no content, no tool call) — the muse-glimmer planning
+	// spiral that runs 25+ min inside one continuous think turn, which neither
+	// the 3m stream-idle watchdog (reset by every thinking chunk) nor the
+	// turn-boundary checks below can catch. runExecuteBeadReal maps
+	// ollama.ErrContentStall to a 'stalled' termination.
+	execOpts := &ollama.Options{OmitFormat: true, NumPredict: 16384, ContentStallTimeout: contentStallDur}
 	messages := []ollama.Message{
 		{Role: "system", Content: guidance.InjectForVerbPath(executeBeadSystemPrompt, workDir, db.VerbExecuteBead, "")},
 		{Role: "user", Content: buildBeadUserMsg(parsedBead.FullText, parsedBead.OutputFiles, parsedBead.ExitCriteria, contextFiles, priorHistory, resumeNote, workDir)},
@@ -397,6 +410,15 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 				writeLine(traceFile, fmt.Sprintf("[terminated: %s]", cause))
 				return writeTerminationCause(d, execID, cause)
 			default:
+			}
+			// A mid-turn content stall (only `thinking` streamed for
+			// execContentStallTimeout, no content, no tool call) is a
+			// non-converging reasoning spiral, not an infra hiccup — end the
+			// attempt 'stalled' so ADJUDICATE sees it (stalledExecutionNote /
+			// escalateOnRepeatedStall), same as the turn-boundary ceilings.
+			if errors.Is(err, ollama.ErrContentStall) {
+				writeLine(traceFile, fmt.Sprintf("[terminated: stalled — %v]", err))
+				return writeTerminationCause(d, execID, "stalled")
 			}
 			return fmt.Errorf("model call: %w", err)
 		}

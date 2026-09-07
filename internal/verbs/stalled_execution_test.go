@@ -3,11 +3,109 @@ package verbs
 import (
 	"context"
 	"database/sql"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"ratchet/internal/db"
 )
+
+// traceWithWrite is a minimal trace containing one write_file call.
+const traceWithWrite = "[TURN 1]\n" +
+	"[tool: write_file map[content:package main] path:game.go]]\n" +
+	"[result]\nok: wrote game.go\n"
+
+// traceNoWrite is a trace where the agent only read and never wrote — the
+// planning-spiral / unsatisfiable-locked-test shape.
+const traceNoWrite = "[TURN 1]\n" +
+	"[tool: read_file map[path:grammar_test.go]]\n" +
+	"[result]\n(file contents)\n"
+
+// seedStalledExecTrace inserts a stalled execution whose trace file at
+// dir/name holds the given content, and returns nothing (the note reads the
+// latest execution by id).
+func seedStalledExecTrace(t *testing.T, d *db.DB, projectID, beadID, revID int64, dir, name, traceContent string) {
+	t.Helper()
+	tracePath := filepath.Join(dir, name)
+	if err := os.WriteFile(tracePath, []byte(traceContent), 0o644); err != nil {
+		t.Fatalf("write trace: %v", err)
+	}
+	if _, err := d.ExecContext(context.Background(), `
+		INSERT INTO executions
+		  (project_id, bead_id, bead_revision_id, trace_path,
+		   termination_cause, monitor_fired, monitor_honored, infra_failure, test_first_attempt,
+		   started_at, ended_at)
+		VALUES (?, ?, ?, ?, 'stalled', NULL, 0, 0, 0,
+		        '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z')`,
+		projectID, beadID, revID, tracePath); err != nil {
+		t.Fatalf("seedStalledExecTrace: %v", err)
+	}
+}
+
+func seedRefinementRow(t *testing.T, d *db.DB, projectID, beadID int64) {
+	t.Helper()
+	if _, err := d.ExecContext(context.Background(), `
+		INSERT INTO test_refinements
+		  (project_id, bead_id, cycle_id, turn, verb, changed, summary, decision, created_at)
+		VALUES (?, ?, 1, 1, 'REFINE_TESTS_CRITIQUE', 0, 'x', '', '2026-01-01T00:00:00Z')`,
+		projectID, beadID); err != nil {
+		t.Fatalf("seedRefinementRow: %v", err)
+	}
+}
+
+const reRefineBranchMarker = "choose re_refine and put in re_refine_guidance"
+
+func TestStalledExecutionNote_ReRefineBranch(t *testing.T) {
+	newFixture := func(t *testing.T) (*db.DB, int64, int64, string) {
+		d := openTestDB(t)
+		seedProject(t, d, -1, "fixture: re_refine branch")
+		beadID, revID := seedBead(t, d, -1, "grammar")
+		return d, beadID, revID, t.TempDir()
+	}
+	ctx := context.Background()
+
+	t.Run("first stall + refinement bead + nothing written -> branch present", func(t *testing.T) {
+		d, beadID, revID, dir := newFixture(t)
+		seedRefinementRow(t, d, -1, beadID)
+		seedStalledExecTrace(t, d, -1, beadID, revID, dir, "t.log", traceNoWrite)
+		note := stalledExecutionNote(ctx, d, beadID)
+		if !strings.Contains(note, reRefineBranchMarker) {
+			t.Errorf("expected the re_refine branch, got:\n%s", note)
+		}
+	})
+
+	t.Run("second consecutive stall -> branch suppressed", func(t *testing.T) {
+		d, beadID, revID, dir := newFixture(t)
+		seedRefinementRow(t, d, -1, beadID)
+		seedStalledExecTrace(t, d, -1, beadID, revID, dir, "t1.log", traceNoWrite)
+		seedStalledExecTrace(t, d, -1, beadID, revID, dir, "t2.log", traceNoWrite)
+		note := stalledExecutionNote(ctx, d, beadID)
+		if strings.Contains(note, reRefineBranchMarker) {
+			t.Errorf("branch must be suppressed on the second consecutive stall:\n%s", note)
+		}
+		if !strings.Contains(note, "Stalled execution") {
+			t.Errorf("base note should still be present:\n%s", note)
+		}
+	})
+
+	t.Run("not a refinement bead -> branch absent", func(t *testing.T) {
+		d, beadID, revID, dir := newFixture(t)
+		seedStalledExecTrace(t, d, -1, beadID, revID, dir, "t.log", traceNoWrite)
+		if strings.Contains(stalledExecutionNote(ctx, d, beadID), reRefineBranchMarker) {
+			t.Error("branch must not appear for a non-REFINE_TESTS bead")
+		}
+	})
+
+	t.Run("refinement bead but a write_file happened -> branch absent", func(t *testing.T) {
+		d, beadID, revID, dir := newFixture(t)
+		seedRefinementRow(t, d, -1, beadID)
+		seedStalledExecTrace(t, d, -1, beadID, revID, dir, "t.log", traceWithWrite)
+		if strings.Contains(stalledExecutionNote(ctx, d, beadID), reRefineBranchMarker) {
+			t.Error("branch must not appear when the agent began writing")
+		}
+	})
+}
 
 func TestCountTrailingStalls(t *testing.T) {
 	d := openTestDB(t)

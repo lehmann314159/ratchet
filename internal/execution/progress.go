@@ -98,6 +98,19 @@ const (
 	// above any legitimate multi-file orientation sequence and below two giant
 	// think turns.
 	execEmptyAttemptCeiling = 20 * time.Minute
+
+	// execContentStallTimeout bounds a SINGLE turn that streams only `thinking`
+	// tokens — no assistant content, no tool call — mid-generation. It is passed
+	// to ChatWithTools as Options.ContentStallTimeout; on a trip the turn aborts
+	// with ollama.ErrContentStall and runExecuteBeadReal ends the attempt
+	// 'stalled'. This closes the gap execEmptyAttemptCeiling (turn-boundary
+	// only) and streamIdleTimeout (3m, reset by every thinking chunk) both miss:
+	// the muse-glimmer F[+]-contradiction spiral ran ~27 min inside one
+	// continuous think turn (memory/project_precision_chain_plan finding F). A
+	// healthy EXECUTE turn streams content and/or a tool call along the way, so
+	// 10m of pure thinking is unambiguously non-converging — and it is below
+	// execEmptyAttemptCeiling so it fires first.
+	execContentStallTimeout = 10 * time.Minute
 )
 
 // turnObs is one turn's worth of mechanical progress signal, computed by the

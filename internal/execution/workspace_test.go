@@ -530,6 +530,113 @@ func TestRunExecuteBeadReal_NothingWrittenCeilingNotHitWhenProductive(t *testing
 	}
 }
 
+// TestRunExecuteBeadReal_MidTurnContentStallIsStalled: a single turn that
+// streams only `thinking` (content_chars flat, no tool call) past
+// execContentStallTimeout is aborted mid-turn and the attempt ends 'stalled' —
+// the muse-glimmer F[+]-contradiction spiral that ran ~27 min inside one
+// continuous think turn, which the turn-boundary ceilings could not catch.
+func TestRunExecuteBeadReal_MidTurnContentStallIsStalled(t *testing.T) {
+	old := testExecContentStallTimeout
+	testExecContentStallTimeout = 60 * time.Millisecond
+	t.Cleanup(func() { testExecContentStallTimeout = old })
+
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fl, _ := w.(http.Flusher)
+		for {
+			select {
+			case <-release:
+				return
+			default:
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"message": map[string]any{"role": "assistant", "thinking": "reconsidering the whole parser design once more "},
+			})
+			if fl != nil {
+				fl.Flush()
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	d := openTestDB(t)
+	folder := t.TempDir()
+	seedRunProject(t, d, folder)
+	fullText := `{"title":"B01","full_text":"spec","output_files":["game.go"],"exit_criteria":["test -f game.go"]}`
+	execID := seedRunExecution(t, d, folder, fullText)
+
+	start := time.Now()
+	if err := runExecuteBeadReal(d, execID, srv.URL); err != nil {
+		t.Fatalf("runExecuteBeadReal: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 20*time.Second {
+		t.Errorf("attempt took %v — the content-stall watchdog should abort the turn quickly", elapsed)
+	}
+	if cause := terminationCause(t, d, execID); cause != "stalled" {
+		t.Errorf("termination_cause = %q, want stalled", cause)
+	}
+	tr := readFile(t, traceForExec(t, d, execID))
+	if !strings.Contains(tr, "content stall") {
+		t.Errorf("trace missing the content-stall termination line:\n%s", tr)
+	}
+	if strings.Contains(tr, "write-now redirect") || strings.Contains(tr, "requesting graceful finalize") {
+		t.Errorf("a mid-turn content stall must not route through redirect / finalize:\n%s", tr)
+	}
+}
+
+// TestRunExecuteBeadReal_ContentStallNotTrippedByProductiveTurn: a turn that
+// thinks, then emits a write_file tool call, is never touched by the watchdog —
+// the tool-call delta resets the content-stall clock in ChatWithTools.
+func TestRunExecuteBeadReal_ContentStallNotTrippedByProductiveTurn(t *testing.T) {
+	old := testExecContentStallTimeout
+	testExecContentStallTimeout = 80 * time.Millisecond
+	t.Cleanup(func() { testExecContentStallTimeout = old })
+
+	var turn atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fl, _ := w.(http.Flusher)
+		// Think in bursts shorter than the stall timeout, then act.
+		for i := 0; i < 4; i++ {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"message": map[string]any{"role": "assistant", "thinking": "planning "},
+			})
+			if fl != nil {
+				fl.Flush()
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if turn.Add(1) == 1 {
+			writeToolCalls(w, toolCall("write_file", map[string]any{
+				"path": "game.go", "content": "package main\n\nfunc Play() {}\n",
+			}))
+			return
+		}
+		writeDone(w)
+	}))
+	defer srv.Close()
+
+	d := openTestDB(t)
+	folder := t.TempDir()
+	seedRunProject(t, d, folder)
+	fullText := `{"title":"B01","full_text":"spec","output_files":["game.go"],"exit_criteria":["test -f game.go"]}`
+	execID := seedRunExecution(t, d, folder, fullText)
+
+	if err := runExecuteBeadReal(d, execID, srv.URL); err != nil {
+		t.Fatalf("runExecuteBeadReal: %v", err)
+	}
+	if cause := terminationCause(t, d, execID); cause != "success" {
+		t.Errorf("termination_cause = %q, want success", cause)
+	}
+	tr := readFile(t, traceForExec(t, d, execID))
+	if strings.Contains(tr, "content stall") {
+		t.Errorf("a productive turn must not trip the content-stall watchdog:\n%s", tr)
+	}
+}
+
 // --- helpers ---
 
 func mustWrite(t *testing.T, path, content string) {
