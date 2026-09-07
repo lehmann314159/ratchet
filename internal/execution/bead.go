@@ -291,9 +291,9 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	}()
 
 	var writeFileCount int
-	var stubWarningInjected bool
 	var missingPathWarningInjected bool
-	var finalizeInjected bool // the one graceful-finalize directive has been sent
+	var finalizeInjected bool          // the one graceful-finalize directive has been sent
+	var emptyTurnRedirectInjected bool // the one write-now redirect has been sent
 	var extensionsUsed int
 	prevTurnSig := ""
 	lastCheckpoint := time.Now()
@@ -308,6 +308,51 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 		writeLine(traceFile, fmt.Sprintf("[progress] %s — requesting graceful finalize", reason))
 		messages = append(messages, ollama.Message{Role: "user", Content: buildStallFinalizeDirective(expectedFiles)})
 		trySignal(finalizeCh)
+	}
+
+	// handleEmptyTurn consults the empty-turn streak (progress.go): consecutive
+	// turns that emitted nothing actionable while nothing has ever been written
+	// to disk — the muse-glimmer planning spiral (lsystem-baseline-1 bead 2).
+	// The first empty turn injects one write-now redirect; execEmptyTurnStreakLimit
+	// consecutive empty turns end the attempt as 'stalled'. It reports whether the
+	// caller should terminate 'stalled' now; on a redirect / still-waiting turn it
+	// returns false and the caller re-enters the loop. Detected the instant a turn
+	// ends — this is the fast path the wall-clock backstops (execCheckpointInterval
+	// / execStallWindow / execAbsoluteCeiling) sit behind for the
+	// "makes productive tool calls but never converges" and "wrote something then
+	// went quiet" cases.
+	// handleEmptyTurn returns:
+	//   "redirect" — the one write-now redirect was just injected; the caller
+	//     should re-enter the loop (continue) and let the model act on it.
+	//   "stalled"  — execEmptyTurnStreakLimit consecutive empty turns with the
+	//     redirect already spent; the caller should terminate 'stalled'.
+	//   ""         — not an empty turn, OR the redirect is spent and the streak
+	//     is still below the limit. The caller falls through to the wall-clock
+	//     checks (wall / checkpoint), which now own the escalation. This is why
+	//     the FIRST empty turn's redirect front-runs wall(): a single
+	//     muse-glimmer think turn routinely exceeds execStallWindow on its own
+	//     (lsystem-baseline-1 bead 2 attempt 2 — one 24-minute turn), so if
+	//     wall() were checked first it would inject the generic finalize
+	//     directive before the redirect ever fired.
+	handleEmptyTurn := func() string {
+		switch {
+		case tracker.emptyTurnStreak == 0:
+			return ""
+		case tracker.emptyTurnStreak >= execEmptyTurnStreakLimit:
+			writeLine(traceFile, fmt.Sprintf(
+				"[terminated: stalled — %d consecutive turns wrote nothing to disk after the redirect]",
+				tracker.emptyTurnStreak))
+			return "stalled"
+		case !emptyTurnRedirectInjected:
+			emptyTurnRedirectInjected = true
+			writeLine(traceFile, "[injected: write-now redirect — model is planning without writing; instructed to emit a minimal version immediately]")
+			messages = append(messages, ollama.Message{Role: "user", Content: buildEmptyTurnRedirect(expectedFiles)})
+			return "redirect"
+		default:
+			writeLine(traceFile, fmt.Sprintf(
+				"[progress] still nothing written to disk (%d turns) after the redirect", tracker.emptyTurnStreak))
+			return ""
+		}
 	}
 
 	for turn := 1; ; turn++ {
@@ -349,37 +394,42 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 				return writeTerminationCause(d, execID, "success")
 			}
 
-			tracker.observe(time.Now(), turnObs{lengthCapEmpty: lengthCapEmpty})
+			tracker.observe(time.Now(), turnObs{
+				lengthCapEmpty: lengthCapEmpty,
+				emptyTurn:      writeFileCount == 0 && len(expectedFiles) > 0,
+			})
 
 			// The single turn granted after a graceful-finalize directive is over.
 			if finalizeInjected {
 				writeLine(traceFile, "[terminated: stalled — no output after finalize directive]")
 				return writeTerminationCause(d, execID, "stalled")
 			}
+
+			// Empty turn (planning spiral / code as prose). The first one injects
+			// the write-now redirect BEFORE the wall-clock checks — a single
+			// muse-glimmer think turn often exceeds execStallWindow by itself
+			// (lsystem-baseline-1 bead 2 attempt 2: one 24-minute turn), so wall()
+			// would otherwise pre-empt the redirect with the generic finalize
+			// directive. After the redirect is spent, wall() owns escalation;
+			// execEmptyTurnStreakLimit is the final catch for fast empty turns
+			// that never trip a wall-clock predicate. Folding in the old
+			// 'no_write' cause: 'stalled' feeds ADJUDICATE's stalled-execution
+			// note + escalateOnRepeatedStall, which 'no_write' never did.
+			switch handleEmptyTurn() {
+			case "stalled":
+				return writeTerminationCause(d, execID, "stalled")
+			case "redirect":
+				continue
+			}
+
 			if stall, reason := tracker.wall(time.Now(), turn); stall {
 				injectFinalize(reason)
 				continue
 			}
-
-			// Model declared done without ever calling write_file — likely
-			// emitted code as prose. One-time nudge, then label distinctly.
-			if !stubWarningInjected && writeFileCount == 0 && len(expectedFiles) > 0 {
-				stubWarningInjected = true
-				writeLine(traceFile, "[injected: no-write warning — model produced prose instead of calling write_file]")
-				messages = append(messages, ollama.Message{
-					Role:    "user",
-					Content: buildNoWriteWarning(expectedFiles),
-				})
+			if tracker.emptyTurnStreak > 0 {
+				// Redirect spent, streak below the limit, no wall-clock stall yet
+				// — give the model another turn rather than declaring success.
 				continue
-			}
-			if stubWarningInjected && writeFileCount == 0 {
-				// The warning already fired once and the model still wrote
-				// nothing on the very next turn — none of success/timeout/
-				// monitor_terminated/monitor_force_killed accurately describe
-				// this, so label it distinctly rather than mislabeling a
-				// zero-output run as a normal completion.
-				writeLine(traceFile, "[done — no further tool calls after no-write warning; nothing written]")
-				return writeTerminationCause(d, execID, "no_write")
 			}
 			writeLine(traceFile, "[done — no further tool calls]")
 			return writeTerminationCause(d, execID, "success")
@@ -422,7 +472,14 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 		turnSig := toolTurnSignature(msg.ToolCalls, turnResults)
 		identicalCall := turnSig != "" && turnSig == prevTurnSig && !productive
 		prevTurnSig = turnSig
-		tracker.observe(time.Now(), turnObs{productive: productive, identicalCall: identicalCall})
+		tracker.observe(time.Now(), turnObs{
+			productive:    productive,
+			identicalCall: identicalCall,
+			// A turn that made tool calls but no productive write, while nothing
+			// has ever been written this attempt (e.g. a lone read_file after a
+			// long think — lsystem-baseline-1 bead 2 attempt 1), is still empty.
+			emptyTurn: !productive && writeFileCount == 0 && len(expectedFiles) > 0,
+		})
 
 		if missingPathDetected && !missingPathWarningInjected {
 			missingPathWarningInjected = true
@@ -446,8 +503,24 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 			return writeTerminationCause(d, execID, "stalled")
 		}
 
+		// Empty-turn fast path: a turn that made tool calls but no productive
+		// write, with nothing yet on disk (e.g. a lone read_file after a long
+		// think — lsystem-baseline-1 bead 2 attempt 1). Redirect before the
+		// wall-clock checks, same reasoning as the no-tool-call branch.
+		switch handleEmptyTurn() {
+		case "stalled":
+			return writeTerminationCause(d, execID, "stalled")
+		case "redirect":
+			continue
+		}
+
 		if stall, reason := tracker.wall(time.Now(), turn); stall {
 			injectFinalize(reason)
+			continue
+		}
+		if tracker.emptyTurnStreak > 0 {
+			// Redirect spent, streak below the limit — keep going; don't let the
+			// checkpoint path inject a second (finalize) directive on top.
 			continue
 		}
 
@@ -540,6 +613,29 @@ func buildStallFinalizeDirective(expectedFiles []string) string {
 			"Stop analyzing. In your next turn, call write_file once for each output file (%s) with "+
 			"your best current version of its complete contents, then stop. The execution ends after "+
 			"your next turn — this is your final opportunity to write.",
+		list,
+	)
+}
+
+// buildEmptyTurnRedirect is the one user turn injected on the first "empty" turn
+// (progress.go: no productive write, nothing written to disk yet). It targets
+// the planning-paralysis failure mode (lsystem-baseline-1 bead 2): a reasoning
+// model that designs and redesigns the whole implementation in its thinking
+// stream, turn after turn, without ever committing a write_file. Explicit
+// permission to emit a rough first version and refine it afterward is what
+// breaks the spiral — a plain "write your best version and stop" (the finalize
+// directive) does not. Also covers code emitted as prose, since that likewise
+// leaves nothing on disk.
+func buildEmptyTurnRedirect(expectedFiles []string) string {
+	list := strings.Join(expectedFiles, ", ")
+	return fmt.Sprintf(
+		"Your last turn wrote nothing to disk — no write_file call landed, and you have "+
+			"not created any output file yet. Any code in your response text is NOT saved.\n\n"+
+			"You have spent significant effort planning. Stop planning now. In your very next "+
+			"turn, call write_file for %s with a minimal version that compiles — it does not "+
+			"need to be complete or correct yet. You can read it back and revise it with "+
+			"further write_file calls afterward. Getting a first version onto disk immediately "+
+			"is what matters.",
 		list,
 	)
 }
@@ -850,10 +946,11 @@ func sameRevisionResumeNote(ctx context.Context, d *db.DB, beadID, revisionID, e
 		"that way."
 }
 
-// buildNoWriteWarning returns a user-turn message injected when the model
-// declares done without having called write_file at all. This catches the
-// "code as prose" failure mode where the model outputs its implementation as
-// response text instead of as a write_file tool call.
+// buildNoWriteWarning returns a user-turn message for the "code as prose"
+// failure mode where the model outputs its implementation as response text
+// instead of a write_file tool call. Used only by the offline bakeoff harness
+// now — runExecuteBeadReal uses buildEmptyTurnRedirect for this case (a stronger
+// message, plus a stall verdict on repetition).
 func buildNoWriteWarning(expectedFiles []string) string {
 	fileList := strings.Join(expectedFiles, ", ")
 	return fmt.Sprintf(

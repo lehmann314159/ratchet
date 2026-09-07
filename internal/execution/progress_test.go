@@ -110,6 +110,44 @@ func TestProgressTracker_IdenticalStreak(t *testing.T) {
 	}
 }
 
+func TestProgressTracker_EmptyTurnStreak(t *testing.T) {
+	start := time.Unix(6_500_000, 0)
+	tr := newProgressTracker(start)
+
+	// Two empty turns build the streak.
+	for i := 1; i <= 2; i++ {
+		tr.observe(start.Add(time.Duration(i)*time.Minute), turnObs{emptyTurn: true})
+	}
+	if tr.emptyTurnStreak != 2 {
+		t.Fatalf("emptyTurnStreak = %d, want 2", tr.emptyTurnStreak)
+	}
+
+	// A productive turn resets it.
+	tr.observe(start.Add(3*time.Minute), turnObs{productive: true})
+	if tr.emptyTurnStreak != 0 {
+		t.Errorf("emptyTurnStreak = %d, want 0 after a productive turn", tr.emptyTurnStreak)
+	}
+
+	// A non-empty, non-productive turn (e.g. a read after something was already
+	// written) also resets it.
+	tr.observe(start.Add(4*time.Minute), turnObs{emptyTurn: true})
+	tr.observe(start.Add(5*time.Minute), turnObs{})
+	if tr.emptyTurnStreak != 0 {
+		t.Errorf("emptyTurnStreak = %d, want 0 after a non-empty turn", tr.emptyTurnStreak)
+	}
+
+	// An empty turn is non-productive but does not advance the productive clock.
+	fresh := newProgressTracker(start)
+	at := fresh.lastProductive()
+	fresh.observe(start.Add(time.Minute), turnObs{emptyTurn: true})
+	if fresh.nonProductiveStreak != 1 {
+		t.Errorf("nonProductiveStreak = %d, want 1", fresh.nonProductiveStreak)
+	}
+	if !fresh.lastProductive().Equal(at) {
+		t.Errorf("lastProductive moved on an empty turn")
+	}
+}
+
 func TestProgressTracker_TurnCap(t *testing.T) {
 	start := time.Unix(6_000_000, 0)
 	tr := newProgressTracker(start)

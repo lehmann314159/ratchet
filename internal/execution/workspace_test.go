@@ -214,15 +214,18 @@ func TestRunExecuteBeadReal_PartialProgressSurvivesStall(t *testing.T) {
 	}
 }
 
-// TestRunExecuteBeadReal_StallToFinalizeToStalled: a model that only ever calls
-// read_file (never a productive write) is walled at the first budget checkpoint
-// with no progress, gets exactly one finalize directive, and terminates
-// 'stalled' — not 'success', not 'no_write'.
-func TestRunExecuteBeadReal_StallToFinalizeToStalled(t *testing.T) {
-	withTestExecCheckpoint(t, 30*time.Millisecond)
+// TestRunExecuteBeadReal_ReadOnlyNeverWritingIsStalledAfterRedirect: a model
+// that only ever calls read_file and never writes anything is caught by the
+// empty-turn fast path — one write-now redirect, then after
+// execEmptyTurnStreakLimit consecutive empty turns the attempt ends 'stalled'.
+// This is the "never emits anything actionable" case; it does NOT go through the
+// wall-clock checkpoint / graceful-finalize path (that is the backstop for a
+// model that writes but never converges — see PartialProgressSurvivesStall).
+func TestRunExecuteBeadReal_ReadOnlyNeverWritingIsStalledAfterRedirect(t *testing.T) {
+	var turn atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		time.Sleep(45 * time.Millisecond)
+		turn.Add(1)
 		writeToolCalls(w, toolCall("read_file", map[string]any{"path": "game.go"}))
 	}))
 	defer srv.Close()
@@ -231,7 +234,7 @@ func TestRunExecuteBeadReal_StallToFinalizeToStalled(t *testing.T) {
 	folder := t.TempDir()
 	seedRunProject(t, d, folder)
 	fullText := `{"title":"B01","full_text":"spec","output_files":["game.go"],"exit_criteria":["test -f game.go"]}`
-	execID := seedRunExecutionBudget(t, d, folder, fullText, 1)
+	execID := seedRunExecution(t, d, folder, fullText)
 
 	if err := runExecuteBeadReal(d, execID, srv.URL); err != nil {
 		t.Fatalf("runExecuteBeadReal: %v", err)
@@ -241,11 +244,18 @@ func TestRunExecuteBeadReal_StallToFinalizeToStalled(t *testing.T) {
 		t.Errorf("termination_cause = %q, want stalled", cause)
 	}
 	tr := readFile(t, traceForExec(t, d, execID))
-	if !strings.Contains(tr, "requesting graceful finalize") {
-		t.Errorf("trace missing finalize directive:\n%s", tr)
+	if strings.Count(tr, "write-now redirect — model is planning") != 1 {
+		t.Errorf("write-now redirect should be injected exactly once, trace:\n%s", tr)
 	}
-	if strings.Count(tr, "requesting graceful finalize") != 1 {
-		t.Errorf("finalize directive should be injected exactly once, trace:\n%s", tr)
+	if !strings.Contains(tr, "consecutive turns wrote nothing to disk after the redirect") {
+		t.Errorf("trace missing the empty-turn stall line:\n%s", tr)
+	}
+	if strings.Contains(tr, "requesting graceful finalize") {
+		t.Errorf("empty-turn stall must not route through the graceful-finalize path:\n%s", tr)
+	}
+	if got := int(turn.Load()); got != execEmptyTurnStreakLimit {
+		t.Errorf("model was called %d times, want %d (redirect on turn 1, stalled on turn %d)",
+			got, execEmptyTurnStreakLimit, execEmptyTurnStreakLimit)
 	}
 }
 
@@ -319,6 +329,117 @@ func TestRunExecuteBeadReal_SteadyProgressIsNotStalled(t *testing.T) {
 	}
 	if !strings.Contains(tr, "forward progress detected, extending") {
 		t.Errorf("expected at least one budget-checkpoint extension:\n%s", tr)
+	}
+	if strings.Contains(tr, "write-now redirect") {
+		t.Errorf("a model that writes a changed file every turn must never see the empty-turn redirect:\n%s", tr)
+	}
+}
+
+// TestRunExecuteBeadReal_EmptyTurnRedirectBreaksTheSpiral: the model burns its
+// first turn planning (no tool call, nothing written), receives the write-now
+// redirect, and then emits a real implementation. The attempt completes
+// 'success' — the redirect is a nudge, not a terminator, and a productive turn
+// clears the empty-turn streak.
+func TestRunExecuteBeadReal_EmptyTurnRedirectBreaksTheSpiral(t *testing.T) {
+	var turn atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch turn.Add(1) {
+		case 1:
+			// Pure planning turn: no tool call, only "thinking".
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"message": map[string]any{"role": "assistant", "content": "", "thinking": "Let me design the whole thing first..."},
+				"done":    true,
+			})
+		case 2:
+			writeToolCalls(w, toolCall("write_file", map[string]any{
+				"path": "game.go", "content": "package main\n\nfunc Play() { /* real */ }\n",
+			}))
+		default:
+			writeDone(w) // no tool calls -> exit criteria pass on disk -> success
+		}
+	}))
+	defer srv.Close()
+
+	d := openTestDB(t)
+	folder := t.TempDir()
+	seedRunProject(t, d, folder)
+	fullText := `{"title":"B01","full_text":"spec","output_files":["game.go"],"exit_criteria":["test -f game.go"]}`
+	execID := seedRunExecution(t, d, folder, fullText)
+
+	if err := runExecuteBeadReal(d, execID, srv.URL); err != nil {
+		t.Fatalf("runExecuteBeadReal: %v", err)
+	}
+
+	if cause := terminationCause(t, d, execID); cause != "success" {
+		t.Errorf("termination_cause = %q, want success", cause)
+	}
+	tr := readFile(t, traceForExec(t, d, execID))
+	if strings.Count(tr, "[injected: write-now redirect") != 1 {
+		t.Errorf("expected exactly one write-now redirect, trace:\n%s", tr)
+	}
+	if strings.Contains(tr, "wrote nothing to disk after the redirect") || strings.Contains(tr, "[terminated: stalled") {
+		t.Errorf("redirect broke the spiral — attempt must not be stalled:\n%s", tr)
+	}
+	if got := readFile(t, filepath.Join(folder, "game.go")); !strings.Contains(got, "real") {
+		t.Errorf("real implementation not copied back: %q", got)
+	}
+}
+
+// TestRunExecuteBeadReal_LsystemBead2PlanningSpiralRegression mirrors
+// lsystem-baseline-1 bead 2 (memory/handoff_lsystem_baseline_1): muse-glimmer
+// streamed a long chain-of-thought, emitted no content and at most a single
+// throwaway read_file, and never wrote its output file. The old code only
+// caught this via the 15-minute "no output file changed" progressTracker window
+// (~19 min/attempt) with a generic finalize directive that did not break the
+// spiral. The empty-turn fast path now catches it the instant each turn ends:
+// one write-now redirect, then 'stalled' after execEmptyTurnStreakLimit empty
+// turns — no wall-clock checkpoint, no graceful-finalize directive.
+func TestRunExecuteBeadReal_LsystemBead2PlanningSpiralRegression(t *testing.T) {
+	var turn atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		n := turn.Add(1)
+		// Every turn: a big think, then one token gesture at a read_file, never
+		// a write_file.
+		msg := map[string]any{
+			"role":     "assistant",
+			"content":  "",
+			"thinking": "We need to write grammar.go. Let me reconsider the whole parser design once more...",
+		}
+		if n%2 == 1 {
+			msg["tool_calls"] = []map[string]any{toolCall("read_file", map[string]any{"path": "grammar.go"})}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"message": msg, "done": true})
+	}))
+	defer srv.Close()
+
+	d := openTestDB(t)
+	folder := t.TempDir()
+	seedRunProject(t, d, folder)
+	fullText := `{"title":"grammar","full_text":"implement ParseSystem","output_files":["grammar.go"],"exit_criteria":["test -f grammar.go"]}`
+	execID := seedRunExecution(t, d, folder, fullText)
+
+	start := time.Now()
+	if err := runExecuteBeadReal(d, execID, srv.URL); err != nil {
+		t.Fatalf("runExecuteBeadReal: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 30*time.Second {
+		t.Errorf("attempt took %v — the empty-turn path should not wait on any wall-clock timer", elapsed)
+	}
+
+	if cause := terminationCause(t, d, execID); cause != "stalled" {
+		t.Errorf("termination_cause = %q, want stalled", cause)
+	}
+	tr := readFile(t, traceForExec(t, d, execID))
+	if strings.Count(tr, "[injected: write-now redirect") != 1 {
+		t.Errorf("expected exactly one write-now redirect, trace:\n%s", tr)
+	}
+	if strings.Contains(tr, "requesting graceful finalize") {
+		t.Errorf("must not route through the graceful-finalize path:\n%s", tr)
+	}
+	if n := int(turn.Load()); n > execEmptyTurnStreakLimit+1 {
+		t.Errorf("model called %d times; empty-turn path should stall by turn %d", n, execEmptyTurnStreakLimit)
 	}
 }
 

@@ -66,6 +66,19 @@ const (
 	// exactly repeat the immediately prior turn with no productive write
 	// between.
 	execIdenticalStreakLimit = 3
+
+	// execEmptyTurnStreakLimit: consecutive "empty" turns — a turn that made no
+	// productive write while nothing has ever been written to disk this attempt
+	// (see turnObs.emptyTurn) — before the attempt is marked stalled. The first
+	// empty turn triggers one write-now redirect (buildEmptyTurnRedirect); this
+	// limit gives the model two further turns to act on it before giving up.
+	// This is the fast path for the muse-glimmer planning spiral
+	// (lsystem-baseline-1 bead 2): ~14 min/turn of pure thinking, content_chars
+	// and write_file calls both zero, that the wall-clock backstops
+	// (execCheckpointInterval / execStallWindow) only caught after ~19 min with a
+	// generic finalize directive that did not break the spiral. Detected the
+	// instant a turn ends — no wall-clock wait of its own.
+	execEmptyTurnStreakLimit = 3
 )
 
 // turnObs is one turn's worth of mechanical progress signal, computed by the
@@ -83,6 +96,13 @@ type turnObs struct {
 	// byte-identical to the immediately prior turn's, with no productive write
 	// in between.
 	identicalCall bool
+	// emptyTurn: this turn made no productive write AND nothing has been written
+	// to disk at all this attempt (write_file call count still zero). Covers the
+	// planning-spiral shapes — zero tool calls, or a single throwaway read_file
+	// after a long think — where the model emits nothing actionable. A turn that
+	// wrote something earlier in the attempt is NOT empty even if it made no
+	// progress this turn: that case is the wall-clock backstop's job.
+	emptyTurn bool
 }
 
 // progressTracker accumulates per-turn progress signal for one EXECUTE_BEAD
@@ -99,6 +119,7 @@ type progressTracker struct {
 	nonProductiveStreak int
 	spiralStreak        int
 	identicalStreak     int
+	emptyTurnStreak     int
 	lastProductiveNanos atomic.Int64
 }
 
@@ -126,6 +147,11 @@ func (t *progressTracker) observe(now time.Time, o turnObs) {
 		t.identicalStreak++
 	} else {
 		t.identicalStreak = 0
+	}
+	if o.emptyTurn {
+		t.emptyTurnStreak++
+	} else {
+		t.emptyTurnStreak = 0
 	}
 }
 

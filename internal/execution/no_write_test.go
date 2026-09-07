@@ -13,14 +13,13 @@ import (
 	"ratchet/internal/db"
 )
 
-// TestRunExecuteBeadReal_NoWriteAfterWarningIsLabeledNoWrite reproduces the
-// Stage 4 audit's "confirmed cosmetic" no-write-warning finding: once the
-// no-write warning fires (turn 1: zero tool calls, expectedFiles non-empty)
-// and the model still produces zero tool calls on the very next turn, the
-// run used to fall through to termination_cause='success' — indistinguishable
-// from a normal completion even though nothing was ever written. Verifies it
-// now writes 'no_write' instead.
-func TestRunExecuteBeadReal_NoWriteAfterWarningIsLabeledNoWrite(t *testing.T) {
+// TestRunExecuteBeadReal_PersistentEmptyTurnsAreStalled: a model that ends every
+// turn with no tool call and never writes anything (a planning spiral, or code
+// emitted only as prose) gets one write-now redirect and is then marked
+// 'stalled' after execEmptyTurnStreakLimit consecutive empty turns. 'stalled'
+// (not the old 'no_write', and not a misleading 'success') so it feeds
+// ADJUDICATE's stalled-execution note + escalateOnRepeatedStall.
+func TestRunExecuteBeadReal_PersistentEmptyTurnsAreStalled(t *testing.T) {
 	// Every /api/chat call returns an immediately-done, empty-content,
 	// zero-tool-call response — simulating a model that produces prose (or
 	// nothing) instead of ever calling write_file, on every turn.
@@ -104,8 +103,19 @@ func TestRunExecuteBeadReal_NoWriteAfterWarningIsLabeledNoWrite(t *testing.T) {
 	).Scan(&cause); err != nil {
 		t.Fatalf("query termination_cause: %v", err)
 	}
-	if cause != "no_write" {
-		t.Errorf("termination_cause = %q, want %q", cause, "no_write")
+	if cause != "stalled" {
+		t.Errorf("termination_cause = %q, want %q", cause, "stalled")
+	}
+
+	trace, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	if strings.Count(string(trace), "[injected: write-now redirect") != 1 {
+		t.Errorf("expected exactly one write-now redirect, got trace:\n%s", trace)
+	}
+	if !strings.Contains(string(trace), "wrote nothing to disk after the redirect") {
+		t.Errorf("expected the empty-turn stall line, got trace:\n%s", trace)
 	}
 }
 
