@@ -239,12 +239,29 @@ func mechanicalLoopPatternCheck(traceStr string) string {
 	return ""
 }
 
+// monitorNumPredict caps MONITOR_EXECUTION's generated tokens. The required
+// output is exactly two short lines (a DECISION and a one-sentence REASON) —
+// well under 256 tokens. The cap exists because MONITOR runs as a *second*
+// Ollama model concurrently with EXECUTE_BEAD's model on a single GPU: an
+// uncapped monitor call that degenerates (mistral-small3.2 under the
+// format:"json" grammar produced 4081 tokens over 11m39s on lsystem-demo-run
+// bead 2, 2026-09-07) starves the model doing the real work for the entire
+// generation and is a leading cause of the EXECUTE stream stalling. Whatever
+// the model emits past the cap would be ignored by parseDecision anyway.
+const monitorNumPredict = 256
+
 // callMonitorModel calls the model and returns "FIRE" or "NO_FIRE".
 func callMonitorModel(ctx context.Context, oc *ollama.Client, model, trace string) (string, error) {
 	raw, err := oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: monitorSystemPrompt},
 		{Role: "user", Content: "Current trace:\n\n" + trace},
-	}, &ollama.Options{NumCtx: ollama.MonitorNumCtx})
+	}, &ollama.Options{
+		NumCtx:     ollama.MonitorNumCtx,
+		NumPredict: monitorNumPredict,
+		// Stay loaded across polling ticks — the default for Chat() is
+		// unload-after-use, which would reload the model every ~30 s.
+		KeepAlive: ollama.KeepResident(),
+	})
 	if err != nil {
 		return "", err
 	}

@@ -1,6 +1,47 @@
 package execution
 
-import "testing"
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"ratchet/internal/ollama"
+)
+
+// TestCallMonitorModelCapsGenerationAndStaysResident locks in the two request
+// knobs that keep MONITOR_EXECUTION from starving the concurrently-running
+// EXECUTE_BEAD model: a small num_predict (its output is two short lines; an
+// uncapped call once ran 4081 tokens over 11m39s under the format:"json"
+// grammar, contending for the GPU the whole time — lsystem-demo-run bead 2)
+// and keep_alive:-1 so the model isn't unloaded/reloaded every polling tick
+// (Chat()'s default is unload-after-use).
+func TestCallMonitorModelCapsGenerationAndStaysResident(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &gotBody)
+		w.Write([]byte(`{"message":{"role":"assistant","content":"DECISION: NO_FIRE\nREASON: fine"},"done":true}`))
+	}))
+	defer srv.Close()
+
+	oc := ollama.New(srv.URL)
+	if _, err := callMonitorModel(context.Background(), oc, "m", "[TURN 1] read_file x"); err != nil {
+		t.Fatalf("callMonitorModel: %v", err)
+	}
+	if got := gotBody["keep_alive"]; got != float64(-1) {
+		t.Errorf("keep_alive = %v, want -1", got)
+	}
+	opts, _ := gotBody["options"].(map[string]any)
+	if got := opts["num_predict"]; got != float64(monitorNumPredict) {
+		t.Errorf("options.num_predict = %v, want %d", got, monitorNumPredict)
+	}
+	if got := opts["num_ctx"]; got != float64(ollama.MonitorNumCtx) {
+		t.Errorf("options.num_ctx = %v, want %d", got, ollama.MonitorNumCtx)
+	}
+}
 
 // TestMechanicalLoopPatternCheck covers the two "Explicit loop patterns"
 // rules documented in monitorSystemPrompt. Before this check existed, both

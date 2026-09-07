@@ -482,6 +482,40 @@ func TestChatOmitsNumPredictByDefault(t *testing.T) {
 	}
 }
 
+// TestChatSendsKeepAliveZeroByDefault: the plain Chat() path (one-shot handoff
+// verbs) tells Ollama to unload the model as soon as the reply finishes, so a
+// finished verb's model doesn't stay pinned (OLLAMA_KEEP_ALIVE=-1 on the
+// deployment) crowding out EXECUTE_BEAD. Options.KeepAlive overrides it —
+// MONITOR_EXECUTION passes KeepResident() to survive its polling loop.
+func TestChatSendsKeepAliveZeroByDefault(t *testing.T) {
+	capture := func(opts *Options) (map[string]any, bool) {
+		var gotBody map[string]any
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			json.Unmarshal(body, &gotBody)
+			w.Write([]byte(`{"message":{"role":"assistant","content":"{}"},"done":true}`))
+		}))
+		defer srv.Close()
+		c := New(srv.URL)
+		if _, err := c.Chat(context.Background(), "m", []Message{{Role: "user", Content: "hi"}}, opts); err != nil {
+			t.Fatalf("Chat: %v", err)
+		}
+		v, present := gotBody["keep_alive"]
+		return map[string]any{"v": v}, present
+	}
+
+	if got, present := capture(nil); !present || got["v"] != float64(0) {
+		t.Errorf("Chat() nil Options keep_alive = %v (present=%v), want 0", got["v"], present)
+	}
+	if got, present := capture(&Options{KeepAlive: KeepResident()}); !present || got["v"] != float64(-1) {
+		t.Errorf("Chat() KeepResident keep_alive = %v (present=%v), want -1", got["v"], present)
+	}
+	ka := 300
+	if got, _ := capture(&Options{KeepAlive: &ka}); got["v"] != float64(300) {
+		t.Errorf("Chat() KeepAlive=300 keep_alive = %v, want 300", got["v"])
+	}
+}
+
 // TestChatDiscardsThinkingField: a response carrying a separated `thinking`
 // field must not break Chat() — it returns Content only, thinking is logged
 // and dropped.

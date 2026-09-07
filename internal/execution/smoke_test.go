@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"ratchet/internal/db"
+	"ratchet/internal/ollama"
 )
 
 // openSmokeDB opens a file-based SQLite DB in a temp directory.
@@ -322,5 +323,76 @@ func TestSmokeExecutionWindowMonitorFire(t *testing.T) {
 		`SELECT trace_path FROM executions WHERE id = ?`, execID).Scan(&tracePath)
 	if info, err := os.Stat(tracePath); err != nil || info.Size() == 0 {
 		t.Errorf("trace file missing or empty (path=%s, err=%v)", tracePath, err)
+	}
+}
+
+// TestSmokeExecutionWindowTransientExit: when execute-bead exits with
+// execExitTransient (a mid-generation Ollama stream stall — ollama.ErrStreamIdle,
+// PR #9's watchdog), the window must NOT treat it as a startup crash. It routes
+// through handleTransientExecFailure: the executions row is marked infra_failure,
+// the bead goes back to pending, and RunExecutionWindow returns an
+// ollama.IsTransient error (so the dispatcher retries under transientRetryCap
+// with no verbTolerance strike and no "crashed at startup" escalation).
+func TestSmokeExecutionWindowTransientExit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("smoke test: use -run TestSmoke without -short")
+	}
+	binPath := buildRatchet(t)
+
+	d := openSmokeDB(t)
+	ctx := context.Background()
+	_, beadID, _, jobID := seedSmokeProject(t, d)
+
+	testExecutable = binPath
+	testExecuteBeadMode = "transient"
+	t.Cleanup(func() { testExecutable = ""; testExecuteBeadMode = "" })
+
+	job := &db.HandoffJob{
+		ID:        jobID,
+		ProjectID: -1,
+		Verb:      db.VerbExecuteBead,
+		BeadID:    sql.NullInt64{Int64: beadID, Valid: true},
+	}
+
+	windowCtx, cancelWindow := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelWindow()
+
+	err := RunExecutionWindow(windowCtx, d, "http://127.0.0.1:11434", job)
+	if err == nil {
+		t.Fatal("RunExecutionWindow returned nil; want a transient error")
+	}
+	if !ollama.IsTransient(err) {
+		t.Errorf("RunExecutionWindow error = %v; want ollama.IsTransient", err)
+	}
+
+	var execID int64
+	var infraFailure int
+	if err := d.QueryRowContext(ctx,
+		`SELECT id, infra_failure FROM executions WHERE bead_id = ?`, beadID,
+	).Scan(&execID, &infraFailure); err != nil {
+		t.Fatalf("read execution: %v", err)
+	}
+	if infraFailure != 1 {
+		t.Errorf("infra_failure = %d, want 1", infraFailure)
+	}
+
+	var beadStatus string
+	if err := d.QueryRowContext(ctx,
+		`SELECT status FROM beads WHERE id = ?`, beadID,
+	).Scan(&beadStatus); err != nil {
+		t.Fatalf("read bead status: %v", err)
+	}
+	if beadStatus != "pending" {
+		t.Errorf("bead status = %q, want pending", beadStatus)
+	}
+
+	// No ANALYZE_EXECUTION should be enqueued on this path.
+	var analyzeJobs int
+	_ = d.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM handoff_jobs WHERE verb = ? AND bead_id = ?`,
+		db.VerbAnalyzeExecution, beadID,
+	).Scan(&analyzeJobs)
+	if analyzeJobs != 0 {
+		t.Errorf("ANALYZE_EXECUTION enqueued (%d); transient path must not finalize", analyzeJobs)
 	}
 }

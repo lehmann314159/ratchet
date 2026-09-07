@@ -6,6 +6,7 @@ package execution
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"ratchet/internal/db"
+	"ratchet/internal/ollama"
 )
 
 const (
@@ -144,6 +146,7 @@ func RunExecutionWindow(ctx context.Context, d *db.DB, ollamaURL string, job *db
 
 	executeDone := make(chan error, 1)
 	go func() { executeDone <- executeCmd.Wait() }()
+	var execWaitErr error
 
 	// Start monitor.
 	monitorCmd := exec.Command(self, "monitor",
@@ -188,8 +191,9 @@ loop:
 			killMonitor(monitorCmd, monitorDone)
 			return ctx.Err()
 
-		case <-executeDone:
-			// execute-bead exited on its own (success, timeout, or crash).
+		case execWaitErr = <-executeDone:
+			// execute-bead exited on its own (success, timeout, crash, or a
+			// transient-infra exit — see execExitTransient below).
 			break loop
 
 		case <-windowPollTicker.C:
@@ -204,7 +208,7 @@ loop:
 			slog.Info("monitor fired — sending SIGTERM to execute-bead", "execution_id", execID)
 			if err := executeCmd.Process.Signal(syscall.SIGTERM); err == nil {
 				select {
-				case <-executeDone:
+				case execWaitErr = <-executeDone:
 					// execute-bead exited gracefully; it wrote 'monitor_terminated'.
 				case <-time.After(graceWindow):
 					// Still running past grace window — SIGKILL.
@@ -232,6 +236,19 @@ loop:
 		); err != nil {
 			slog.Error("write forced termination_cause", "error", err)
 		}
+	}
+
+	// execute-bead signalled a transient infrastructure error mid-run (a stalled
+	// Ollama stream, a 5xx, a reset connection — see execExitTransient in
+	// bead.go). This is neither a crash nor a model failure: hand it back to the
+	// dispatcher as an ollama.IsTransient error so it retries under
+	// transientRetryCap without a verbTolerance strike and without the
+	// "crashed at startup" escalation path.
+	var ee *exec.ExitError
+	if errors.As(execWaitErr, &ee) && ee.ExitCode() == execExitTransient {
+		slog.Warn("execute-bead stopped on a transient infrastructure error; routing through transient retry",
+			"execution_id", execID, "bead_id", beadID)
+		return handleTransientExecFailure(ctx, d, execID, beadID)
 	}
 
 	// If execute-bead exited without writing termination_cause it crashed before
@@ -308,6 +325,32 @@ func handleInfraFailure(ctx context.Context, d *db.DB, execID, beadID int64, job
 		`UPDATE handoff_jobs SET status = 'pending', updated_at = ? WHERE id = ?`,
 		now, job.ID)
 	return err
+}
+
+// handleTransientExecFailure handles an execution that execute-bead ended with
+// execExitTransient (a mid-run stalled stream / Ollama 5xx / reset connection).
+// It marks the execution row as an infra failure (so ANALYZE/ADJUDICATE never
+// see it and it doesn't count as a real model attempt), resets the bead to
+// pending, then returns an ollama.IsTransient error. The dispatcher's
+// recordRunFailure recognises that and routes it through recordTransientRunFailure
+// (bounded by transientRetryCap, no verbTolerance strike) — unlike
+// handleInfraFailure, this function does NOT touch handoff_jobs; the dispatcher
+// owns the job's status on this path.
+func handleTransientExecFailure(ctx context.Context, d *db.DB, execID, beadID int64) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := d.ExecContext(ctx, `
+		UPDATE executions
+		SET infra_failure = 1, termination_cause = 'success', ended_at = ?
+		WHERE id = ?`, now, execID,
+	); err != nil {
+		return fmt.Errorf("mark transient infra_failure: %w", err)
+	}
+	if _, err := d.ExecContext(ctx,
+		`UPDATE beads SET status = 'pending' WHERE id = ?`, beadID,
+	); err != nil {
+		return fmt.Errorf("reset bead to pending: %w", err)
+	}
+	return fmt.Errorf("execute-bead transient stream failure (execution %d): %w", execID, ollama.ErrStreamIdle)
 }
 
 // finalizeExecution writes ended_at and enqueues ANALYZE_EXECUTION atomically.

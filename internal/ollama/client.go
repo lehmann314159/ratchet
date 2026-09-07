@@ -20,22 +20,31 @@ const DefaultTemperature = 0.3
 
 // Context window sizes sent with every request via num_ctx. These cap the KV
 // cache allocation. defaultNumCtx covers every verb by default (both Chat()
-// handoff prompts and ChatWithTools() tool-call accumulation) — headroom
-// checked against this deployment's actual unified-memory budget, not a
-// generic guess (see internal/ollama's git history for the sizing rationale).
-// MonitorNumCtx is the one deliberate exception: MONITOR_EXECUTION runs a
-// tight, frequent polling loop (a short trace snippet in, a FIRE/NO_FIRE
-// decision out) and never touches a design doc or bead history, so it never
-// needs — and shouldn't pay the KV-cache cost of — the full default.
+// handoff prompts and ChatWithTools() tool-call accumulation). MonitorNumCtx
+// is the one deliberate exception: MONITOR_EXECUTION runs a tight, frequent
+// polling loop (a short trace snippet in, a FIRE/NO_FIRE decision out) and
+// never touches a design doc or bead history, so it never needs — and
+// shouldn't pay the KV-cache cost of — the full default.
 //
 // 40960 is qwen3:32b's native trained context — the fleet's tightest window
 // (gemma4:31b is 262144, mistral-small3.2:24b 131072). Setting num_ctx to
 // exactly the native max avoids rope-scaling degradation while giving the
 // downstream verbs room for the design-doc excerpts now fed to
 // REFINE_TESTS_{WRITE,CRITIQUE,JUDGE} and ADJUDICATE_NEXT_EXECUTION alongside
-// the bead spec, impl context, and current test file. RAM is not the
-// constraint here — one model is resident at a time and the host has 119 GiB
-// unified memory.
+// the bead spec, impl context, and current test file.
+//
+// Memory footprint IS a live concern, contrary to an earlier version of this
+// comment ("one model is resident at a time"): the gx10 deployment runs Ollama
+// with OLLAMA_MAX_LOADED_MODELS=3 and OLLAMA_KEEP_ALIVE=-1, and EXECUTE_BEAD
+// (muse) runs concurrently with MONITOR_EXECUTION (mistral-small3.2) by design,
+// so two-to-three ~24-35 GB models plus their KV caches routinely coexist on
+// 119 GiB of unified memory. Under that pressure the single GB10 GPU is
+// time-shared and Ollama's HTTP stream to the client can stall for minutes
+// mid-generation (lsystem-demo-run bead 2, 2026-09-07). Mitigations so far:
+// one-shot Chat() verbs pass KeepAlive:0 so the prior verb's model is dropped
+// before EXECUTE (see Options.KeepAlive); MONITOR caps its own generation.
+// Right-sizing this constant per verb is a tracked follow-up
+// (docs/execute-monitor-contention.md).
 const (
 	defaultNumCtx = 40960
 	MonitorNumCtx = 16384
@@ -286,6 +295,20 @@ type Options struct {
 	// Zero means: ChatWithTools uses toolLoopNumPredict; Chat sets no cap
 	// (its runaway bound is the schema reasoning field's maxLength).
 	NumPredict int
+	// KeepAlive, when non-nil, is sent as the request's top-level `keep_alive`
+	// field (seconds; 0 = unload the model as soon as this response finishes,
+	// negative = keep resident indefinitely). Nil omits the field, leaving the
+	// server default in force — which on the gx10 deployment is
+	// OLLAMA_KEEP_ALIVE=-1, i.e. every model ever touched stays pinned.
+	//
+	// One-shot Chat() verbs set KeepAlive to 0: the handoff pipeline is
+	// strictly sequential, so the model a verb just used has no next caller for
+	// many minutes, and leaving it resident only crowds out EXECUTE_BEAD's
+	// model (which then time-shares the GPU with MONITOR — see the note on
+	// defaultNumCtx). The cost is a warm reload (~10-15 s on this box, already
+	// absorbed by dispatch's Warmup step) when two consecutive verbs happen to
+	// share a model.
+	KeepAlive *int
 	// OmitFormat drops the `format` field from the request entirely, overriding
 	// the default `format:"json"` (and any Format set above). Only honored by
 	// ChatWithTools. Use it on a tool-primary loop whose final turn is NOT
@@ -300,13 +323,31 @@ type Options struct {
 }
 
 type chatRequest struct {
-	Model    string         `json:"model"`
-	Messages []Message      `json:"messages"`
-	Stream   bool           `json:"stream"`
-	Think    *bool          `json:"think,omitempty"`
-	Format   any            `json:"format,omitempty"`
-	Options  map[string]any `json:"options,omitempty"`
+	Model     string         `json:"model"`
+	Messages  []Message      `json:"messages"`
+	Stream    bool           `json:"stream"`
+	Think     *bool          `json:"think,omitempty"`
+	Format    any            `json:"format,omitempty"`
+	KeepAlive *int           `json:"keep_alive,omitempty"`
+	Options   map[string]any `json:"options,omitempty"`
 }
+
+// oneShotKeepAlive is the default `keep_alive` for Chat(): 0 seconds — the
+// model is unloaded as soon as the reply finishes. Every Chat() caller is a
+// sequential one-shot handoff verb except MONITOR_EXECUTION, which overrides
+// this via Options.KeepAlive (KeepResident) to stay loaded across its polling
+// ticks.
+var oneShotKeepAlive = 0
+
+// keepResident is a `keep_alive` of -1 (stay loaded until explicitly evicted or
+// pushed out by memory pressure). MONITOR_EXECUTION passes KeepResident so its
+// model is not unloaded and reloaded on every ~30 s polling tick.
+var keepResident = -1
+
+// KeepResident returns an Options.KeepAlive value that keeps the model loaded
+// across calls (keep_alive: -1). Use for a caller that makes many small
+// requests in a loop; the default for one-shot Chat() verbs is unload-after-use.
+func KeepResident() *int { return &keepResident }
 
 type chatResponse struct {
 	Message    Message `json:"message"`
@@ -398,6 +439,7 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 	numPredict := 0
 	var format any = "json"
 	var think *bool
+	keepAlive := &oneShotKeepAlive
 
 	// Per-call recording for the qualification harness / capture instrumentation.
 	// No-op unless a recorder is installed on ctx.
@@ -433,6 +475,9 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 		if opts.Format != nil {
 			format = opts.Format
 		}
+		if opts.KeepAlive != nil {
+			keepAlive = opts.KeepAlive
+		}
 		think = opts.Think
 	}
 
@@ -444,6 +489,10 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 		if ov.Think != nil {
 			think = ov.Think
 		}
+		// The qualify harness manages model residency itself (unloadModel
+		// between candidates); the one-shot unload-after-use default would
+		// reload the model on every replayed call and skew its timings.
+		keepAlive = &keepResident
 	}
 
 	reqOptions := map[string]any{"temperature": temp, "num_ctx": numCtx}
@@ -451,12 +500,13 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, opts *O
 		reqOptions["num_predict"] = numPredict
 	}
 	req := chatRequest{
-		Model:    model,
-		Messages: msgs,
-		Stream:   false,
-		Think:    think,
-		Format:   format,
-		Options:  reqOptions,
+		Model:     model,
+		Messages:  msgs,
+		Stream:    false,
+		Think:     think,
+		Format:    format,
+		KeepAlive: keepAlive,
+		Options:   reqOptions,
 	}
 
 	body, err := json.Marshal(req)

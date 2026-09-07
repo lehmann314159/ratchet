@@ -70,19 +70,34 @@ func RunExecuteBeadMain(args []string) {
 	}
 	defer d.Close()
 
+	var runErr error
 	if *mode != "" {
-		if err := runExecuteBeadStub(d, *execID, *mode); err != nil {
-			slog.Error("execute-bead stub exiting with error", "execution_id", *execID, "error", err)
-			os.Exit(1)
-		}
-		return
+		runErr = runExecuteBeadStub(d, *execID, *mode)
+	} else {
+		runErr = runExecuteBeadReal(d, *execID, *ollamaURL)
 	}
-
-	if err := runExecuteBeadReal(d, *execID, *ollamaURL); err != nil {
-		slog.Error("execute-bead exiting with error", "execution_id", *execID, "error", err)
+	if runErr != nil {
+		if ollama.IsTransient(runErr) {
+			// A mid-generation stream stall / Ollama 5xx / reset connection —
+			// not a crash and not a model failure. Exit with a distinct code so
+			// RunExecutionWindow routes this through transient-retry accounting
+			// (bounded, no verbTolerance strike) instead of the
+			// "crashed at startup" infra-failure path.
+			slog.Error("execute-bead: transient infrastructure error mid-execution, will retry",
+				"execution_id", *execID, "error", runErr)
+			os.Exit(execExitTransient)
+		}
+		slog.Error("execute-bead exiting with error", "execution_id", *execID, "error", runErr)
 		os.Exit(1)
 	}
 }
+
+// execExitTransient is the exit code RunExecuteBeadMain uses to tell
+// RunExecutionWindow that execute-bead stopped on a transient infrastructure
+// error (ollama.IsTransient) rather than a crash. Value 75 == BSD sysexits.h
+// EX_TEMPFAIL ("temporary failure, indicating something that is not really an
+// error").
+const execExitTransient = 75
 
 // runExecuteBeadReal runs the agentic tool-calling loop against the assigned model.
 func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
@@ -672,6 +687,13 @@ func buildEmptyTurnRedirect(expectedFiles []string) string {
 // runExecuteBeadStub is the original stub implementation, preserved for smoke tests.
 func runExecuteBeadStub(d *db.DB, execID int64, mode string) error {
 	ctx := context.Background()
+
+	// "transient": exit immediately with an ollama.IsTransient error, exactly as
+	// runExecuteBeadReal does when ChatWithTools returns ErrStreamIdle. Exercises
+	// RunExecutionWindow's execExitTransient → handleTransientExecFailure path.
+	if mode == "transient" {
+		return fmt.Errorf("model call: %w", ollama.ErrStreamIdle)
+	}
 
 	var tracePath string
 	var budget int
