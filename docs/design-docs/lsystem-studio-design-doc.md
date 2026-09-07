@@ -1057,6 +1057,15 @@ re-derive or paraphrase):**
 - **Pin — `grammar` bead, `ParseSystem` malformed rule head:** `A -> B` parses;
   `AB -> C` is an error (multi-letter head); `-> B` is an error, **not** a panic (empty
   head). Every error carries a 1-based line number.
+- **Pin — `grammar` bead, rule head vs. formal parameters:** in a rule line
+  `head -> body`, the rule head is the substring of `head` **before the first `(`** (or
+  all of it when there is no `(`), and that substring must be exactly one ASCII letter.
+  Any `(name, name, …)` that follows the letter — still before the `->` — is the
+  formal-parameter list. Parameters are **never** parsed from the body. Worked:
+  `A(s) -> F(s)` → `Rule.Head == 'A'`, `Rule.Params == ["s"]`, arity 1, body `F(s)`;
+  `A -> B` → `Head 'A'`, `Params` empty; `A(x, y) -> …` → `Params ["x", "y"]`. An
+  unclosed `(` in the head is an error; an empty parameter name (`A() -> …`,
+  `A(,) -> …`) is an error.
 - **Pin — `turtle` bead, `Interpret`:** start `(0,0)` heading `0`, `angleDefault 90`,
   `stepDefault 1`. `F(1) +(90) F(1)` → segments `{0,0,1,0}`, `{1,0,1,1}` (both exact).
   `F(1) [ +(90) F(1) ] F(1)` → **three** segments `{0,0,1,0}`, `{1,0,1,1}`, `{1,0,2,0}`
