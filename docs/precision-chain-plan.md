@@ -123,41 +123,45 @@ of escalation while the larger upstream work is in flight.
 (live confirmation ADJUDICATE reaches `re_refine` on the real grammar stall) is
 Phase 3 step 7 — the existing fixture cannot exercise it.
 
-### Phase 1 — upstream precision, source-first
+### Phase 1 — upstream precision
 
-Design doc is the source of truth; DECOMPOSE consumes it. Fix in that order so
-DECOMPOSE precision is tested against improved doc output, not stale output.
+**ORDER CORRECTED 2026-09-07 (Mike): (A) DECOMPOSE precision goes BEFORE (B)
+design-doc guidance.** The "doc before DECOMPOSE, measure against improved doc
+output" rationale below only bites if the docs need doc-level improvement that
+changes DECOMPOSE's input — and the mature driver docs (lsystem, fractalviz,
+exprvm-web) are already well-pinned. The acceptance criteria step 3 originally
+gave were self-contradictory: the two lsystem grammar defects (`F[+]`→3, head
+"before the first `(`") are **not** doc ambiguities — the doc is unambiguous and
+pinned on both (lines 437-444 + Pin bullets 1057/1060; line 448 + worked example
+772-774 + Pin 1054). They are DECOMPOSE-carry (A) and CRITIQUE (C) failures.
+`project_refine_precision_phase0` also ranked B the weaker lever.
 
-3. **Design-doc precision guidance (B).** `project_designdoc_precision_guidance`.
-   - Sharpen `draft-design-doc` (the prompt) and `cmd/checkdesigndoc` (the
-     linter) for: one unambiguous reading per rule; explicit anti-examples;
-     construction-form pins (the exact phrasing that must survive to the bead);
-     bead surface-area caps.
-   - Validation: run `cmd/checkdesigndoc` against the existing
-     `docs/design-docs/` corpus and the lsystem doc. Acceptance: it flags (a) the
-     bracket-module count ambiguity that produced `F[+]`→3, (b) the "before the
-     first `(`" head phrasing that DECOMPOSE later compressed away. No new false
-     positives on the design docs that produced clean runs (fractalviz).
+3. **DECOMPOSE precision (A).** `decompose-precision-plan.md`.
+   - **Phase 1 CORE LANDED + DEPLOYED 2026-09-07 (`main` `b4ae16e`)**, scope
+     "core now, escalation deferred": multi-pin-per-bead + multi-bead-pin
+     injection fix (`extractDecompositionNotesPins` accumulates; `pinBeadTargets`
+     / `pinTargetsRe`); `RECONCILE` re-injects over all beads each round;
+     report-only `unconsumedPinTargets` (`slog.Warn` + AUDIT input).
+     `TestUnconsumedPinTargets_CorpusGate` is the committed offline gate.
+   - **Deferred:** structural placement (split-detection / fuzzy match) +
+     reject-retry + escalate-to-user — until a baseline sizes the false-positive
+     rate of the report-only check.
+   - **Still to do in A:** prose-literal / construction-form pins (Phase 2 of
+     `decompose-precision-plan.md`), excerpt-header reconciliation (Phase 3),
+     the post-bakeoff baseline fold-in (Phase 4). **Re-measure Phase 0's payoff
+     against a fresh muse-WRITE baseline before locking Phase 2/3 scope.**
 
-4. **DECOMPOSE precision (A).** `decompose-precision-plan.md` item 3, bundling
-   `project_decompose_worked_example_compression` +
-   `project_decompose_notes_not_enforced` + `project_decompose_escalation`.
-   - Known concrete gaps to close: bead-split / multi-bead / multi-pin drop pins
-     (multi-pin beads currently inject only the **last** pin verbatim —
-     fractalviz-1); prose literals and construction-form not injected;
-     compression re-describes load-bearing rule clauses into their opposite
-     (the grammar `head` case).
-   - **Re-measure Phase 0's expected payoff** (`project_refine_precision_phase0`)
-     against a fresh muse-WRITE baseline before locking scope — some of what the
-     retrospective attributed to doc/DECOMPOSE gaps was convolved with gemma's
-     WRITE pathology and may not recur under muse.
-   - Validation: replay against corpus fixtures — grammar c1 (does the "before
-     the first `(`" clause now survive verbatim?), fractalviz multi-pin beads
-     (do all pins inject?); re-run the Phase 0 corpus bucket measurement.
+4. **Design-doc precision guidance (B).** `project_designdoc_precision_guidance`.
+   - Sharpen `draft-design-doc` + `cmd/checkdesigndoc` for: one unambiguous
+     reading per rule; explicit anti-examples; construction-form pins; bead
+     surface-area caps. Scope is two-reading rules + construction-form + bead
+     caps + fresh-project onboarding — **NOT** the lsystem grammar defects.
+   - Validation: `cmd/checkdesigndoc` against the `docs/design-docs/` corpus; no
+     new false positives on the docs that produced clean runs (fractalviz).
 
-**Exit Phase 1 when:** `cmd/checkdesigndoc` catches both grammar ambiguities;
-DECOMPOSE replay shows load-bearing clauses and all pins surviving; Phase 0
-bucket re-measure shows the expected reduction.
+**Exit Phase 1 when:** DECOMPOSE replay shows load-bearing clauses and all pins
+surviving; the Phase 0 bucket re-measure shows the expected reduction; the B
+checks catch their (revised) targets with no fractalviz false positives.
 
 ### Phase 2 — downstream detection (depends on Phase 1 output quality)
 
@@ -217,8 +221,11 @@ regression.
   upstream work is landing. If Phase 1/2 still let a bad test through
   occasionally, `re_refine` catches it instead of an escalation — this is the
   single biggest lever on "settling cleanup" risk.
-- **Design doc before DECOMPOSE** (3 before 4): DECOMPOSE precision must be
-  measured against improved doc output.
+- **DECOMPOSE before design-doc guidance** (3 before 4, corrected 2026-09-07):
+  the mature driver docs are already well-pinned, so the "measure DECOMPOSE
+  against improved doc output" argument doesn't apply; the corpus-verified live
+  lever is pins not surviving DECOMPOSE. B's residual scope (two-reading rules,
+  construction-form pins, bead caps, fresh-project onboarding) does not gate A.
 - **CRITIQUE before the re_refine loop** (5 before 6): the threshold tuning in 6
   assumes CRITIQUE's post-5 signal quality.
 - **Full runs only in Phase 3.** Everything in Phase 0–2 is unit-testable +
