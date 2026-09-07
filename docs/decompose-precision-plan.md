@@ -186,7 +186,41 @@ for Phase 1's gate (DECOMPOSE + RECONCILE dispatch already captured, 004–006).
 
 ### Phase 1 — pin-consumption assertion (FIRST GATE)
 
-Smallest, highest-confidence, zero false-positive risk.
+**Status: CORE LANDED 2026-09-07 (`main`, "Core now, escalation deferred" scope).**
+What shipped:
+- `extractDecompositionNotesPins` now keeps the return as `map[string]string`
+  (bead title → text) but **accumulates**: multiple `Pin` bullets for one bead
+  are all joined into the value (was: last one wins — the fractalviz-1 / lsystem
+  `grammar` drop), and a bullet naming several beads (`` `handlers-templates`
+  and `cli` beads ``) attaches its text to each. New `pinBeadTargets` parses the
+  target run via `pinTargetsRe` (tolerates soft-wrap between the backticked name
+  and the word "bead"; ignores backticked *symbols* later in the bullet).
+- `injectDecompositionNotesPin` unchanged in signature — the accumulated value
+  means one canonical appendix carries every pin for the bead.
+- `RECONCILE.applyFixes` gained `reinjectPinsAcrossBeads`: re-runs injection over
+  **every** current bead each round, writing a revision only where the text
+  actually changed (idempotent no-op otherwise).
+- `unconsumedPinTargets(pins, beadTitles)` — **report-only** for now:
+  `slog.Warn` from `DECOMPOSE.Commit` and `RECONCILE.reinjectPinsAcrossBeads`
+  when a pin target names no bead. Also fed into AUDIT_DECOMPOSITION's user
+  message ("## Unconsumed Design-Doc Pins (mechanical)").
+- Tests: `mechanical_checks_test.go` (`TestPinBeadTargets`,
+  `…MultiplePinsPerBead`, `…MultiBeadPin`, `TestInjectDecompositionNotesPin_MultiplePins`,
+  `TestUnconsumedPinTargets`, `…_RealDocs`, `…_CorpusGate`),
+  `reconcile_reject_test.go` (`…_ReinjectsPinIntoUntouchedBead`).
+  `TestUnconsumedPinTargets_CorpusGate` is the offline gate below, as a
+  committed test: p48 47/48 + fractalviz + lsystem → 0 flagged; baseline-9's
+  real split/rename → `[cli, handlers-templates]` flagged.
+
+**DEFERRED (needs a baseline to size the false-positive rate first):** structural
+placement (split-detection / fuzzy single-match), `commitRedecompose`
+reject-and-retry on an unplaceable pin, and escalate-to-user. `cli`→`main` is a
+pure rename that no mechanical match can place — it can only ever be
+report → AUDIT → (later) escalate.
+
+---
+
+Original plan (smallest, highest-confidence, zero false-positive risk):
 
 - After the pin sweep in DECOMPOSE *and* after every RECONCILE round, assert
   **every** pin from `extractDecompositionNotesPins` was consumed by ≥1 bead's

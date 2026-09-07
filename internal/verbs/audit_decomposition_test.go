@@ -26,7 +26,7 @@ func TestBuildAuditUserMsg_InstructsOmittingConcededFindings(t *testing.T) {
 		Outcome:        "disagreed_continuing",
 	}}
 
-	msg := buildAuditUserMsg("design doc text", beads, history)
+	msg := buildAuditUserMsg("design doc text", beads, history, nil)
 
 	if !strings.Contains(msg, "## Previous Debate History") {
 		t.Fatal("missing Previous Debate History section")
@@ -48,7 +48,7 @@ func TestBuildAuditUserMsg_InstructsOmittingConcededFindings(t *testing.T) {
 func TestBuildAuditUserMsg_NoHistoryOmitsDebateSection(t *testing.T) {
 	beads := []beadState{{Title: "B01", FullText: "do X", OutputFiles: []string{"a.go"}, ExitCriteria: []string{"go build ./..."}}}
 
-	msg := buildAuditUserMsg("design doc text", beads, nil)
+	msg := buildAuditUserMsg("design doc text", beads, nil, nil)
 
 	if strings.Contains(msg, "Previous Debate History") {
 		t.Error("first-round message must not contain a debate history section")

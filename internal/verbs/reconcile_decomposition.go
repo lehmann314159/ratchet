@@ -398,6 +398,96 @@ func (h *ReconcileDecomposition) applyFixes(ctx context.Context, tx *sql.Tx, pro
 			return fmt.Errorf("update bead %q current_revision_id: %w", title, err)
 		}
 	}
+
+	// Re-injection sweep over EVERY current bead, not just the ones this round
+	// touched (docs/decompose-precision-plan.md Phase 1). A bead this round did
+	// not touch keeps whatever appendix it had from DECOMPOSE; this backstops
+	// any path where DECOMPOSE's own injection was skipped or a prior round left
+	// a bead without its pin. injectDecompositionNotesPin is a no-op when the
+	// text already carries the canonical appendix, so a revision is written only
+	// where something actually changed.
+	if len(pins) > 0 {
+		if err := h.reinjectPinsAcrossBeads(ctx, tx, projectID, pins, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// reinjectPinsAcrossBeads runs injectDecompositionNotesPin over every current
+// bead in the project and writes a new revision for any whose full_text it
+// changed. Also emits the report-only unconsumed-pin warning against the
+// post-RECONCILE bead titles (docs/decompose-precision-plan.md Phase 1).
+func (h *ReconcileDecomposition) reinjectPinsAcrossBeads(ctx context.Context, tx *sql.Tx, projectID int64, pins map[string]string, now string) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT b.id, br.full_text, br.monitor_override
+		FROM beads b JOIN bead_revisions br ON br.id = b.current_revision_id
+		WHERE b.project_id = ?
+		ORDER BY b.id`, projectID)
+	if err != nil {
+		return fmt.Errorf("load beads for pin re-injection: %w", err)
+	}
+	type beadRow struct {
+		id              int64
+		fullText        string
+		monitorOverride string
+	}
+	var beads []beadRow
+	for rows.Next() {
+		var br beadRow
+		if err := rows.Scan(&br.id, &br.fullText, &br.monitorOverride); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan bead for pin re-injection: %w", err)
+		}
+		beads = append(beads, br)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	var titles []string
+	for _, br := range beads {
+		var pb ParsedBead
+		if err := json.Unmarshal([]byte(br.fullText), &pb); err != nil {
+			slog.Warn("RECONCILE_DECOMPOSITION: skipping unparseable bead in pin re-injection",
+				"project_id", projectID, "bead_id", br.id, "error", err)
+			continue
+		}
+		titles = append(titles, pb.Title)
+		if !injectDecompositionNotesPin(&pb, pins) {
+			continue
+		}
+		var maxRevNum int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COALESCE(MAX(revision_number), 0) FROM bead_revisions WHERE bead_id = ?`, br.id,
+		).Scan(&maxRevNum); err != nil {
+			return fmt.Errorf("max revision number for bead %d: %w", br.id, err)
+		}
+		fullText, _ := json.Marshal(&pb)
+		res, err := tx.ExecContext(ctx, `
+			INSERT INTO bead_revisions
+			  (project_id, bead_id, revision_number, full_text,
+			   execution_budget, monitor_override, created_by_verb, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			projectID, br.id, maxRevNum+1, string(fullText),
+			h.budgetDefault, br.monitorOverride, db.VerbReconcileDecomposition, now)
+		if err != nil {
+			return fmt.Errorf("insert pin-reinjection revision for bead %d: %w", br.id, err)
+		}
+		revID, _ := res.LastInsertId()
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE beads SET current_revision_id = ? WHERE id = ?`, revID, br.id); err != nil {
+			return fmt.Errorf("update bead %d current_revision_id after pin re-injection: %w", br.id, err)
+		}
+		slog.Info("RECONCILE_DECOMPOSITION: re-injected a design-doc pin into a bead it did not touch this round",
+			"project_id", projectID, "bead_id", br.id, "title", pb.Title)
+	}
+
+	if unconsumed := unconsumedPinTargets(pins, titles); len(unconsumed) > 0 {
+		slog.Warn("RECONCILE_DECOMPOSITION: design-doc pin(s) name no bead after reconciliation",
+			"project_id", projectID, "unconsumed_pin_targets", unconsumed, "bead_titles", titles)
+	}
 	return nil
 }
 

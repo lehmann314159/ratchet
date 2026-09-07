@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"ratchet/internal/guidance"
@@ -847,8 +848,19 @@ func firstSourceGoFile(outputFiles []string) string {
 
 var (
 	decompositionPinStartRe = regexp.MustCompile(`^-\s+\*\*Pin\b`)
-	decompositionPinBeadRe  = regexp.MustCompile("`([A-Za-z0-9_-]+)`\\s+bead\\b")
-	topLevelListItemRe      = regexp.MustCompile(`^(-\s|\d+\.\s)`)
+	// pinTargetsRe matches the run of backtick-quoted bead names a Pin bullet's
+	// lead-in names as its target(s): one name ("`compiler` bead"), or several
+	// joined by "and" / commas ("`handlers-templates` and `cli` beads"). It is
+	// anchored on the trailing "bead"/"beads" word so backticked *symbols* later
+	// in the bullet body ("`Escape`", "`ParseExpr` + `EvalExpr`") — common in the
+	// "Pin — `bead` bead, `Func`:" doc style — are not mistaken for targets. Only
+	// the FIRST match (the lead-in clause) is used. Whitespace between tokens is
+	// \s* not " " because Decomposition Notes bullets soft-wrap, and the wrap can
+	// fall between the backticked name and the word "bead" (exprvm-web.md's
+	// `handlers-templates` pin).
+	pinTargetsRe       = regexp.MustCompile("((?:`[A-Za-z0-9_-]+`\\s*(?:(?:,|and)\\s*)*)+)beads?\\b")
+	pinNameRe          = regexp.MustCompile("`([A-Za-z0-9_-]+)`")
+	topLevelListItemRe = regexp.MustCompile(`^(-\s|\d+\.\s)`)
 )
 
 // extractMarkdownSection returns the body of a "## <heading>" section (up to
@@ -879,13 +891,20 @@ func extractMarkdownSection(content, heading string) string {
 }
 
 // extractDecompositionNotesPins parses every "- **Pin ... `<bead>` bead**: ..."
-// bullet out of the design doc's "## Decomposition Notes" section, keyed by
-// bead title (lowercased). A bullet may span multiple soft-wrapped
-// continuation lines (2-space indented, markdown convention); capture ends
-// at the next top-level list item (another "- " bullet or a numbered "N. "
-// item) or a blank line, matching every real Decomposition Notes section in
-// this repo's design docs (docs/fixture-design-docs/exprvm-web.md,
-// docs/design-docs/connect-four-v1-design-doc.md).
+// bullet out of the design doc's "## Decomposition Notes" section. The result is
+// keyed by bead title (lowercased); the value is the verbatim text of every pin
+// bullet naming that bead, in document order, joined by a blank line. A bullet
+// may span multiple soft-wrapped continuation lines (2-space indented, markdown
+// convention); capture ends at the next top-level list item (another "- " bullet
+// or a numbered "N. " item) or a blank line, matching every real Decomposition
+// Notes section in this repo's design docs.
+//
+// Two shapes this must NOT drop (both live: fractalviz-1, exprvm-web):
+//   - several pin bullets for one bead ("- **Pin — `render` bead, `Color`:** …"
+//     and "- **Pin — `render` bead, `Render`:** …") — every one is kept, not just
+//     the last;
+//   - one bullet naming several beads ("… to the `handlers-templates` and `cli`
+//     beads") — the text is attached to each.
 func extractDecompositionNotesPins(designDoc string) map[string]string {
 	section := extractMarkdownSection(designDoc, "Decomposition Notes")
 	if section == "" {
@@ -898,10 +917,14 @@ func extractDecompositionNotesPins(designDoc string) map[string]string {
 			return
 		}
 		text := strings.TrimSpace(strings.Join(current, "\n"))
-		if m := decompositionPinBeadRe.FindStringSubmatch(text); m != nil {
-			pins[strings.ToLower(m[1])] = text
-		}
 		current = nil
+		for _, target := range pinBeadTargets(text) {
+			if existing := pins[target]; existing != "" {
+				pins[target] = existing + "\n\n" + text
+			} else {
+				pins[target] = text
+			}
+		}
 	}
 	for _, line := range strings.Split(section, "\n") {
 		switch {
@@ -921,6 +944,60 @@ func extractDecompositionNotesPins(designDoc string) map[string]string {
 		return nil
 	}
 	return pins
+}
+
+// pinBeadTargets returns the lowercased bead names a Pin bullet's lead-in clause
+// targets — one, or several joined by "and"/commas. Empty when the bullet names
+// no "<name> bead(s)" target at all (a malformed pin, surfaced by the
+// consumption check rather than silently swallowed).
+func pinBeadTargets(pinText string) []string {
+	m := pinTargetsRe.FindStringSubmatch(pinText)
+	if m == nil {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, nm := range pinNameRe.FindAllStringSubmatch(m[1], -1) {
+		t := strings.ToLower(nm[1])
+		if !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// beadTitles returns the Title of each bead, in order.
+func beadTitles(beads []ParsedBead) []string {
+	out := make([]string, len(beads))
+	for i, b := range beads {
+		out[i] = b.Title
+	}
+	return out
+}
+
+// unconsumedPinTargets returns the pin target bead names (from
+// extractDecompositionNotesPins) that match no actual bead title,
+// case-insensitively — a Decomposition Notes pin whose determined value has
+// nowhere to land: a bead DECOMPOSE renamed or split, or a typo in the pin.
+// Report-only for now; the structural-placement + reject-retry + escalate path
+// is deferred (docs/decompose-precision-plan.md Phase 1 "deferred").
+func unconsumedPinTargets(pins map[string]string, beadTitles []string) []string {
+	if len(pins) == 0 {
+		return nil
+	}
+	have := make(map[string]bool, len(beadTitles))
+	for _, t := range beadTitles {
+		have[strings.ToLower(t)] = true
+	}
+	var out []string
+	for target := range pins {
+		if !have[target] {
+			out = append(out, target)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // injectDecompositionNotesPin mechanically guarantees a bead's full_text
@@ -960,6 +1037,10 @@ const pinAppendixHeader = "Design doc Decomposition Notes pin for this bead " +
 // RECONCILE rounds because the model reproduced the appendix in its output with
 // a one-line wrap difference each time, which an exact-substring guard neither
 // detected nor collapsed. Returns whether FullText changed.
+//
+// When the design doc has more than one Pin bullet for this bead, pins[title]
+// is all of them (extractDecompositionNotesPins joins them), so the single
+// canonical block carries every pin — not just the last one written.
 func injectDecompositionNotesPin(bead *ParsedBead, pins map[string]string) bool {
 	pin, ok := pins[strings.ToLower(bead.Title)]
 	if !ok {

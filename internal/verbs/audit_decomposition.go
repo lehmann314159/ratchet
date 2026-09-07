@@ -38,7 +38,12 @@ func (h *AuditDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.Clien
 	if err != nil {
 		return "", err
 	}
-	userMsg := buildAuditUserMsg(doc, beads, history)
+	var titles []string
+	for _, b := range beads {
+		titles = append(titles, b.Title)
+	}
+	unconsumedPins := unconsumedPinTargets(extractDecompositionNotesPins(doc), titles)
+	userMsg := buildAuditUserMsg(doc, beads, history, unconsumedPins)
 	raw, err := oc.Chat(ctx, model, []ollama.Message{
 		{Role: "system", Content: auditDecompositionSystemPrompt(detectLang(project.FolderPath, beadOutputFiles(beads)))},
 		{Role: "user", Content: userMsg},
@@ -49,7 +54,7 @@ func (h *AuditDecomposition) Run(ctx context.Context, d *db.DB, oc *ollama.Clien
 	return injectMechanicalFindings(raw, project.FolderPath, beads), nil
 }
 
-func buildAuditUserMsg(doc string, beads []beadState, history []debateRound) string {
+func buildAuditUserMsg(doc string, beads []beadState, history []debateRound, unconsumedPins []string) string {
 	var sb strings.Builder
 	sb.WriteString("## Design Document\n\n")
 	sb.WriteString(doc)
@@ -67,6 +72,19 @@ func buildAuditUserMsg(doc string, beads []beadState, history []debateRound) str
 			}
 			sb.WriteString("\n")
 		}
+	}
+
+	if len(unconsumedPins) > 0 {
+		sb.WriteString("## Unconsumed Design-Doc Pins (mechanical)\n\n")
+		sb.WriteString("These `- **Pin ...` bullets in the design doc's Decomposition Notes name a bead " +
+			"that does not exist in the decomposition above — so the exact value each pin determines has " +
+			"not been carried into any bead spec. Usually DECOMPOSE renamed or split the bead. For each, " +
+			"raise a finding naming the pin and the bead(s) whose spec should carry it (or, if the pin is " +
+			"genuinely obsolete, say so):\n\n")
+		for _, t := range unconsumedPins {
+			fmt.Fprintf(&sb, "- pin targets bead `%s` — no such bead\n", t)
+		}
+		sb.WriteString("\n")
 	}
 
 	if len(history) > 0 {

@@ -903,6 +903,236 @@ func TestInjectDecompositionNotesPin_NoMatch(t *testing.T) {
 	}
 }
 
+func TestPinBeadTargets(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"single, exprvm-web style", "- **Pin the strings to the `compiler` bead**: ...", []string{"compiler"}},
+		{"multi-target, and", "- **Pin the template package to the `handlers-templates` and `cli` beads**: ...", []string{"handlers-templates", "cli"}},
+		{"multi-target, comma+and", "- **Pin X to the `a`, `b` and `c` beads**: ...", []string{"a", "b", "c"}},
+		{"em-dash style, symbols after are not targets", "- **Pin — `expr` bead, `ParseExpr` + `EvalExpr`:** with the stated environment ...", []string{"expr"}},
+		{"em-dash style, func in parens", "- **Pin — `fractal-core` bead, `Escape` (Mandelbrot):** with `MaxIter = 100` ...", []string{"fractal-core"}},
+		{"parenthetical caveat", "- **Pin exact literal values to the `ai` bead** (whichever bead ends up implementing `ai.go`): `SearchDepth = 4`.", []string{"ai"}},
+		{"no target", "- **Pin these values exactly**: X = 4.", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := pinBeadTargets(c.in)
+			if !equalStringSlices(got, c.want) {
+				t.Errorf("pinBeadTargets(%q) = %v, want %v", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestExtractDecompositionNotesPins_MultiplePinsPerBead: a design doc with two
+// Pin bullets for the same bead (the lsystem `grammar` bead: malformed-head +
+// head-vs-params) must carry BOTH into pins["grammar"], not just the last one —
+// the fractalviz-1 / lsystem drop.
+func TestExtractDecompositionNotesPins_MultiplePinsPerBead(t *testing.T) {
+	doc := "## Decomposition Notes\n\n" +
+		"- **Pin — `grammar` bead, `ParseSystem` malformed rule head:** `A -> B` parses;\n" +
+		"  `AB -> C` is an error (multi-letter head); `-> B` is an error.\n" +
+		"- **Pin — `grammar` bead, rule head vs. formal parameters:** the rule head is the\n" +
+		"  substring of `head` before the first `(`, and must be exactly one ASCII letter.\n"
+	pins := extractDecompositionNotesPins(doc)
+	g, ok := pins["grammar"]
+	if !ok {
+		t.Fatalf("no pin for grammar: %v", pins)
+	}
+	if !strings.Contains(g, "malformed rule head") {
+		t.Errorf("first grammar pin dropped:\n%s", g)
+	}
+	if !strings.Contains(g, "before the first `(`") {
+		t.Errorf("second grammar pin dropped:\n%s", g)
+	}
+	if strings.Count(g, "- **Pin — `grammar` bead") != 2 {
+		t.Errorf("expected both pin bullets verbatim, got:\n%s", g)
+	}
+}
+
+// TestExtractDecompositionNotesPins_MultiBeadPin: one bullet naming two beads
+// attaches its text to both (the plan's gap #2, exprvm-web `handlers-templates`
+// and `cli`).
+func TestExtractDecompositionNotesPins_MultiBeadPin(t *testing.T) {
+	doc := "## Decomposition Notes\n\n" +
+		"- **Pin the template package to the `handlers-templates` and `cli` beads**:\n" +
+		"  store parsed templates in a package-level `var tmpl = template.Must(...)`.\n"
+	pins := extractDecompositionNotesPins(doc)
+	for _, k := range []string{"handlers-templates", "cli"} {
+		v, ok := pins[k]
+		if !ok {
+			t.Fatalf("pin not attached to %q: %v", k, pins)
+		}
+		if !strings.Contains(v, "template.Must") {
+			t.Errorf("%q pin missing its content: %q", k, v)
+		}
+	}
+}
+
+func TestInjectDecompositionNotesPin_MultiplePins(t *testing.T) {
+	doc := "## Decomposition Notes\n\n" +
+		"- **Pin — `render` bead, `Color`:** `Color(0, 100)` → black.\n" +
+		"- **Pin — `render` bead, `Render`:** `Render(DefaultParams(Mandelbrot), 600, 600)` has 600 rows.\n"
+	pins := extractDecompositionNotesPins(doc)
+	bead := &ParsedBead{Title: "render", FullText: "Implement the renderer."}
+	if !injectDecompositionNotesPin(bead, pins) {
+		t.Fatal("expected injection")
+	}
+	if n := strings.Count(bead.FullText, pinAppendixHeader); n != 1 {
+		t.Fatalf("expected exactly one appendix header, got %d:\n%s", n, bead.FullText)
+	}
+	if !strings.Contains(bead.FullText, "Color(0, 100)") || !strings.Contains(bead.FullText, "600 rows") {
+		t.Errorf("both pins should be under the one appendix:\n%s", bead.FullText)
+	}
+	if injectDecompositionNotesPin(bead, pins) {
+		t.Error("second call must be a no-op")
+	}
+}
+
+func TestUnconsumedPinTargets(t *testing.T) {
+	pins := map[string]string{"handlers-templates": "x", "cli": "y", "compiler": "z"}
+	got := unconsumedPinTargets(pins, []string{"handlers", "templates", "Main", "compiler"})
+	want := []string{"cli", "handlers-templates"} // sorted
+	if !equalStringSlices(got, want) {
+		t.Errorf("unconsumedPinTargets = %v, want %v", got, want)
+	}
+	if got := unconsumedPinTargets(pins, []string{"Handlers-Templates", "CLI", "compiler"}); len(got) != 0 {
+		t.Errorf("expected case-insensitive match, got %v", got)
+	}
+	if got := unconsumedPinTargets(nil, []string{"a"}); got != nil {
+		t.Errorf("nil pins -> nil, got %v", got)
+	}
+}
+
+// TestExtractDecompositionNotesPins_RealDocs is the regression / false-positive
+// baseline: every pin bullet in the current repo design docs must resolve to at
+// least one bead target, and (for the two precision-driver docs) the known
+// multi-pin beads must carry every bullet.
+func TestExtractDecompositionNotesPins_RealDocs(t *testing.T) {
+	cases := []struct {
+		path            string
+		multiPinBead    string
+		wantMultiPinMin int
+	}{
+		{"../../docs/design-docs/lsystem-studio-design-doc.md", "grammar", 2},
+		{"../../docs/design-docs/fractalviz-design-doc.md", "fractal-core", 4},
+		// handlers-templates: the Bytecode-by-error-type pin (target name wraps
+		// to the line before "bead") AND the template-package pin.
+		{"../../docs/fixture-design-docs/exprvm-web.md", "handlers-templates", 2},
+	}
+	for _, c := range cases {
+		t.Run(filepath.Base(c.path), func(t *testing.T) {
+			data, err := os.ReadFile(c.path)
+			if err != nil {
+				t.Skipf("doc not readable: %v", err)
+			}
+			pins := extractDecompositionNotesPins(string(data))
+			if len(pins) == 0 {
+				t.Fatal("no pins extracted from a doc that has Pin bullets")
+			}
+			v, ok := pins[c.multiPinBead]
+			if !ok {
+				t.Fatalf("no pin for %q; keys: %v", c.multiPinBead, keysOf(pins))
+			}
+			if n := strings.Count(v, "**Pin"); n < c.wantMultiPinMin {
+				t.Errorf("%q carries %d pin bullet(s), want >= %d:\n%s", c.multiPinBead, n, c.wantMultiPinMin, v)
+			}
+			// Every "- **Pin" bullet in the doc's Decomposition Notes must
+			// resolve to at least one target — a bullet dropped for naming no
+			// bead is a silent value loss.
+			notes := extractMarkdownSection(string(data), "Decomposition Notes")
+			for _, line := range strings.Split(notes, "\n") {
+				if decompositionPinStartRe.MatchString(line) && len(pinBeadTargets(line)) == 0 {
+					// The target may wrap to a continuation line; only fail if
+					// the whole bullet (via the extractor) also loses it.
+					if !anyPinContains(pins, strings.TrimSpace(line)) {
+						t.Errorf("Pin bullet resolved to no bead target:\n  %s", strings.TrimSpace(line))
+					}
+				}
+			}
+		})
+	}
+}
+
+func anyPinContains(pins map[string]string, s string) bool {
+	for _, v := range pins {
+		if strings.Contains(v, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestUnconsumedPinTargets_CorpusGate is the offline gate from
+// docs/decompose-precision-plan.md Phase 1: on a p48-style decomposition every
+// pin is consumed (no false positive); on baseline-9's real decomposition — where
+// DECOMPOSE split `handlers-templates` into `handlers`+`templates` and renamed
+// `cli`→`main` — both those pins are flagged unconsumed.
+func TestUnconsumedPinTargets_CorpusGate(t *testing.T) {
+	cases := []struct {
+		name        string
+		docPath     string
+		beadTitles  []string
+		wantFlagged []string
+	}{
+		{
+			"p48 baseline-7/8 — clean", "../../docs/fixture-design-docs/exprvm-web.md",
+			[]string{"lexer", "parser", "env", "compiler", "vm", "handlers-templates", "cli", "integration-persistence", "integration-error"},
+			nil,
+		},
+		{
+			"baseline-9 — handlers-templates split, cli renamed to main", "../../docs/fixture-design-docs/exprvm-web.md",
+			[]string{"lexer", "parser", "env", "compiler", "vm", "handlers", "templates", "main", "integration-persistence", "integration-error"},
+			[]string{"cli", "handlers-templates"},
+		},
+		{
+			"fractalviz-1 — clean", "../../docs/design-docs/fractalviz-design-doc.md",
+			[]string{"fractal-core", "render", "params", "save", "templates", "handlers", "main", "integration"},
+			nil,
+		},
+		{
+			"lsystem — clean", "../../docs/design-docs/lsystem-studio-design-doc.md",
+			[]string{"expr", "grammar", "rewrite", "turtle", "render", "studio", "save", "templates", "handlers", "main", "integration"},
+			nil,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			data, err := os.ReadFile(c.docPath)
+			if err != nil {
+				t.Skipf("doc not readable: %v", err)
+			}
+			got := unconsumedPinTargets(extractDecompositionNotesPins(string(data)), c.beadTitles)
+			if !equalStringSlices(got, c.wantFlagged) {
+				t.Errorf("unconsumed = %v, want %v", got, c.wantFlagged)
+			}
+		})
+	}
+}
+
+func keysOf(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 func TestExtractRunNames(t *testing.T) {
 	cases := []struct {
 		in   string

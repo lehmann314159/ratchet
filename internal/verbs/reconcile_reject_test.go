@@ -3,6 +3,7 @@ package verbs
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -217,6 +218,58 @@ func TestReconcileDecompositionCommitCleanFixStillConverges(t *testing.T) {
 	}
 	if n := countRows(t, d, `SELECT COUNT(*) FROM bead_revisions WHERE bead_id = ? AND revision_number = 2`, beadID); n != 1 {
 		t.Errorf("bead_revisions rev2 = %d, want 1 (clean agree_and_fix must still be applied)", n)
+	}
+}
+
+// TestReconcileDecomposition_ReinjectsPinIntoUntouchedBead: the post-RECONCILE
+// re-injection sweep (docs/decompose-precision-plan.md Phase 1 item 3) gives a
+// bead its design-doc pin even when no response this round touched that bead.
+func TestReconcileDecomposition_ReinjectsPinIntoUntouchedBead(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "fixture: RECONCILE pin re-injection sweep")
+	seedBead(t, d, -1, "expr")
+	grammarID, _ := seedBead(t, d, -1, "grammar")
+
+	doc := "## Decomposition Notes\n\n" +
+		"- **Pin — `grammar` bead, rule head:** the head is the substring before the first `(`.\n"
+
+	job := seedJob(t, d, -1, db.VerbReconcileDecomposition, sql.NullInt64{})
+	h := &ReconcileDecomposition{
+		designDoc:    doc,
+		lastCritique: "expr bead should note operator precedence",
+		lastBeads: []beadState{
+			{Title: "expr", FullText: "spec for expr", OutputFiles: []string{"expr.go"}},
+			{Title: "grammar", FullText: "spec for grammar", OutputFiles: []string{"grammar.go"}},
+		},
+	}
+	out := ReconcileDecompositionOutput{
+		Responses: []ReconcileResponse{
+			{BeadTitle: "expr", Action: "agree_and_fix", Reason: "ok", UpdatedBead: &ParsedBead{
+				Title: "expr", FullText: "spec for expr, with precedence noted",
+				ExecutionBudget: 300, MonitorOverride: "honor", OutputFiles: []string{"expr.go"},
+			}},
+		},
+	}
+	inTx(t, d, func(tx *sql.Tx) error { return h.Commit(ctx, tx, job, out) })
+
+	var grammarJSON string
+	if err := d.QueryRowContext(ctx,
+		`SELECT br.full_text FROM beads b JOIN bead_revisions br ON br.id = b.current_revision_id WHERE b.id = ?`,
+		grammarID).Scan(&grammarJSON); err != nil {
+		t.Fatalf("load grammar bead: %v", err)
+	}
+	var grammar ParsedBead
+	if err := json.Unmarshal([]byte(grammarJSON), &grammar); err != nil {
+		t.Fatalf("parse grammar bead full_text: %v", err)
+	}
+	if !strings.Contains(grammar.FullText, pinAppendixHeader) || !strings.Contains(grammar.FullText, "before the first `(`") {
+		t.Errorf("untouched grammar bead did not get the re-injected pin:\n%s", grammar.FullText)
+	}
+	if n := countRows(t, d,
+		`SELECT COUNT(*) FROM bead_revisions WHERE bead_id = ? AND created_by_verb = ?`,
+		grammarID, db.VerbReconcileDecomposition); n != 1 {
+		t.Errorf("expected exactly one RECONCILE revision for the untouched grammar bead, got %d", n)
 	}
 }
 

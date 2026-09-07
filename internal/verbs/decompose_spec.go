@@ -161,6 +161,15 @@ func (h *DecomposeSpec) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJ
 	}
 
 	pins := extractDecompositionNotesPins(h.designDoc)
+	if unconsumed := unconsumedPinTargets(pins, beadTitles(out.Beads)); len(unconsumed) > 0 {
+		// Report-only for now (docs/decompose-precision-plan.md Phase 1). A pin
+		// whose target bead does not exist means the design doc determined a
+		// value the bead set has nowhere to carry — DECOMPOSE renamed or split
+		// the bead. AUDIT_DECOMPOSITION also gets this list (buildAuditUserMsg).
+		slog.Warn("DECOMPOSE_SPEC: design-doc pin(s) name no bead in this decomposition",
+			"project_id", job.ProjectID, "unconsumed_pin_targets", unconsumed,
+			"bead_titles", beadTitles(out.Beads))
+	}
 	for _, pb := range out.Beads {
 		applyMechanicalBeadFixes(lang, &pb)
 		injectDecompositionNotesPin(&pb, pins)
