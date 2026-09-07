@@ -443,6 +443,93 @@ func TestRunExecuteBeadReal_LsystemBead2PlanningSpiralRegression(t *testing.T) {
 	}
 }
 
+// withTestExecEmptyCeiling overrides the nothing-written ceiling for one test.
+func withTestExecEmptyCeiling(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := testExecEmptyAttemptCeiling
+	testExecEmptyAttemptCeiling = d
+	t.Cleanup(func() { testExecEmptyAttemptCeiling = old })
+}
+
+// TestRunExecuteBeadReal_NothingWrittenCeilingStalls: the shape the empty-turn
+// streak cannot accelerate — one long think turn ending with a lone read_file,
+// nothing written. Once wall-clock passes execEmptyAttemptCeiling with
+// writeFileCount still 0, the next turn boundary ends the attempt 'stalled'
+// directly — no second think turn, no redirect, no graceful-finalize.
+func TestRunExecuteBeadReal_NothingWrittenCeilingStalls(t *testing.T) {
+	withTestExecEmptyCeiling(t, 40*time.Millisecond)
+	var turn atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		turn.Add(1)
+		time.Sleep(55 * time.Millisecond) // exceed the ceiling within turn 1
+		writeToolCalls(w, toolCall("read_file", map[string]any{"path": "game.go"}))
+	}))
+	defer srv.Close()
+
+	d := openTestDB(t)
+	folder := t.TempDir()
+	seedRunProject(t, d, folder)
+	fullText := `{"title":"B01","full_text":"spec","output_files":["game.go"],"exit_criteria":["test -f game.go"]}`
+	execID := seedRunExecution(t, d, folder, fullText)
+
+	if err := runExecuteBeadReal(d, execID, srv.URL); err != nil {
+		t.Fatalf("runExecuteBeadReal: %v", err)
+	}
+
+	if cause := terminationCause(t, d, execID); cause != "stalled" {
+		t.Errorf("termination_cause = %q, want stalled", cause)
+	}
+	if n := int(turn.Load()); n != 1 {
+		t.Errorf("model called %d times; the ceiling should end the attempt at turn 1's boundary", n)
+	}
+	tr := readFile(t, traceForExec(t, d, execID))
+	if !strings.Contains(tr, "no output file written after") {
+		t.Errorf("trace missing the nothing-written ceiling line:\n%s", tr)
+	}
+	if strings.Contains(tr, "write-now redirect") || strings.Contains(tr, "requesting graceful finalize") {
+		t.Errorf("the ceiling must pre-empt the redirect / finalize path:\n%s", tr)
+	}
+}
+
+// TestRunExecuteBeadReal_NothingWrittenCeilingNotHitWhenProductive: a model that
+// takes just as long but actually writes a file is never touched by the ceiling
+// (it is gated on writeFileCount == 0).
+func TestRunExecuteBeadReal_NothingWrittenCeilingNotHitWhenProductive(t *testing.T) {
+	withTestExecEmptyCeiling(t, 40*time.Millisecond)
+	var turn atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		time.Sleep(55 * time.Millisecond) // longer than the ceiling every turn
+		if turn.Add(1) == 1 {
+			writeToolCalls(w, toolCall("write_file", map[string]any{
+				"path": "game.go", "content": "package main\n\nfunc Play() {}\n",
+			}))
+			return
+		}
+		writeDone(w) // no tool calls -> exit criteria pass on disk -> success
+	}))
+	defer srv.Close()
+
+	d := openTestDB(t)
+	folder := t.TempDir()
+	seedRunProject(t, d, folder)
+	fullText := `{"title":"B01","full_text":"spec","output_files":["game.go"],"exit_criteria":["test -f game.go"]}`
+	execID := seedRunExecution(t, d, folder, fullText)
+
+	if err := runExecuteBeadReal(d, execID, srv.URL); err != nil {
+		t.Fatalf("runExecuteBeadReal: %v", err)
+	}
+
+	if cause := terminationCause(t, d, execID); cause != "success" {
+		t.Errorf("termination_cause = %q, want success", cause)
+	}
+	tr := readFile(t, traceForExec(t, d, execID))
+	if strings.Contains(tr, "no output file written after") {
+		t.Errorf("a productive attempt must not trip the nothing-written ceiling:\n%s", tr)
+	}
+}
+
 // --- helpers ---
 
 func mustWrite(t *testing.T, path, content string) {

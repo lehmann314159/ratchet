@@ -148,6 +148,14 @@ func TestProgressTracker_EmptyTurnStreak(t *testing.T) {
 	}
 }
 
+func TestProgressTracker_Elapsed(t *testing.T) {
+	start := time.Unix(9_000_000, 0)
+	tr := newProgressTracker(start)
+	if got := tr.elapsed(start.Add(20 * time.Minute)); got != 20*time.Minute {
+		t.Errorf("elapsed = %v, want 20m", got)
+	}
+}
+
 func TestProgressTracker_TurnCap(t *testing.T) {
 	start := time.Unix(6_000_000, 0)
 	tr := newProgressTracker(start)

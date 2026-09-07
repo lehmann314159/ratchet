@@ -37,6 +37,8 @@ const writeGracePeriod = 2 * time.Minute
 var (
 	testExecCheckpointInterval time.Duration
 	testExecCeiling            time.Duration
+	// testExecEmptyAttemptCeiling overrides execEmptyAttemptCeiling for tests.
+	testExecEmptyAttemptCeiling time.Duration
 )
 
 // RunExecuteBeadMain is the entry point for the "ratchet execute-bead" subcommand.
@@ -145,6 +147,10 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 	ceilingDur := execAbsoluteCeiling
 	if testExecCeiling > 0 {
 		ceilingDur = testExecCeiling
+	}
+	emptyCeilingDur := execEmptyAttemptCeiling
+	if testExecEmptyAttemptCeiling > 0 {
+		emptyCeilingDur = testExecEmptyAttemptCeiling
 	}
 
 	terminationCh := make(chan string, 1)
@@ -310,17 +316,28 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 		trySignal(finalizeCh)
 	}
 
-	// handleEmptyTurn consults the empty-turn streak (progress.go): consecutive
-	// turns that emitted nothing actionable while nothing has ever been written
-	// to disk — the muse-glimmer planning spiral (lsystem-baseline-1 bead 2).
-	// The first empty turn injects one write-now redirect; execEmptyTurnStreakLimit
-	// consecutive empty turns end the attempt as 'stalled'. It reports whether the
-	// caller should terminate 'stalled' now; on a redirect / still-waiting turn it
-	// returns false and the caller re-enters the loop. Detected the instant a turn
-	// ends — this is the fast path the wall-clock backstops (execCheckpointInterval
-	// / execStallWindow / execAbsoluteCeiling) sit behind for the
-	// "makes productive tool calls but never converges" and "wrote something then
-	// went quiet" cases.
+	// nothingWrittenCeilingHit reports whether the attempt has produced no output
+	// file at all and has now burned past execEmptyAttemptCeiling. This is the
+	// companion to handleEmptyTurn for the case the empty-turn streak cannot
+	// accelerate: a single enormous think turn (both original lsystem-baseline-1
+	// bead 2 attempts, and the redirect-verify clone's attempt 2 — one ~24-minute
+	// content_chars=0 turn). The streak catches SHORT empty turns fast; this
+	// catches "20 minutes elapsed, still zero bytes on disk" at the next turn
+	// boundary, instead of spending another full think turn on the redirect /
+	// graceful-finalize dance. Gated on writeFileCount == 0, so a long-but-
+	// productive turn (which ends with a write_file call) never trips it.
+	nothingWrittenCeilingHit := func() bool {
+		if writeFileCount != 0 || len(expectedFiles) == 0 {
+			return false
+		}
+		if tracker.elapsed(time.Now()) <= emptyCeilingDur {
+			return false
+		}
+		writeLine(traceFile, fmt.Sprintf(
+			"[terminated: stalled — no output file written after %s]", emptyCeilingDur))
+		return true
+	}
+
 	// handleEmptyTurn returns:
 	//   "redirect" — the one write-now redirect was just injected; the caller
 	//     should re-enter the loop (continue) and let the model act on it.
@@ -402,6 +419,12 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 			// The single turn granted after a graceful-finalize directive is over.
 			if finalizeInjected {
 				writeLine(traceFile, "[terminated: stalled — no output after finalize directive]")
+				return writeTerminationCause(d, execID, "stalled")
+			}
+
+			// Nothing written at all, and past the empty-attempt ceiling: stop
+			// now rather than run another giant think turn (see progress.go).
+			if nothingWrittenCeilingHit() {
 				return writeTerminationCause(d, execID, "stalled")
 			}
 
@@ -500,6 +523,12 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 				return writeTerminationCause(d, execID, "success")
 			}
 			writeLine(traceFile, "[terminated: stalled — no forward progress after finalize directive]")
+			return writeTerminationCause(d, execID, "stalled")
+		}
+
+		// Nothing written at all, and past the empty-attempt ceiling (see
+		// progress.go). A lone read_file after a 20+ minute think counts.
+		if nothingWrittenCeilingHit() {
 			return writeTerminationCause(d, execID, "stalled")
 		}
 

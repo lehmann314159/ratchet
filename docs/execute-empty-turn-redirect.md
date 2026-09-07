@@ -66,15 +66,40 @@ a model that just needed one long think before writing is unaffected (its first
 write clears the streak). A legitimately productive long EXECUTE makes
 `write_file` calls throughout and never accumulates a streak.
 
+### The nothing-written ceiling (`execEmptyAttemptCeiling`, 20m)
+
+The empty-turn streak only accelerates escalation when the empty turns are
+**short**. When the model burns one enormous `content_chars=0` thinking turn
+(~24 min — both original lsystem-baseline-1 bead 2 attempts, and the
+redirect-verify clone's attempt 2), the redirect fires once on turn 1 but cannot
+interrupt a turn in progress, so `wall()` / `execAbsoluteCeiling` still governed
+and the attempt ran ~30 min.
+
+`nothingWrittenCeilingHit` closes that: at any turn boundary, if `writeFileCount
+== 0` and `tracker.elapsed() > execEmptyAttemptCeiling` (20m), the attempt ends
+`stalled` **directly** — no redirect, no finalize dance, no second giant think
+turn. Checked in both loop branches, right after the finalize-grace check and
+**before** `handleEmptyTurn`.
+
+- **Gated on `writeFileCount == 0`**, checked only between turns — so a
+  long-but-productive turn (any think length, ending with a `write_file` call) is
+  never touched. 20m is well above any legitimate multi-file orientation
+  sequence and below two giant think turns.
+- For the giant-turn shape it cuts ~30m → ~24m (fires the moment turn 1 ends).
+  For the short-turn shape `tracker.elapsed()` stays well under 20m until the
+  streak has already stalled at ~9m, so it never fires there.
+- It deliberately pre-empts the redirect for an attempt whose *first* turn alone
+  exceeds 20m with zero output: at that point the model has had ample generation
+  budget and produced no file, and the verification showed the redirect does not
+  move `muse-glimmer` off a genuine block anyway.
+
 ### Cost on non-recovery
 
-If the redirect does **not** work, escalation is slower than PR #8 alone for the
-slow-turn shape: the redirect buys the model one more full think turn (~one
-checkpoint interval) before `wall()` fires the finalize directive, so a
-non-recovering attempt runs to roughly `execAbsoluteCeiling` (45m) instead of
-~19–29m. Accepted: the upside is completing the bead instead of escalating, and
-the ceiling still bounds the downside. Fast empty turns are strictly faster than
-before.
+If the redirect does **not** work: a short-turn spiral stalls at ~9m (streak); a
+giant-turn spiral stalls at ~24m (nothing-written ceiling) or, if the first turn
+squeaks under 20m, at `execAbsoluteCeiling` (45m). Fast empty turns are strictly
+faster than PR #8 alone; the giant-turn case is now ~24m vs the ~30m PR #10-only
+measured in the verification and the ~19–29m of PR #8 alone.
 
 ### What stays as the backstop
 
@@ -109,8 +134,8 @@ making progress.
 
 ## Tests
 
-- `progress_test.go`: `TestProgressTracker_EmptyTurnStreak` — streak accumulation
-  and reset semantics.
+- `progress_test.go`: `TestProgressTracker_EmptyTurnStreak` (streak accumulation
+  and reset), `TestProgressTracker_Elapsed`.
 - `workspace_test.go`:
   - `TestRunExecuteBeadReal_EmptyTurnRedirectBreaksTheSpiral` — turn 1 empty,
     redirect, then a real write → `success`, streak cleared.
@@ -120,6 +145,12 @@ making progress.
   - `TestRunExecuteBeadReal_ReadOnlyNeverWritingIsStalledAfterRedirect` —
     `read_file`-only model → redirect → `stalled`, does not route through the
     graceful-finalize path.
+  - `TestRunExecuteBeadReal_NothingWrittenCeilingStalls` — one long turn ending
+    with a lone `read_file`, ceiling overridden to 40 ms → `stalled` at turn 1's
+    boundary, no redirect, no finalize.
+  - `TestRunExecuteBeadReal_NothingWrittenCeilingNotHitWhenProductive` — same
+    timing but the model writes a file → `success`, ceiling never trips (gated on
+    `writeFileCount == 0`).
   - `TestRunExecuteBeadReal_SteadyProgressIsNotStalled` — asserts a
     write-every-turn model never sees the redirect.
 - `no_write_test.go`: `TestRunExecuteBeadReal_PersistentEmptyTurnsAreStalled`
@@ -169,9 +200,10 @@ turn; the redirect fires once on turn 1 but cannot interrupt a turn already in
 progress, so `wall()` / the ceiling still governs. Net time was ~30 min, ≈ the
 pre-PR-#10 baseline (~29 min) — neutral, not a regression. The streak only
 accelerates escalation when the empty turns are *short* (attempt 1: 3 × ~3 min →
-9 min). Closing the giant-turn gap needs a separate mechanism — a "nothing
-written after N minutes → stalled" ceiling, or a mid-stream content-stall
-watchdog (`memory/project_execute_progress_detection`).
+9 min). **The `execEmptyAttemptCeiling` (20m) added in this same PR closes that
+gap** — this same attempt-2 shape would now `stalled` at ~24 min (the moment turn
+1 ends) instead of ~30. (A mid-stream content-stall watchdog would be faster
+still — held in the pocket, `memory/project_execute_progress_detection`.)
 
 ### Why the redirect does not break *this* spiral
 

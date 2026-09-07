@@ -79,6 +79,25 @@ const (
 	// generic finalize directive that did not break the spiral. Detected the
 	// instant a turn ends — no wall-clock wait of its own.
 	execEmptyTurnStreakLimit = 3
+
+	// execEmptyAttemptCeiling: a model that has produced no output file at all
+	// this attempt after this much wall-clock is not going to. End it as
+	// 'stalled' at the next turn boundary rather than spending another full
+	// think turn on the redirect / graceful-finalize dance.
+	//
+	// This is the companion to execEmptyTurnStreakLimit for the case that limit
+	// does NOT accelerate: a single enormous thinking turn. The empty-turn
+	// streak catches SHORT empty turns fast (3 x ~3 min -> 9 min), but when the
+	// model burns one ~24-minute content_chars=0 turn (both original
+	// lsystem-baseline-1 bead 2 attempts, and the redirect-verify clone's
+	// attempt 2), the redirect fires once on turn 1 but cannot interrupt a turn
+	// in progress, so wall() / execAbsoluteCeiling still governed and the
+	// attempt ran ~30 min. Checked at the turn boundary and gated on
+	// writeFileCount == 0, so a long-but-productive turn (which ends with a
+	// write_file call, writeFileCount > 0) never trips it. 20m is comfortably
+	// above any legitimate multi-file orientation sequence and below two giant
+	// think turns.
+	execEmptyAttemptCeiling = 20 * time.Minute
 )
 
 // turnObs is one turn's worth of mechanical progress signal, computed by the
@@ -159,6 +178,11 @@ func (t *progressTracker) observe(now time.Time, o turnObs) {
 // start if there has not been one.
 func (t *progressTracker) lastProductive() time.Time {
 	return time.Unix(0, t.lastProductiveNanos.Load())
+}
+
+// elapsed is the wall-clock time since the attempt started.
+func (t *progressTracker) elapsed(now time.Time) time.Duration {
+	return now.Sub(t.start)
 }
 
 // progressWithin reports whether a productive turn happened within the last d.
