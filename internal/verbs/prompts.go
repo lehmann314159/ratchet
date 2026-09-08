@@ -113,7 +113,13 @@ Your output is a decomposition plan, not an implementation. Each Bead's full_tex
 Follow the specified bead boundaries, file assignments, and integration bead requirements
 exactly, overriding the generic rules below where they conflict. The design doc author has
 full context of the project's pairing structure and intended test boundaries; their explicit
-guidance supersedes generic heuristics. If a bullet begins with "Pin" and names a specific
+guidance supersedes generic heuristics. If that section carries a **numbered bead list**
+("1. **name** — ... Owns ` + "`x.go`" + `."), emit exactly one Bead per numbered entry, with
+that entry's title and owned file — do NOT merge two listed entries into one Bead (even when
+they share a package or their tests are related) and do NOT drop one. A merge or a drop is
+rejected mechanically and you will be asked to redecompose. Emitting an additional
+integration Bead the section's prose calls for is fine; combining the listed functional
+Beads is not. If a bullet begins with "Pin" and names a specific
 Bead (e.g. "Pin the exact division sign combinations to the ` + "`vm`" + ` bead"), that Bead's
 full_text must quote the pinned text verbatim, in full — do not paraphrase, summarize, or
 restate it as a general rule. A pin exists specifically because a compressed restatement has

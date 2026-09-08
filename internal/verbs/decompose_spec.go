@@ -16,9 +16,10 @@ import (
 	"ratchet/internal/ollama"
 )
 
-// decomposeRedecomposeCap bounds how many times DECOMPOSE_SPEC will reject
-// its own output and retry after forwardFileReferenceChecks finds a
-// bead-ordering violation, before giving up and full-stopping the project.
+// decomposeRedecomposeCap bounds how many times DECOMPOSE_SPEC will reject its
+// own output and retry after a source-side gate (beadConsistencyViolations or
+// beadStructureViolations) finds a violation, before giving up and
+// full-stopping the project.
 const decomposeRedecomposeCap = 3
 
 type DecomposeSpec struct {
@@ -87,8 +88,9 @@ func buildDecomposeUserMsg(designDoc, surveyDoc, redecomposeFeedback string) str
 	var sb strings.Builder
 	if redecomposeFeedback != "" {
 		sb.WriteString("## Previous Decomposition Attempt Was Rejected\n\n")
-		sb.WriteString("Your last decomposition had bead-ordering violations that made beads structurally ")
-		sb.WriteString("unable to pass no matter how many times they were executed. Fix these in this attempt:\n\n")
+		sb.WriteString("Your last decomposition had bead-ordering or bead-structure violations (a bead ")
+		sb.WriteString("that cannot pass regardless of execution attempts, or a design-doc bead that was ")
+		sb.WriteString("merged into another or dropped). Fix these in this attempt:\n\n")
 		sb.WriteString(redecomposeFeedback)
 		sb.WriteString("\n\n")
 	}
@@ -155,8 +157,12 @@ func (h *DecomposeSpec) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJ
 
 	// Source-side gate: bead ordering + exit-criteria/prose/output_files
 	// consistency, checked against what the mechanical-repair pass would
-	// produce. Reject-and-retry rather than shipping an inconsistent bead.
-	if violations := beadConsistencyViolations(lang, out.Beads, nil); len(violations) > 0 {
+	// produce; plus the structure gate — no merging or dropping a bead the
+	// design doc's numbered Decomposition Notes list specifies. Reject-and-retry
+	// rather than shipping an inconsistent bead.
+	violations := beadConsistencyViolations(lang, out.Beads, nil)
+	violations = append(violations, beadStructureViolations(h.designDoc, out.Beads)...)
+	if len(violations) > 0 {
 		return h.commitRedecompose(ctx, tx, job, violations, now)
 	}
 
@@ -237,7 +243,7 @@ func (h *DecomposeSpec) Commit(ctx context.Context, tx *sql.Tx, job *db.HandoffJ
 	return nil
 }
 
-// commitRedecompose rejects a decomposition that failed forwardFileReferenceChecks:
+// commitRedecompose rejects a decomposition that failed a source-side gate:
 // no bead row is written for this attempt, a 'redecompose' audit_reconcile_rounds
 // row records the violations (read back by latestRedecomposeFeedback on the next
 // attempt), and either another DECOMPOSE_SPEC job is enqueued or, once
@@ -259,7 +265,7 @@ func (h *DecomposeSpec) commitRedecompose(ctx context.Context, tx *sql.Tx, job *
 		return err
 	}
 
-	critique := "Bead ordering violations (structural, mechanically detected — not a model judgment call):\n- " +
+	critique := "Bead ordering / structure violations (mechanically detected — not a model judgment call):\n- " +
 		strings.Join(violations, "\n- ")
 
 	if _, err := tx.ExecContext(ctx, `

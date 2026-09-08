@@ -839,10 +839,12 @@ func TestAdjudicateNextExecutionCommitFullStopPartial(t *testing.T) {
 
 // TestDecomposeSpecCommitRejectsInconsistentCriteria: DECOMPOSE emits a bead
 // whose grep guard names a *_test.go file the bead does not own — a criterion
-// that can never pass because that file will not exist. Commit must
-// redecompose rather than write the bead. (An orphan bare `-run TestX` name is
-// instead auto-repaired by addGrepGuard, so this targets the residue A catches
-// after the mechanical-repair pass.)
+// that can never pass because that file will not exist. When the mismatch is
+// unambiguous (one owned behavioral test file, or none) goFixBeadSpec now
+// reconciles it (see TestGoFixBeadSpec's "test-file-name mismatch" subtests);
+// this fixture keeps the *ambiguous* shape — two owned test files, a third
+// unowned name in the guard — which the repair pass cannot resolve, so Commit
+// must still redecompose rather than write the bead.
 func TestDecomposeSpecCommitRejectsInconsistentCriteria(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
@@ -851,10 +853,13 @@ func TestDecomposeSpecCommitRejectsInconsistentCriteria(t *testing.T) {
 
 	out := DecomposeSpecOutput{
 		Beads: []ParsedBead{{
-			Title: "handlers", FullText: "Implement HandleIndex. Cover it with TestHandleIndex.",
+			Title: "handlers", FullText: "Implement HandleIndex and HandleEval. Cover them with TestHandleIndex and TestHandleEval.",
 			ExecutionBudget: 300, MonitorOverride: "honor",
-			OutputFiles:  []string{"handlers.go", "handlers_test.go"},
-			ExitCriteria: []string{"grep -q 'func TestHandleIndex' other_test.go && go test -run TestHandleIndex ./..."},
+			OutputFiles: []string{"handlers.go", "handlers_test.go", "extra.go", "extra_test.go"},
+			ExitCriteria: []string{
+				"grep -q 'func TestHandleIndex' handlers_test.go && go test -run TestHandleIndex .",
+				"grep -q 'func TestHandleEval' other_test.go && go test -run TestHandleEval .",
+			},
 		}},
 	}
 	inTx(t, d, func(tx *sql.Tx) error {

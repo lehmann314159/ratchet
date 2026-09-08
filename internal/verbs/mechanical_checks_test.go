@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -75,6 +76,62 @@ func TestGoFixBeadSpec(t *testing.T) {
 			if c == "go build ./..." {
 				t.Errorf("criteria should not be downgraded when .go files are present, got %q", c)
 			}
+		}
+	})
+
+	t.Run("test-file-name mismatch — owned test file renamed to the guarded name (lsystem run-5)", func(t *testing.T) {
+		// DECOMPOSE paired grammar_test.go with grammar.go but wrote the exit
+		// criterion against grammar_modules_test.go. Old behaviour: fell through,
+		// I7 rejected it, 3 identical redecompose rounds.
+		b := &ParsedBead{
+			OutputFiles: []string{"grammar.go", "grammar_test.go"},
+			ExitCriteria: []string{
+				"grep -q 'func TestParseSystem' grammar_modules_test.go && go test -run TestParseSystem .",
+			},
+		}
+		if !goFixBeadSpec(b) {
+			t.Fatal("expected a fix")
+		}
+		if !slices.Contains(b.OutputFiles, "grammar_modules_test.go") || slices.Contains(b.OutputFiles, "grammar_test.go") {
+			t.Errorf("owned test file should be renamed to grammar_modules_test.go, got %v", b.OutputFiles)
+		}
+		if v := checkBeadCriteriaConsistency([]ParsedBead{*b}); len(v) != 0 {
+			t.Errorf("I7 should be satisfied after the fix, got: %v", v)
+		}
+	})
+
+	t.Run("test-file-name mismatch — no owned test file: the guarded name is the one added", func(t *testing.T) {
+		b := &ParsedBead{
+			OutputFiles: []string{"grammar.go"},
+			ExitCriteria: []string{
+				"grep -q 'func TestParseSystem' grammar_modules_test.go && go test -run TestParseSystem .",
+			},
+		}
+		if !goFixBeadSpec(b) {
+			t.Fatal("expected a fix")
+		}
+		if !slices.Contains(b.OutputFiles, "grammar_modules_test.go") {
+			t.Errorf("the guarded test-file name should be added, got %v", b.OutputFiles)
+		}
+		if v := checkBeadCriteriaConsistency([]ParsedBead{*b}); len(v) != 0 {
+			t.Errorf("I7 should be satisfied, got: %v", v)
+		}
+	})
+
+	t.Run("test-file-name mismatch — ambiguous (two owned test files): left for prescriptive I7", func(t *testing.T) {
+		b := &ParsedBead{
+			OutputFiles: []string{"a.go", "a_test.go", "b.go", "b_test.go"},
+			ExitCriteria: []string{
+				"grep -q 'func TestC' c_test.go && go test -run TestC .",
+			},
+		}
+		goFixBeadSpec(b)
+		if slices.Contains(b.OutputFiles, "c_test.go") {
+			t.Errorf("must not guess which owned file to rename when >1, got %v", b.OutputFiles)
+		}
+		v := checkBeadCriteriaConsistency([]ParsedBead{*b})
+		if len(v) == 0 || !strings.Contains(v[0], "same name") {
+			t.Errorf("expected a prescriptive I7 violation, got: %v", v)
 		}
 	})
 

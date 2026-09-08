@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"ratchet/internal/guidance"
@@ -302,6 +303,40 @@ func goFixBeadSpec(bead *ParsedBead) bool {
 		}
 	}
 
+	// Reconcile a test-file-name mismatch. DECOMPOSE sometimes names one
+	// *_test.go in a grep guard ("grep -q 'func TestX' grammar_modules_test.go")
+	// but pairs the bead with a differently-named *_test.go in output_files
+	// ("grammar_test.go") — a reflex file-pairing that contradicts the criteria
+	// it also wrote. goFixBeadSpec previously only *added* a missing test file,
+	// so a bead that already owned one fell straight through and
+	// checkBeadCriteriaConsistency's I7 rejected it with nothing the repair pass
+	// could do (lsystem run-5: three byte-identical redecompose rejections). When
+	// the grep guards reference exactly one *_test.go the bead does not own, and
+	// the choice is unambiguous, reconcile toward the name the criteria use — the
+	// criteria are the authoritative signal (they name the file the verification
+	// runs and the function it must contain).
+	if want := oneUnownedGuardTestFile(bead); want != "" {
+		owned := allTestFiles(bead.OutputFiles)
+		switch {
+		case len(owned) == 1:
+			oldBase := filepath.Base(owned[0])
+			newPath := filepath.Join(filepath.Dir(owned[0]), want)
+			for i, f := range bead.OutputFiles {
+				if f == owned[0] {
+					bead.OutputFiles[i] = newPath
+				}
+			}
+			for i, c := range bead.ExitCriteria {
+				bead.ExitCriteria[i] = strings.ReplaceAll(c, oldBase, want)
+			}
+			fixed = true
+		case len(owned) == 0 && firstSourceGoFile(bead.OutputFiles) != "":
+			bead.OutputFiles = append(bead.OutputFiles,
+				filepath.Join(filepath.Dir(firstSourceGoFile(bead.OutputFiles)), want))
+			fixed = true
+		}
+	}
+
 	// Add grep guard for specific -run TestFoo criteria when the bead owns a
 	// test file. This makes the criterion exit 1 when the test function has not
 	// been written, instead of silently exiting 0 ("no tests to run"). A bead
@@ -502,6 +537,34 @@ func testFileForName(testName string, outputFiles []string) string {
 		if strings.HasSuffix(f, "_test.go") && filepath.Base(f) != apiCheckTestFilename {
 			return f
 		}
+	}
+	return ""
+}
+
+// oneUnownedGuardTestFile returns the base name of the single *_test.go a bead's
+// grep guards reference but the bead does not own — or "" if the guards
+// reference zero such files, or more than one distinct one (ambiguous: left for
+// the prescriptive I7 feedback). apiCheckTestFilename is never a candidate.
+func oneUnownedGuardTestFile(bead *ParsedBead) string {
+	owned := map[string]bool{}
+	for _, f := range bead.OutputFiles {
+		owned[filepath.Base(f)] = true
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, c := range bead.ExitCriteria {
+		for _, m := range grepGuardFileRe.FindAllStringSubmatch(c, -1) {
+			base := filepath.Base(m[2])
+			if m[2] == "" || !strings.HasSuffix(base, "_test.go") ||
+				base == apiCheckTestFilename || owned[base] || seen[base] {
+				continue
+			}
+			seen[base] = true
+			out = append(out, base)
+		}
+	}
+	if len(out) == 1 {
+		return out[0]
 	}
 	return ""
 }
@@ -1000,6 +1063,163 @@ func unconsumedPinTargets(pins map[string]string, beadTitles []string) []string 
 	return out
 }
 
+// --- Decomposition Notes bead-list structure gate -------------------------
+//
+// When the design doc's "## Decomposition Notes" carries a numbered bead list
+// ("1. **grammar-modules** — ... Owns `grammar_modules.go`."), that list is the
+// author's decomposition — DECOMPOSE transcribes it, it does not re-derive it.
+// The one discretionary move DECOMPOSE has historically made against such a
+// list is *merging* two listed beads into one: exprvm-web baseline-14 folded
+// the separate `handlers` and `templates` beads into a single
+// `handlers-templates` bead, which then spiralled EXECUTE / burned three
+// REFINE_TESTS cycles (baseline-15) — same design doc, same fleet, opposite
+// decomposition, pure run-to-run variance. See
+// docs/decomposition-framework-plan.md item 2.
+//
+// beadStructureViolations flags exactly that: a proposed bead that covers two
+// or more listed beads (a merge), or a listed bead that no proposed bead
+// covers (a drop). "Covers" = a normalized title match, or the proposed bead
+// owning the .go file the doc bullet assigns to the listed bead — so a benign
+// rename (baseline-9's `cli` -> `main`, same file) is not flagged. An
+// *unrequested split* (one listed bead -> several proposed beads) is NOT
+// gated here: the split-vs-merge asymmetry (an over-split bead is cheap, a
+// merged bead escalates) means splitting is left to the author + the
+// checkdesigndoc bead-size lint; DECOMPOSE-side extras are already surfaced by
+// unconsumedPinTargets + AUDIT_DECOMPOSITION.
+
+type structDocBead struct {
+	title string
+	file  string // primary .go file the bullet assigns, or "" if none stated
+}
+
+var (
+	// "1. **grammar-modules** — ..." / "3. **vm**: ...". Bold title after a
+	// numbered marker; tolerant of the em-dash / colon / hyphen separators the
+	// repo's design docs use.
+	decompNumberedBeadRe = regexp.MustCompile(`(?m)^\s*(\d+)\.\s+\*\*([^*]+)\*\*`)
+	// "Owns `grammar_modules.go`", "**cli** (main.go):", or a bare `x.go` in the
+	// bullet body.
+	decompOwnsFileRe  = regexp.MustCompile("(?i)owns?\\s+`([a-z0-9_/]+\\.go)`")
+	decompParenFileRe = regexp.MustCompile(`\(([a-z0-9_/]+\.go)\)`)
+	decompAnyGoFileRe = regexp.MustCompile("`([a-z0-9_/]+\\.go)`")
+)
+
+// parseDecompositionNotesBeadList extracts the numbered bead list from the
+// design doc's "## Decomposition Notes" section. Returns nil when there is no
+// such list (older docs lay the decomposition out as prose or a table — the
+// structure gate is skipped for those).
+func parseDecompositionNotesBeadList(designDoc string) []structDocBead {
+	section := extractMarkdownSection(designDoc, "Decomposition Notes")
+	if section == "" {
+		return nil
+	}
+	locs := decompNumberedBeadRe.FindAllStringSubmatchIndex(section, -1)
+	if len(locs) < 2 {
+		return nil
+	}
+	// Keep only the contiguous run of numbered items: a "1." … "N." list whose
+	// items are consecutive integers from the first. This drops a stray "1."
+	// that begins a later prose paragraph (e.g. a numbered step in an
+	// integration-scenario description) without being part of the bead list.
+	trimmed := locs[:1]
+	for i := 1; i < len(locs); i++ {
+		prevNum, _ := strconv.Atoi(section[locs[i-1][2]:locs[i-1][3]])
+		curNum, _ := strconv.Atoi(section[locs[i][2]:locs[i][3]])
+		if curNum != prevNum+1 {
+			break
+		}
+		trimmed = append(trimmed, locs[i])
+	}
+	locs = trimmed
+	if len(locs) < 2 {
+		return nil
+	}
+	var out []structDocBead
+	for i, m := range locs {
+		title := strings.TrimSpace(section[m[4]:m[5]])
+		bodyStart := m[1]
+		bodyEnd := len(section)
+		if i+1 < len(locs) {
+			bodyEnd = locs[i+1][0]
+		}
+		body := section[bodyStart:bodyEnd]
+
+		file := ""
+		if fm := decompOwnsFileRe.FindStringSubmatch(body); fm != nil {
+			file = fm[1]
+		} else if fm := decompParenFileRe.FindStringSubmatch(body); fm != nil {
+			file = fm[1]
+		} else if fm := decompAnyGoFileRe.FindStringSubmatch(body); fm != nil && !strings.HasSuffix(fm[1], "_test.go") {
+			file = fm[1]
+		}
+		out = append(out, structDocBead{title: title, file: file})
+	}
+	return out
+}
+
+// normalizeStructTitle lowercases and strips separators so "grammar-modules",
+// "grammar_modules" and "handlers+templates" compare stably.
+func normalizeStructTitle(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	return strings.NewReplacer("`", "", " ", "", "-", "", "_", "", "+", "").Replace(s)
+}
+
+// beadStructureViolations returns a violation for every merge (one proposed
+// bead covering >=2 listed beads) or drop (a listed non-integration bead no
+// proposed bead covers) against the design doc's numbered Decomposition Notes
+// bead list. Empty when the doc has no such list.
+func beadStructureViolations(designDoc string, proposed []ParsedBead) []string {
+	docBeads := parseDecompositionNotesBeadList(designDoc)
+	if len(docBeads) < 2 {
+		return nil
+	}
+
+	covers := make([][]string, len(proposed)) // proposed index -> doc titles it covers
+	covered := map[string]bool{}
+	for pi, pb := range proposed {
+		ptitle := normalizeStructTitle(pb.Title)
+		pfiles := map[string]bool{}
+		for _, f := range pb.OutputFiles {
+			if strings.HasSuffix(f, ".go") && !strings.HasSuffix(f, "_test.go") {
+				pfiles[f] = true
+			}
+		}
+		for _, dbd := range docBeads {
+			if normalizeStructTitle(dbd.title) == ptitle || (dbd.file != "" && pfiles[dbd.file]) {
+				covers[pi] = append(covers[pi], dbd.title)
+				covered[normalizeStructTitle(dbd.title)] = true
+			}
+		}
+	}
+
+	var v []string
+	for pi, titles := range covers {
+		if len(titles) >= 2 {
+			v = append(v, fmt.Sprintf(
+				"bead %q covers design-doc Decomposition Notes beads %v — the numbered bead list "+
+					"specifies these as separate beads (separate owned files, separate exit criteria). "+
+					"Emit one bead per listed entry; do not merge them.",
+				proposed[pi].Title, titles))
+		}
+	}
+	for _, dbd := range docBeads {
+		if strings.Contains(strings.ToLower(dbd.title), "integration") {
+			continue // integration beads are prose-specified; DECOMPOSE has latitude
+		}
+		if !covered[normalizeStructTitle(dbd.title)] {
+			owns := dbd.file
+			if owns == "" {
+				owns = "(no file stated)"
+			}
+			v = append(v, fmt.Sprintf(
+				"design-doc Decomposition Notes bead %q (owns %s) has no corresponding bead in your "+
+					"decomposition — every listed bead must be emitted, not merged into another or dropped.",
+				dbd.title, owns))
+		}
+	}
+	return v
+}
+
 // injectDecompositionNotesPin mechanically guarantees a bead's full_text
 // contains the exact text of any Decomposition Notes "Pin ... to the X
 // bead" bullet naming it, regardless of whether DECOMPOSE/RECONCILE's own
@@ -1137,8 +1357,11 @@ func checkBeadCriteriaConsistency(beads []ParsedBead) []string {
 				}
 				if strings.HasSuffix(file, "_test.go") && !ownedTestFiles[filepath.Base(file)] {
 					violations = append(violations, fmt.Sprintf(
-						"bead %q: exit criterion greps %q for a test function, but that file is not in this bead's output_files %v",
-						b.Title, file, b.OutputFiles))
+						"bead %q: exit criterion greps %q for a test function, but that file is not in this bead's "+
+							"output_files %v. The grep guard and the owned *_test.go must use the same name: either "+
+							"put %q in output_files, or rename the guard (and any `go test` command) to name an owned "+
+							"*_test.go. Convention: the test file for `foo.go` is `foo_test.go`.",
+						b.Title, file, b.OutputFiles, file))
 				}
 			}
 			// I6-residual: a -run value fixRunFlagSeparator could not normalize
