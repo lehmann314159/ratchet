@@ -33,7 +33,8 @@ Follow the template's seven sections in order. Omit a *conditional* section enti
 (no empty heading) when it does not apply — Architecture (skip for < 4 source files and
 no strong layout opinion), Domain-Specific Test Scenarios (skip when no bead tests
 non-obvious geometry), Cross-Bead Contracts (skip when nothing crosses a bead
-boundary), Decomposition Notes (skip when DECOMPOSE's heuristics suffice).
+boundary), Decomposition Notes (numbered bead list for any multi-file project; skip only
+for a small single-file library — see hard rule 4).
 
 Write for a model with zero domain knowledge. Where the guide's "Writing for small
 models" section or its Common Mistakes table names a pattern that applies here, apply
@@ -70,6 +71,22 @@ this skill, enforced by doing them, not by deciding whether they seem necessary.
    values. Prose in Behavioral Specification or Domain-Specific Test Scenarios is *not*
    reliably carried by DECOMPOSE; a Pin bullet is.
 
+4. **For a multi-file project, write the numbered bead-dependency list** in Decomposition
+   Notes (skip only for a small single-file library) — one entry per bead: name, owned
+   symbols, bead-number dependencies, owned `.go` file. Structure only, not spec prose.
+   The list is authoritative: DECOMPOSE emits one bead per entry and cannot merge or
+   drop one. Size each bead so it owns fewer than ~4 functions, **or** depends on fewer
+   than 3 prior beads and appears in fewer than 3 Cross-Bead Contracts — a bead over
+   both thresholds makes the EXECUTE model spiral. When a bead must be big and
+   integrated, split it (each sub-bead its own Behavioral-Spec `###` subsection + its own
+   contract entries — see the guide's "Bead sizing" and the lsystem `grammar` split).
+
+5. **State the web-I/O two-reading rules** when the project has form handlers or renders
+   HTML: `r.ParseForm()` decodes `+` as a space (build httptest bodies with
+   `url.Values.Encode()`, no hand-rolled parser); `html/template` escapes by context, so
+   assertions on rendered HTML must use plain-text fragments only. See the guide's
+   "Specific patterns that need explicit guidance".
+
 ### 4. Resolve Open Questions
 
 - The `## Open Questions` section always stays in the draft as written — it is the
@@ -85,10 +102,12 @@ this skill, enforced by doing them, not by deciding whether they seem necessary.
 
 1. Write the draft to a file (`<name>-design-doc.md` next to the prose, or the path the
    user gave).
-2. Run `go run ./cmd/checkdesigndoc --doc <draft>` yourself. Resolve any pin/scenario
-   count mismatch it reports before handing off. The ambiguity-scan hits are for
-   `check-design-doc` to work through with the user — note them, do not silently edit
-   around them.
+2. Run `go run ./cmd/checkdesigndoc --doc <draft>` yourself. Resolve, before handing
+   off: any pin/scenario count mismatch; any `bead-size` **FLAG** (split the bead, or add
+   a `sizing rationale:` note if the flag is genuinely wrong); any `bead-size` **NOTE**
+   (add the missing helper signatures to Data Types). The ambiguity-scan hits and
+   `construction-form` hits are for `check-design-doc` to work through with the user —
+   note them, do not silently edit around them.
 3. Report: the draft path, the count of remaining Open Questions, and the
    `checkdesigndoc` summary. Then run `check-design-doc <draft>` (or, if the user would
    rather stop here, tell them that is the next step).

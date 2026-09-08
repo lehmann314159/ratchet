@@ -24,7 +24,8 @@ It uses:
 - **Cross-Bead Contracts** to populate consumer bead specs with verbatim interface text and
   to set exit criteria (smoke tests, round-trip tests, integration tests)
 - **Decomposition Notes** as an authoritative override — anything written here supersedes
-  the generic decomposition heuristics
+  the generic decomposition heuristics. A numbered bead list here is enforced
+  mechanically: DECOMPOSE emits one bead per entry and cannot merge or drop one
 
 **AUDIT_DECOMPOSITION** cross-checks the resulting bead list against the design doc. It
 flags contract violations, missing test files, and handler beads with build-only exit
@@ -91,6 +92,26 @@ pseudocode rather than saying "find all X."
 (a scratch copy of game state, a per-trial accumulator), small models often declare it
 once before the loop. Name the required scope: *"Declare `scratch := *g` inside the
 loop body, not before it — each trial must start from the original game state."*
+
+**HTTP form-body encoding (any doc with form handlers).** In an
+`application/x-www-form-urlencoded` body, `+` decodes to a space — so
+`r.ParseForm()` turns a posted `F(1) +(90) F(1)` into `F(1)  (90) F(1)` and corrupts any
+value with a literal `+`. When a test-scenario or Behavioral-Spec line shows a form value
+containing `+` (or `&`, `%`, `;`), it is ambiguous whether that is the *logical* value or
+the *literal request body*. State one authoritative rule in Behavioral Specification →
+Handlers: **"httptest request bodies are built with `url.Values{...}.Encode()`; the
+handler reads them with `r.ParseForm()` / `r.PostForm.Get`. Do not hand-roll a
+`+`-preserving parser."** Then point every test-scenario site at it. Left ambiguous, one
+bead's REFINE encodes the value and another weakens the handler to compensate — the
+lsystem `handlers` bead did exactly this.
+
+**`html/template` context escaping.** `html/template` escapes by output context: text
+inside `<textarea>`, `<script>`, an attribute, or a URL is transformed, so
+`X -> F+[[X]` in a textarea renders in the response bytes as `X -&gt; F&#43;[[X]`. An
+exit-criterion or scenario that asserts `strings.Contains(body, "X ->")` is then
+unsatisfiable. When a scenario asserts on rendered HTML, assert a substring with **no
+HTML-special characters** (`&`, `<`, `>`, `'`, `"`, `+` in some contexts) — pick a stable
+plain-text fragment of the expected content and pin *that*.
 
 **Don't pair a precise rule with a relative gloss for the same fact.** "Red moves
 toward lower row indices (up the board)" says the same thing twice — once precisely
@@ -461,27 +482,83 @@ interface text in a consumer bead spec is a finding.
 
 ## Decomposition Notes
 
-**What to write:** Targeted overrides when DECOMPOSE's generic heuristics would produce
-wrong bead boundaries for this specific project.
+**What to write:** the bead structure for this project — as much or as little as the
+project needs DECOMPOSE not to guess.
 
-**Start without this section.** DECOMPOSE has strong built-in heuristics: 200-line cap,
-independence requirement, paired-behavior detection, integration bead generation, and
-httptest requirement for handler beads. It also reads the behavioral specification and
-cross-bead contracts to understand the project structure. For most projects, this is
-sufficient.
+**Small single-file library, no bead integrating several others:** skip this section, or
+use it only for pins and file-sequencing. DECOMPOSE's built-in heuristics (200-line cap,
+independence requirement, paired-behavior detection, integration-bead generation,
+httptest requirement for handler beads) plus the Behavioral Specification and Cross-Bead
+Contracts are enough.
 
-**Add guidance only when you know something DECOMPOSE can't infer.** The right signal is
-a specific wrong choice you've seen or can predict — not a desire to control the output.
-Good uses:
-- Specifying one bounded scenario for an integration bead (DECOMPOSE may over-scope it)
-- Calling out a per-bead constraint that prevents a common mistake for this project type
-  (e.g., "handlers bead must not define HTML templates inline")
-- Sequencing two beads that share a file and have a non-obvious dependency order
+**Multi-file project (≈4+ source files), or *any* project with a parser / pipeline /
+handlers bead that pulls in several prior beads:** write the **numbered bead-dependency
+list**. Every recent design doc that drove a project end-to-end has one. One entry per
+bead:
 
-**Avoid pre-writing the full bead table.** A complete bead table makes DECOMPOSE redundant
-and removes its ability to apply judgment. If the table is wrong (even slightly), AUDIT
-will flag it and RECONCILE will need to fix it — at the cost of a full extra round. Let
-DECOMPOSE make structural decisions, then add guidance only where it guesses wrong.
+```
+1. **expr** — `Lex`, `ParseExpr`, `EvalExpr` + node types. No dependencies. Owns `expr.go`.
+2. **grammar-modules** — `parseModuleSequence`, `parseBodyModuleSequence` + the 4 shared
+   types. Depends on bead 1. Owns `grammar_modules.go`.
+...
+```
+
+Give each entry: the bead's short name, the concrete symbols it owns, its bead-number
+dependencies, and the file it owns (write it as `Owns` followed by the backticked
+filename). Do **not** write the bead's full spec prose or its exit criteria — DECOMPOSE
+derives those from the Behavioral Specification and Cross-Bead Contracts. Keep the entry
+to structure.
+
+**This list is authoritative.** DECOMPOSE emits exactly one bead per numbered entry, with
+that name and file; it may add an integration bead the prose calls for, but it **cannot
+merge two entries or drop one** — that is rejected mechanically and it is asked to
+redecompose. So the list is a commitment: get the bead boundaries and sizes right (see
+*Bead sizing* below), because DECOMPOSE will not fix them for you.
+
+**Still don't over-constrain what you don't care about.** If two functions could
+reasonably be one bead or two and it genuinely doesn't matter, leaving them out of the
+list lets DECOMPOSE choose. The list is for the boundaries you have an opinion about —
+which, for a parser or a web app, is most of them.
+
+### Bead sizing
+
+The EXECUTE model (a 24–31B reasoning model) reliably one-shots a bead the size of a
+lexer+parser+evaluator for a small expression language — one cohesive cluster of a few
+functions. Past that, on a bead that is **both** large **and** wired into several other
+beads, it stops writing code and rewrites the whole design in its head until the budget
+runs out. This spiral cost the lsystem project **five** from-scratch runs before the
+`grammar` bead was split.
+
+Size each bead so that, in the numbered list, it owns **fewer than ~4 functions**, *or*
+depends on **fewer than 3 prior beads** and appears in **fewer than 3 Cross-Bead
+Contracts**. A bead that crosses both thresholds — many functions *and* heavy
+integration — is the spiral zone. `go run ./cmd/checkdesigndoc --doc <draft>
+--checks=bead-size` flags these; run it and act on every FLAG.
+
+**Worked split (lsystem `grammar`).** The original bead owned `grammar.go` = the 4
+grammar types + `ParseSystem` + ~5 unexported helpers (`parseRule`,
+`parseModuleSequence`, `parseParams`, …), ~150 lines, consuming the `expr` bead and
+feeding `rewrite` and `turtle`. It was split into three:
+
+| bead | owns | one concern |
+|---|---|---|
+| `grammar-modules` | `grammar_modules.go` — 4 shared types + `parseModuleSequence` / `parseBodyModuleSequence` | parse one module-sequence string |
+| `grammar-rules` | `grammar_rules.go` — `parseRule` | parse one `head -> body` line |
+| `grammar-system` | `grammar_system.go` — `ParseSystem` | line dispatch, settings, defaults, clamp; delegates to the other two |
+
+Each sub-bead got **its own `###` subsection in Behavioral Specification** and **its own
+Cross-Bead Contract entries** — that is what makes a split real rather than cosmetic. All
+three then ran one-shot, exactly like `expr`.
+
+**If a FLAG is wrong** — the bead really is safe at that size — add a one-line
+`sizing rationale:` note to its bullet (e.g. `sizing rationale: five thin handler
+wrappers, no shared assembly logic`). That clears the FLAG in `checkdesigndoc` and tells
+the next reader you considered it.
+
+**A NOTE (not a FLAG)** means the bead is *under-specified*: its behavioral subsection is
+long but Data Types lists ≤1 function for it. List the unexported helper signatures in
+`## Data Types and Function Signatures` (under the bead's `// ---- file.go ----` marker)
+so the real surface area is visible — it may then FLAG, correctly.
 
 ### Integration bead scope
 
@@ -546,6 +623,9 @@ A web application has handlers, view models, and templates. The dominant contrac
 - [ ] HTMX swap target contains all dynamic state (score, turn, game-over message)
 - [ ] Template storage form stated explicitly (inline strings vs external files)
 - [ ] Integration bead tests one user flow end-to-end (not "all routes")
+- [ ] If any handler reads form fields: Behavioral Spec states httptest bodies use `url.Values.Encode()` and the handler uses `r.ParseForm()` (no `+`-preserving parser)
+- [ ] Assertions on rendered HTML use plain-text fragments only — nothing `html/template` escapes
+- [ ] `handlers` bead checked with `checkdesigndoc --checks=bead-size`; split or `sizing rationale:` if flagged
 
 **HTMX fragment scope:** For projects using HTMX fragment updates, all user-visible
 state that changes after a move — score, turn indicator, game-over message — must
@@ -606,3 +686,6 @@ displayed in a specific way, write the exact format in the protocol contract.
 | "Find all regions" described as a single flood fill | Model calls flood-fill once from one starting point; only one region found; rest of board misclassified | Write the outer loop explicitly: "iterate every cell; for each unvisited empty cell, start a new flood fill" |
 | Loop-scoped scratch copy declared before the loop | Model reuses a modified scratch copy across trials; later trials see side effects of earlier ones | Name the required scope: "declare `scratch := *g` inside the loop body, not before it" |
 | Worked-example literal values stated only in prose (Behavioral Spec / Domain-Specific Test Scenarios), not pinned to a bead | DECOMPOSE keeps the governing rule but drops the specific values when writing the bead spec; REFINE_TESTS_WRITE re-derives them itself and may get a sign/direction case wrong (e.g. division truncation on negative operands) | Add a Decomposition Notes line naming the exact bead and the exact required values — the same mechanism as bounded integration-bead scenarios, not held back for those alone |
+| Bead both large (≈4+ functions) and heavily integrated (3+ prior-bead deps or 3+ contracts) | EXECUTE model designs the whole bead in its head and never writes code; stalls to the budget, escalates (lsystem `grammar`: 5 from-scratch runs) | Split it into `expr`-sized sub-beads, each with its own Behavioral-Spec subsection + contracts (see *Bead sizing*); `checkdesigndoc --checks=bead-size` flags these |
+| Form value containing `+` shown in a test scenario without saying "logical value" vs "literal request body" | `r.ParseForm()` decodes `+` as space; one bead encodes it, another weakens the handler to compensate | State once in Behavioral Spec → Handlers: build bodies with `url.Values.Encode()`, read with `r.ParseForm()`, no hand-rolled parser; point every scenario at it |
+| Exit criterion asserts on raw HTML that `html/template` escapes (`X ->` in a `<textarea>`, `&` anywhere) | Assertion is unsatisfiable — the response bytes contain `X -&gt;`; bead stalls on it | Assert a substring of the expected content with no HTML-special characters; pin that fragment |

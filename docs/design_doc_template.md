@@ -161,20 +161,29 @@ all unit tests pass. Each entry declares:
 
 ## Decomposition Notes
 
-*(Conditional — include only when DECOMPOSE's generic heuristics would produce wrong
-bead boundaries for this project. Start without this section.)*
+*(Conditional. Skip for a small single-file library. **Include the numbered bead list
+for any multi-file project or any project with a parser / pipeline / handlers bead that
+integrates several others** — see the guide's "Decomposition Notes" and "Bead sizing".)*
 
 DECOMPOSE already applies a 200-line cap, independence requirement, paired-behavior
 detection, integration-bead generation, and an httptest requirement for handler beads,
-and it reads the Behavioral Specification and Cross-Bead Contracts. Add targeted
-guidance only for what it cannot infer:
+and it reads the Behavioral Specification and Cross-Bead Contracts.
 
-- One bounded scenario for an integration bead (fixed inputs, one asserted output) to
-  stop it over-scoping.
+**Bead dependency order (do not reorder):**
+
+1. **<name>** — `<owned symbols>`. No dependencies. Owns `<file>.go`.
+2. **<name>** — `<owned symbols>`. Depends on bead 1. Owns `<file>.go`.
+   *(structure only — name, owned symbols, dependencies, owned file. Not the spec prose,
+   not the exit criteria. One bead per entry; DECOMPOSE cannot merge or drop one. Size
+   each so it owns < ~4 functions, OR has < 3 deps and appears in < 3 contracts — run
+   `checkdesigndoc --checks=bead-size`. Add `sizing rationale: <why>` to a bullet to
+   clear a false flag.)*
+
+Also add, as needed:
+
+- One bounded scenario for an integration bead (fixed inputs, one asserted output).
 - A per-bead constraint that prevents a known mistake for this project type.
 - Explicit sequencing for two beads that share a file.
 - A **Pin** bullet for every load-bearing literal / worked-example value that must
   reach a named bead's spec verbatim — name the bead and the exact values. Prose
   elsewhere is not reliably carried; a `**Pin ...**` bullet is.
-
-Do not pre-write the full bead table — let DECOMPOSE make structural decisions.
