@@ -35,6 +35,13 @@ const writeGracePeriod = 2 * time.Minute
 // execAbsoluteCeiling. These are fixed durations — EXECUTE_BEAD timing is no
 // longer derived from the bead's execution_budget (see
 // docs/execute-checkpoint-decouple-plan.md).
+//
+// The "ratchet execute-bead" subcommand also sets these (and testExecMaxTurns /
+// testExecStallWindow) from optional --max-turns / --ceiling-min /
+// --checkpoint-min / --stall-window-min flags, for offline capability
+// experiments (e.g. "does a coder that hits the 50-turn cap converge if given
+// 120?"). The daemon never passes those flags, so production timing is
+// unchanged.
 var (
 	testExecCheckpointInterval time.Duration
 	testExecCeiling            time.Duration
@@ -42,7 +49,27 @@ var (
 	testExecEmptyAttemptCeiling time.Duration
 	// testExecContentStallTimeout overrides execContentStallTimeout for tests.
 	testExecContentStallTimeout time.Duration
+	// testExecMaxTurns overrides execMaxTurns when > 0.
+	testExecMaxTurns int
+	// testExecStallWindow overrides execStallWindow when > 0.
+	testExecStallWindow time.Duration
 )
+
+// effectiveMaxTurns / effectiveStallWindow return the override when set, else the
+// compiled-in constant.
+func effectiveMaxTurns() int {
+	if testExecMaxTurns > 0 {
+		return testExecMaxTurns
+	}
+	return execMaxTurns
+}
+
+func effectiveStallWindow() time.Duration {
+	if testExecStallWindow > 0 {
+		return testExecStallWindow
+	}
+	return execStallWindow
+}
 
 // RunExecuteBeadMain is the entry point for the "ratchet execute-bead" subcommand.
 //
@@ -59,11 +86,35 @@ func RunExecuteBeadMain(args []string) {
 	execID := flags.Int64("execution-id", 0, "executions row ID")
 	ollamaURL := flags.String("ollama", "http://192.168.50.241:11434", "Ollama base URL")
 	mode := flags.String("mode", "", "stub mode for testing: success|loop|hang (empty = real implementation)")
+	maxTurns := flags.Int("max-turns", 0, "override the EXECUTE_BEAD turn cap (0 = compiled default, 50)")
+	ceilingMin := flags.Int("ceiling-min", 0, "override the absolute wall-clock ceiling, minutes (0 = compiled default, 45)")
+	checkpointMin := flags.Int("checkpoint-min", 0, "override the budget-checkpoint interval, minutes (0 = compiled default, 12)")
+	stallWindowMin := flags.Int("stall-window-min", 0, "override the no-progress stall window, minutes (0 = compiled default, 15)")
 	_ = flags.Parse(args)
 
 	if *execID == 0 {
 		slog.Error("execute-bead: --execution-id is required")
 		os.Exit(1)
+	}
+
+	// Offline capability-experiment knobs. The daemon never passes these, so
+	// production EXECUTE_BEAD timing is unchanged.
+	if *maxTurns > 0 {
+		testExecMaxTurns = *maxTurns
+	}
+	if *ceilingMin > 0 {
+		testExecCeiling = time.Duration(*ceilingMin) * time.Minute
+	}
+	if *checkpointMin > 0 {
+		testExecCheckpointInterval = time.Duration(*checkpointMin) * time.Minute
+	}
+	if *stallWindowMin > 0 {
+		testExecStallWindow = time.Duration(*stallWindowMin) * time.Minute
+	}
+	if *maxTurns > 0 || *ceilingMin > 0 || *checkpointMin > 0 || *stallWindowMin > 0 {
+		slog.Warn("execute-bead: budget overrides active (capability experiment)",
+			"max_turns", *maxTurns, "ceiling_min", *ceilingMin,
+			"checkpoint_min", *checkpointMin, "stall_window_min", *stallWindowMin)
 	}
 
 	d, err := db.Open(*dbPath)
@@ -222,7 +273,7 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 				soft.Reset(checkpointDur)
 			case <-hard.C:
 				cause := "timeout"
-				if finalizing || time.Since(tracker.lastProductive()) > execStallWindow {
+				if finalizing || time.Since(tracker.lastProductive()) > effectiveStallWindow() {
 					cause = "stalled"
 				}
 				trySendCause(terminationCh, cause)

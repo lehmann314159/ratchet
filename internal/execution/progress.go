@@ -213,10 +213,10 @@ func (t *progressTracker) wall(now time.Time, turn int) (bool, string) {
 		return true, "reasoning spiral — per-turn token cap hit with no output on consecutive turns"
 	case t.identicalStreak >= execIdenticalStreakLimit:
 		return true, "identical tool call repeated with no forward progress"
-	case turn >= execMaxTurns:
+	case turn >= effectiveMaxTurns():
 		return true, "turn cap reached"
-	case t.nonProductiveStreak >= 1 && now.Sub(t.lastProductive()) > execStallWindow:
-		return true, "no output file changed for " + execStallWindow.String()
+	case t.nonProductiveStreak >= 1 && now.Sub(t.lastProductive()) > effectiveStallWindow():
+		return true, "no output file changed for " + effectiveStallWindow().String()
 	default:
 		return false, ""
 	}
