@@ -880,6 +880,22 @@ func (c *Client) ChatWithTools(ctx context.Context, model string, msgs []Message
 		slog.Info("ChatWithTools: model returned separated thinking (not fed downstream)",
 			"model", model, "thinking_chars", thinkingSB.Len(), "content_chars", contentSB.Len())
 	}
+	// Some models (qwen2.5-coder:32b-instruct, confirmed 2026-09-07) never emit
+	// native tool_calls — the call is serialised as a bare JSON object in the
+	// content channel. Recover it so the caller's loop doesn't read the turn as
+	// an empty final answer. Gated on a known tool name + arguments, so it
+	// cannot misfire on a verb's final-answer JSON.
+	if len(toolCalls) == 0 && contentSB.Len() > 0 {
+		if recovered := recoverToolCallsFromContent(contentSB.String(), tools); len(recovered) > 0 {
+			names := make([]string, len(recovered))
+			for i, tc := range recovered {
+				names[i] = tc.Function.Name
+			}
+			slog.Warn("ChatWithTools: recovered tool call(s) from content channel — model did not emit native tool_calls",
+				"model", model, "count", len(recovered), "tools", names)
+			toolCalls = recovered
+		}
+	}
 	result = Message{
 		Role:       "assistant",
 		Content:    contentSB.String(),
