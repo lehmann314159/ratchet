@@ -214,6 +214,55 @@ func TestRunExecuteBeadReal_PartialProgressSurvivesStall(t *testing.T) {
 	}
 }
 
+// TestRunExecuteBeadReal_StopsCallingToolsWithFailingCriteriaIsNotSuccess: a
+// model that writes a real file, then stops calling tools while the exit
+// criteria still fail — "I have successfully implemented it, one unrelated test
+// fails" — must NOT be recorded as success (execute-bakeoff 2026-09-07:
+// qwen3-coder did exactly this on the lsystem grammar bead and the loop stamped
+// termination_cause=success on a parser that fails its locked test). The loop
+// sends the one finalize directive; the model still does not satisfy the
+// criteria, so the attempt ends 'stalled'.
+func TestRunExecuteBeadReal_StopsCallingToolsWithFailingCriteriaIsNotSuccess(t *testing.T) {
+	var turn atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if turn.Add(1) <= 2 {
+			writeToolCalls(w, toolCall("write_file", map[string]any{
+				"path":    "game.go",
+				"content": fmt.Sprintf("package main\n\n// rev %d, still incomplete\nfunc Play() {}\n", turn.Load()),
+			}))
+			return
+		}
+		writeDone(w) // "I'm done" — no more tool calls, criteria still fail
+	}))
+	defer srv.Close()
+
+	d := openTestDB(t)
+	folder := t.TempDir()
+	seedRunProject(t, d, folder)
+	// grep -q PASS never matches what the model writes -> criteria always fail.
+	fullText := `{"title":"B01","full_text":"spec","output_files":["game.go"],"exit_criteria":["test -f game.go && grep -q PASS game.go"]}`
+	execID := seedRunExecutionBudget(t, d, folder, fullText, 1)
+
+	if err := runExecuteBeadReal(d, execID, srv.URL); err != nil {
+		t.Fatalf("runExecuteBeadReal: %v", err)
+	}
+
+	if cause := terminationCause(t, d, execID); cause != "stalled" {
+		t.Errorf("termination_cause = %q, want stalled (must never be success when exit criteria fail)", cause)
+	}
+	tr := readFile(t, traceForExec(t, d, execID))
+	if !strings.Contains(tr, "stopped calling tools before the exit criteria passed") {
+		t.Errorf("expected the finalize directive for a premature stop:\n%s", tr)
+	}
+	if strings.Contains(tr, "[done — no further tool calls]") {
+		t.Errorf("the unconditional success path must be gone:\n%s", tr)
+	}
+	if got := readFile(t, filepath.Join(folder, "game.go")); !strings.Contains(got, "incomplete") {
+		t.Errorf("partial progress lost — game.go = %q", got)
+	}
+}
+
 // TestRunExecuteBeadReal_ReadOnlyNeverWritingIsStalledAfterRedirect: a model
 // that only ever calls read_file and never writes anything is caught by the
 // empty-turn fast path — one write-now redirect, then after

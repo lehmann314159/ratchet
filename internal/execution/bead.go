@@ -542,8 +542,21 @@ func runExecuteBeadReal(d *db.DB, execID int64, ollamaURL string) error {
 				// — give the model another turn rather than declaring success.
 				continue
 			}
-			writeLine(traceFile, "[done — no further tool calls]")
-			return writeTerminationCause(d, execID, "success")
+			// The model stopped calling tools, but the exit criteria (checked at
+			// the top of this branch) do NOT pass, and no finalize directive has
+			// been sent (the finalizeInjected check above returns 'stalled'
+			// before reaching here). The model has declared itself done
+			// prematurely — e.g. execute-bakeoff 2026-09-07: qwen3-coder wrote a
+			// parser it could not get past one locked assertion and ended its
+			// turn "successfully implemented ... one unrelated test fails".
+			// Recording 'success' here (as this path used to, unconditionally)
+			// ships a bead that fails its locked test. Send the one finalize
+			// directive instead; the finalizeInjected checks (here for a
+			// no-tool-call turn, and in the tool-call branch) then decide
+			// success-vs-stalled on a real VerifyExitCriteria, never on "the
+			// model said it was done".
+			injectFinalize("model stopped calling tools before the exit criteria passed")
+			continue
 		}
 
 		var missingPathDetected bool
