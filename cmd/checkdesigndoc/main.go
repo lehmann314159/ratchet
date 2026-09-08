@@ -11,6 +11,14 @@
 //     bead 71 (2026-08-28): a worked example was added and the matching pin was
 //     simply forgotten.
 //
+//   - bead-size: flags a "## Decomposition Notes" bead that is both large (owns
+//     >=4 functions) and heavily integrated (>=3 prior-bead dependencies or >=3
+//     Cross-Bead Contracts) — the surface area the EXECUTE model spirals on.
+//     Motivated by the lsystem `grammar` monolith (escalated five from-scratch
+//     runs; hand-split into three expr-sized sub-beads that all ran clean). See
+//     beadsize.go and docs/decomposition-framework-plan.md. Report-only;
+//     cleared by a "sizing rationale:" note in the bullet.
+//
 //   - ambiguity: a first-pass mechanical scan for the design-doc ambiguity
 //     classes that docs/design_doc_ambiguity_checklist.md marks as
 //     mechanically detectable (1 directional/geometric, 2 spec-derived
@@ -37,7 +45,7 @@ import (
 
 func main() {
 	docPath := flag.String("doc", "", "path to the design doc markdown file (required)")
-	checks := flag.String("checks", "all", "comma-separated checks to run: pins, ambiguity, construction-form, all")
+	checks := flag.String("checks", "all", "comma-separated checks to run: pins, ambiguity, construction-form, bead-size, all")
 	flag.Parse()
 	if *docPath == "" {
 		fmt.Fprintln(os.Stderr, "checkdesigndoc: --doc is required")
@@ -51,20 +59,22 @@ func main() {
 	}
 	content := string(data)
 
-	runPins, runAmbiguity, runConstructionForm := false, false, false
+	runPins, runAmbiguity, runConstructionForm, runBeadSize := false, false, false, false
 	for _, c := range strings.Split(*checks, ",") {
 		switch strings.TrimSpace(c) {
 		case "all":
-			runPins, runAmbiguity, runConstructionForm = true, true, true
+			runPins, runAmbiguity, runConstructionForm, runBeadSize = true, true, true, true
 		case "pins":
 			runPins = true
 		case "ambiguity":
 			runAmbiguity = true
 		case "construction-form":
 			runConstructionForm = true
+		case "bead-size":
+			runBeadSize = true
 		case "":
 		default:
-			fmt.Fprintf(os.Stderr, "checkdesigndoc: unknown check %q (want: pins, ambiguity, construction-form, all)\n", c)
+			fmt.Fprintf(os.Stderr, "checkdesigndoc: unknown check %q (want: pins, ambiguity, construction-form, bead-size, all)\n", c)
 			os.Exit(2)
 		}
 	}
@@ -83,6 +93,10 @@ func main() {
 	if runConstructionForm {
 		sep()
 		reportConstructionForm(os.Stdout, *docPath, content)
+	}
+	if runBeadSize {
+		sep()
+		reportBeadSize(os.Stdout, *docPath, content)
 	}
 	if runPins {
 		sep()

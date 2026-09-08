@@ -25,14 +25,27 @@ structural sections, say so and stop — there is nothing to check yet.
 ### 2. Mechanical pass
 
 Run `go run ./cmd/checkdesigndoc --doc <path> --checks=all` and capture the full
-report: the pin-vs-scenario counts, the class 1/2/6/7/17 ambiguity hits, and any
-`construction-form` hits. Keep the exact `path:line` references.
+report: the pin-vs-scenario counts, the class 1/2/6/7/17 ambiguity hits, any
+`construction-form` hits, and the `bead-size` verdicts. Keep the exact
+`path:line` references.
 
 A `construction-form` hit means a Cross-Bead Contract enumerates a polymorphic
 type's variants (`` `Stmt` is `AssignStmt{…}`, `PrintStmt{…}`, … ``) without
 saying whether instances are struct values or pointers — the b314 defect. Carry
 it as a NEEDS DECISION row; resolve it by adding one sentence to the contract
 (and, if the value crosses into a test assertion, a Decomposition Notes pin).
+
+A `bead-size` **FLAG** means a Decomposition Notes bead owns ≥4 functions AND is
+heavily integrated (≥3 prior-bead deps or ≥3 Cross-Bead Contracts) — the surface
+area the EXECUTE model spirals on (the lsystem `grammar` monolith escalated five
+runs before it was split into three `expr`-sized sub-beads). Carry it as NEEDS
+DECISION: either split the bead (own a separate `.go` file per sub-bead, give
+each its own Behavioral Specification subsection + Cross-Bead Contract entries —
+see the run-6 `grammar` split), or add a one-line `sizing rationale:` note to the
+bullet stating why the surface area is safe. A `bead-size` **NOTE** means an
+integrated bead is *under-specified* — the doc declares ≤1 function but its
+behavioral subsection is long; add the unexported helper signatures to
+`## Data Types` so its real size is visible (it may then FLAG).
 
 ### 3. Judgment pass — independent
 
