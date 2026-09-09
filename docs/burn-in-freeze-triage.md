@@ -19,9 +19,9 @@ for the burn-in without touching pipeline behaviour. Defer everything
 speculative, tuning-heavy, or dependent on evidence the burn-in itself will
 produce — the burn-in is what ranks that work.
 
-Status: **Bucket B COMPLETE (2026-09-09) — all on `main`, none deployed.** Next:
-cron-studio run 2 terminates → build once → tag `v0.4` → deploy → burn-in.
-Freeze mechanics + burn-in corpus still open — see the sign-off checklist.
+Status: **Frozen. `v0.4` tagged at `d92f807`, binary `798853d` deployed
+(2026-09-09).** cron-studio run 2 finished COMPLETE 9/9. Not pushed to origin.
+Still open: showstopper threshold, burn-in corpus size/domains, doc authorship.
 
 ---
 
