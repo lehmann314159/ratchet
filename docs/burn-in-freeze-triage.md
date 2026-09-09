@@ -161,16 +161,38 @@ ranks them and, for several, supplies the evidence needed to scope them at all.
    cycle count per bead; EXECUTE stall/timeout/attempt counts; per-verb
    wall-clock; `checkdesigndoc` flags vs actual bead outcome (FP/FN rate on the
    bead-size heuristic).
-7. **Corpus target:** N diverse design docs — parsers, web apps, algorithmic
-   kernels, data structures, state machines. **Doc authoring is the bottleneck,
-   not compute.**
+---
+
+## Burn-in corpus
+
+**Constraint:** one project at a time, serial, ~4–8h wall/run. N runs ≈ N×5h.
+
+**Cadence:** n=2 per doc across the board. Rare bugs (contamination-class) are
+found by *breadth* (more distinct docs); n=2 catches coin-flip-frequency
+variance (bead-sizing, EXECUTE spiral) and gives a second data point per
+domain. Escalate a doc to n=3 only when its two runs *diverge* (different
+decomposition / one clean, one escalated).
+
+| tier | docs | purpose |
+|---|---|---|
+| **1 — regression anchors** | fractalviz, lsystem-studio, cron-studio, tasklist | regressions from v0.4 + baseline variance. NOT exprvm-web (overfit). |
+| **2 — validate fixes** | glob-studio (post-split, never run) | matcher split + B3b exercise |
+| **3 — new domains** (authored 2026-09-09, `docs/design-docs/`, checkdesigndoc-clean) | `decimal` (exact fixed-point arithmetic), `toml-mini` (parse **+** serialize round-trip), `retry-engine` (circuit-breaker state machine + seeded backoff), `gapbuffer` (mutable data structure + line nav) | break the parser+HTMX monoculture: exact-value pins, symmetric contracts, a state machine, a real data structure. Each library + CLI, no web layer. |
+
+~18 runs ≈ 4–6 days. Tier-3 reference impls live in `scratchpad/{decref,tomlref,
+retryref,gapref}` (uncommitted, `globref` precedent) — the worked-value pins are
+script-verified against them.
+
+**Still to do before running Tier 3:** each new doc needs the `check-design-doc`
+independent pass (fresh-subagent judgment + human sign-off) before `new-project`
+— `checkdesigndoc --checks=all` is clean but that is only the mechanical half.
 
 ---
 
 ## Sign-off checklist
 
 - [x] Bucket B scope — B1, B2, and all of B3 (B3b detector-only, B3c tag-only). *(2026-09-09)*
-- [ ] `v0.4` is the right tag name
+- [x] `v0.4` tagged at `d92f807`, deployed, pushed. *(2026-09-09)*
 - [ ] Showstopper threshold ("majority of runs") acceptable
-- [ ] Burn-in corpus size / domain list decided
-- [ ] Who authors the design docs, and to what standard (`draft-design-doc` as-is?)
+- [x] Burn-in corpus: 3 tiers, n=2, ~18 runs (table above). *(2026-09-09)*
+- [x] Tier-3 docs authored by Claude via `draft-design-doc`; `check-design-doc` pass still pending per doc. *(2026-09-09)*
