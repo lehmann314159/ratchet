@@ -7,7 +7,8 @@ nested map and **serializes** a nested map back to canonical TOML text. It is a
 symmetric read/write pair: the point is the round-trip, `Parse(Encode(m))` deep-
 equals `m` and `Encode(Parse(s))` is the canonical form of `s`. A CLI (`main.go`)
 reads a TOML document on stdin and either reformats it (`reformat`) or prints a
-sorted flat key dump (`dump`).
+flat `dotted.path = type:value` dump of every leaf, one per line, in
+depth-first / per-level-sorted order (`dump`).
 
 Consumers: config-file loading in application code. Runtime model: **library**
 plus a **CLI** harness. No server, no file I/O beyond stdin/stdout, no
@@ -45,8 +46,12 @@ third-party TOML package.
 - **Duplicate rules**: the same bare key twice in the same table → error. The
   same `[header]` string twice → error. A `[header]` whose path steps through a
   key already bound to a scalar/array → error.
-- **Whitespace**: leading/trailing spaces on a line and around `=` and inside
-  `[...]` are trimmed. Tabs and spaces are equivalent as separators.
+- **Whitespace**: the trimmed byte set everywhere in this doc is `{0x20 space,
+  0x09 tab, 0x0D carriage return}` — leading/trailing on a line, around `=`,
+  inside `[...]`, and around array elements. A trailing `\r` is therefore
+  tolerated, so a CRLF-line-ending file parses the same as an LF one. `\n` is
+  the line separator (`Parse` splits on it) and is never part of a trimmable
+  run. Other ASCII control bytes are not whitespace.
 
 **Parsed value domain (see the parse -> encode Cross-Bead Contract):** a parsed value is always one
 of `string`, `int64`, `bool`, `[]any` (homogeneous), or `map[string]any` (a
@@ -136,8 +141,9 @@ func scanValue(raw string) (any, error)
 func scanInt(raw string) (any, error)
 func scanArray(raw string) (any, error)
 
-// splitTopLevel splits s on commas not inside a nested [] or a "" string,
-// dropping one optional trailing empty field.
+// splitTopLevel splits s on commas that are not inside a nested [] or a "…"
+// string, dropping one optional trailing empty-or-whitespace field. See the
+// Behavioral Specification for the exact scan (backslash handling, depth guard).
 func splitTopLevel(s string) ([]string, error)
 
 // ---- parse.go ----
@@ -189,15 +195,17 @@ var _ func(map[string]any) (string, error) = Encode
 
 - **`bareKeyOK(s)`** — true iff `s` is non-empty and every rune is
   `A-Z` / `a-z` / `0-9` / `_` / `-`.
-- **`lexLine(line)`** — trim ASCII whitespace to get `t`:
+- **`lexLine(line)`** — strip leading/trailing bytes in `{space, tab, CR}`
+  (Overview → Whitespace) to get `t`:
   1. `t == ""` or `t` starts with `#` → `(lineBlank, nil, "", "", nil)`.
   2. `t` starts with `[`: it must also **end** with `]` (else `ErrSyntax`). Take
-     the inside, trim it; empty → `ErrSyntax`. Split on `.`; trim each segment;
-     each must pass `bareKeyOK` (else `ErrSyntax`). →
+     the inside, strip the same whitespace set; empty → `ErrSyntax`. Split on
+     `.`; strip each segment; each must pass `bareKeyOK` (else `ErrSyntax`). →
      `(lineHeader, segments, "", "", nil)`.
-  3. Otherwise: find the first `=`. None → `ErrSyntax`. `key` = trimmed text
-     before it, `rawValue` = trimmed text after it. `bareKeyOK(key)` must hold;
-     `rawValue` must be non-empty. → `(lineKV, nil, key, rawValue, nil)`.
+  3. Otherwise: find the first `=`. None → `ErrSyntax`. `key` = the same-set
+     whitespace-stripped text before it, `rawValue` = the stripped text after
+     it. `bareKeyOK(key)` must hold; `rawValue` must be non-empty. →
+     `(lineKV, nil, key, rawValue, nil)`.
 - `lexLine` does **not** strip a trailing `#` comment — that is why `k = 1 # x`
   fails (its `rawValue` is `1 # x`).
 
@@ -226,15 +234,24 @@ var _ func(map[string]any) (string, error) = Encode
 - **`scanInt(raw)`** — strip one optional leading `-`; the rest must be
   non-empty and all digits; reject a leading `0` when length > 1 (`007`); then
   `strconv.ParseInt(raw, 10, 64)` — any error (including overflow) → `ErrSyntax`.
-- **`scanArray(raw)`** — `raw` starts with `[`; it must end with `]`. Inner text
-  trimmed; empty → `[]any{}`. Otherwise `splitTopLevel(inner)`, then for each
-  part: trim; empty → `ErrSyntax`; `scanValue(part)`; if the result's dynamic
-  type differs from element 0's → `ErrSyntax`. (`[]any` is one type regardless of
-  contents, so `[[1],[2,3]]` is homogeneous.)
-- **`splitTopLevel(s)`** — walk `s`; track `depth` (`[`/`]`) and `inStr` (a `"`
-  that isn't preceded by `\`). Split on a `,` only when `depth == 0` and not
-  `inStr`. Unbalanced `[`/`]` or an unterminated string → `ErrSyntax`. A final
-  field that is all-whitespace (the trailing comma case) is dropped.
+- **`scanArray(raw)`** — `raw` starts with `[`; it must end with `]`. Let
+  `inner` be the text strictly between that outer `[` and `]` with **leading and
+  trailing ASCII whitespace removed**. If `inner == ""` → `[]any{}`. Otherwise
+  `splitTopLevel(inner)`, then for each part: strip surrounding whitespace;
+  empty → `ErrSyntax`; `scanValue(part)`; if the result's dynamic type differs
+  from element 0's → `ErrSyntax`. (`[]any` is one type regardless of contents,
+  so `[[1],[2,3]]` is homogeneous.)
+- **`splitTopLevel(s)`** — scan `s` byte by byte tracking two pieces of state.
+  `inStr` (start false): while `inStr` is false, a `"` byte sets it true; while
+  `inStr` is true, a `\` byte causes the **next byte to be skipped** (so `\"`
+  and `\\` don't end the string), and any other `"` byte sets `inStr` false.
+  `depth` (start 0): **only when `inStr` is false**, a `[` does `depth++` and a
+  `]` does `depth--` (if `depth` goes negative → `ErrSyntax`). Split the input
+  on a `,` **only when `inStr` is false and `depth == 0`**. `[`, `]`, and `,`
+  bytes inside a string are literal content and affect nothing. At end of
+  input: `inStr` still true, or `depth != 0` → `ErrSyntax`. A trailing field
+  that is empty or all-whitespace (the `[1, 2, ]` trailing-comma case) is
+  dropped.
 
 ### `parse.go` — `Parse`, `descend`
 
@@ -281,8 +298,10 @@ var _ func(map[string]any) (string, error) = Encode
     `isRoot=false`.
 - Canonical form, therefore: root scalars first (sorted), then every table
   depth-first with table names sorted at each level, a blank line before each
-  `[header]`, `key = value` with single spaces, a single trailing newline. A
-  table with no scalar keys still emits its `[header]` line.
+  `[header]` **except when that `[header]` is the first line of the output**
+  (a map with no root scalar keys → the file starts directly with `[first]`, no
+  leading blank line), `key = value` with single spaces, a single trailing
+  newline. A table with no scalar keys still emits its `[header]` line.
 
 ### `main.go` — the CLI (see the cli Cross-Bead Contract)
 
@@ -292,10 +311,14 @@ var _ func(map[string]any) (string, error) = Encode
     return the result with the trailing `\n` trimmed.
   - `mode == "dump"` → return `strings.Join(flatten(m), "\n")`.
   - any other mode → `"error: unknown mode " + mode`.
-- **`flatten(m)`** — depth-first, keys sorted at each level; for every **leaf**
-  (non-map) value emit one line `dotted.path + " = " + typeLabel + ":" +
+- **`flatten(m)`** — recursive depth-first walk: at each map, visit its keys in
+  `sort.Strings` order, recursing into sub-maps and, for every **leaf** (non-map)
+  value, appending one line `dotted.path + " = " + typeLabel + ":" +
   encodeValue(value)` where `typeLabel` is `string` / `int64` / `bool` /
-  `array`. An empty table contributes no lines.
+  `array`. This orders lines by the walk, **not** by sorting the final
+  dotted-path strings — e.g. for `{"a-b": …, "a": {"z": …}}` the root order is
+  `["a", "a-b"]` so `a.z` is emitted before `a-b`. An empty table contributes
+  no lines.
 - **`main`** — `mode` is `os.Args[1]` (default `"reformat"`); print
   `run(mode, os.Stdin)` followed by a newline.
 
@@ -329,9 +352,11 @@ them into the bead specs.
 | `1_000` | `ErrSyntax` |
 | `9223372036854775808` | `ErrSyntax` (overflow) |
 | `[1, 2, 3]` | `[]any{int64(1), int64(2), int64(3)}` |
-| `[1, 2, ]` | `[]any{int64(1), int64(2)}` (trailing comma) |
-| `[]` | `[]any{}` |
+| `[ 1, 2, ]` | `[]any{int64(1), int64(2)}` (inner whitespace + trailing comma) |
+| `[]` / `[  ]` | `[]any{}` |
 | `[[1], [2, 3]]` | `[]any{[]any{int64(1)}, []any{int64(2), int64(3)}}` |
+| `["]", "["]` | `[]any{"]", "["}` (`[`/`]` inside strings are literal) |
+| `["a\\"]` | `[]any{"a\\"}` (element string ends in a backslash — the closing `"` still terminates it) |
 | `[1, "a"]` | `ErrSyntax` (heterogeneous) |
 | `1.5` | `ErrSyntax` (no floats) |
 
@@ -349,14 +374,17 @@ them into the bead specs.
 | `[a.b]\n[a]\nc = 1` | `{"a": {"b": {}, "c": int64(1)}}` (distinct header strings — allowed) |
 | `key` | `line 1: ErrSyntax` (no `=`) |
 | `k = 1 # note` | `line 1: ErrSyntax` (inline comment not supported) |
+| `"a = 1\r\nb = 2\r\n"` | `{"a": int64(1), "b": int64(2)}` (CRLF tolerated — trailing `\r` trimmed) |
+| `k = 1\t` (trailing tab) | `{"k": int64(1)}` |
 
 ### `encode` bead
 
 | map | `Encode` result |
 |---|---|
 | `{"b": true, "a": int64(1), "c": "x"}` | `"a = 1\nb = true\nc = \"x\"\n"` (keys sorted) |
-| `{"z": {"k": int64(1)}, "m": {"k": int64(2)}}` | `"\n[m]\nk = 2\n\n[z]\nk = 1\n"` (tables sorted, blank line before each) |
-| `{"x": {"z": {"w": int64(3)}}}` | `"\n[x]\n\n[x.z]\nw = 3\n"` |
+| `{"a": int64(1), "z": {"k": int64(2)}}` | `"a = 1\n\n[z]\nk = 2\n"` (root scalar, then blank line, then the table) |
+| `{"z": {"k": int64(1)}, "m": {"k": int64(2)}}` | `"[m]\nk = 2\n\n[z]\nk = 1\n"` (no root scalars → **no** leading blank line; tables sorted; blank line between them) |
+| `{"x": {"z": {"w": int64(3)}}}` | `"[x]\n\n[x.z]\nw = 3\n"` |
 | `{}` | `""` |
 | `{"n": 1}` (Go `int`, not `int64`) | `ErrType` |
 | `{"f": 1.5}` (Go `float64`) | `ErrType` |
@@ -507,13 +535,19 @@ them into the bead specs.
 - **Pin — `encode` bead, canonical form (verbatim, must be followed exactly):**
   root scalar keys first, sorted; then nested tables depth-first with table
   names sorted at each level; a blank line immediately before each `[header]`
-  line; `key = value` with exactly one space each side of `=`; a table with no
-  scalar keys still emits its `[header]`; the whole output ends with exactly one
-  `\n`; `Encode({})` is `""`. `encodeValue` returns `ErrType` for any dynamic
-  type other than `string` / `int64` / `bool` / `[]any` (so a Go `int` or
-  `float64` in the map → `ErrType`).
+  line **except when that header is the first line of the output** (map with no
+  root scalars → starts with `[first]`, no leading blank line); `key = value`
+  with exactly one space each side of `=`; a table with no scalar keys still
+  emits its `[header]`; the whole output ends with exactly one `\n`;
+  `Encode({})` is `""`. `encodeValue` returns `ErrType` for any dynamic type
+  other than `string` / `int64` / `bool` / `[]any` (so a Go `int` or `float64`
+  in the map → `ErrType`).
 - **Pin — `cli` / `integration` beads, output (verbatim):** `run` returns
   `"error: " + err.Error()` on any Parse/Encode failure; `reformat` output has
-  its trailing newline trimmed; `dump` lines are `path = type:value` with
-  `type` one of `string` / `int64` / `bool` / `array`, sorted, empty tables
+  its trailing newline trimmed; `dump` line order is the order a **depth-first
+  walk visiting each level's keys in `sort.Strings` order** produces — this is
+  *not* the same as sorting the final dotted-path strings (`a-b` vs `a.z`:
+  per-level puts `a.z` first because `"a" < "a-b"`). Each line is
+  `path = type:value` with `type` one of `string` / `int64` / `bool` / `array`;
+  empty tables
   omitted. `main` prints the result plus one newline.

@@ -202,6 +202,27 @@ section, confirming the fix worked by removing the ambiguity at the source, not 
 catching it. 2026-07-19, first live test of the "write for zero domain knowledge" discipline —
 see [[project_implicit_domain_knowledge]] in memory for the full experiment writeup.
 
+### 18. Precedence among simultaneously-satisfiable validation guards / error variants
+When more than one validation check on a single input can fail at once, and the checks map to
+**different** error values or messages, the spec must state the check order — sentence order in
+a behavioral-spec bullet is a weak cue, not a commitment. Two shapes: (a) *library* — a
+function with several guards returning distinct sentinels (`Delete(pos, n)` where
+`pos < 0 || n < 0 → ErrArg` and `pos + n > Len() → ErrRange`: `Delete(-1, 100)` satisfies both,
+so is it `ErrArg` or `ErrRange`?); (b) *CLI/handler* — a command with several fields each of
+which can be individually invalid and each of which has its own error string (`round abc -1
+bogus` — bad operand, bad scale, bad mode: which of the three error lines?). Distinct from
+class 11 (a guard omitted *entirely*) and class 13 (two statements that *disagree*) — here every
+statement is individually correct and they are *jointly silent* on ordering. A worked example
+that exercises each guard in isolation (which most scenario tables do) never surfaces the
+overlap. Fix: state the order explicitly ("check `pos < 0 || n < 0` first, without evaluating
+`pos + n`") and add one worked example where multiple guards fire.
+**Detectable:** judgment only — requires enumerating which guards can co-fire and noticing they
+return different values.
+**Source:** independently raised by three of the four fresh-subagent reviews in the 2026-09-09
+burn-in Tier-3 batch (`decimal` CLI multi-bad-arg, `gapbuffer` `Delete` guard order, `retry-engine`
+CLI) — a strong signal that the class recurs and that the same-fluency author systematically
+writes each guard's contract in isolation.
+
 ## Detectability summary
 
 The mechanical checker for the first three rows is **built** — `cmd/checkdesigndoc`'s
@@ -209,7 +230,7 @@ The mechanical checker for the first three rows is **built** — `cmd/checkdesig
 Phase 2 for the exact trigger/clearing rules and per-fixture flag ceilings), not a gate.
 
 - **Mechanically detectable (first-pass filter):** 1, 2, 6, 7, 17
-- **Judgment required (no substitute for a review pass):** 3, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15, 16
+- **Judgment required (no substitute for a review pass):** 3, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18
 - **Mechanically detectable, and judgment review cannot substitute (reviewer shares the same
   blind spot as the author):** 17 — this is a distinct category from the other two rows, not a
   third point on the same spectrum.

@@ -18,10 +18,16 @@ no server, no persistence, no `math/big`.
 
 **Domain parameters — all explicit, do not infer:**
 
-- **Coefficient type is `int64`.** Every operation that would produce a
-  coefficient (or an intermediate) outside `[-9223372036854775808,
-  9223372036854775807]` returns `ErrOverflow`. Overflow is **never** a panic and
-  **never** silently wraps.
+- **Coefficient type is `int64`, usable range `[-9223372036854775807,
+  9223372036854775807]` — symmetric about zero.** `math.MinInt64`
+  (`-9223372036854775808`) is **not** a permitted coefficient: any operation
+  that would produce it (including a `Parse` of `"-9223372036854775808"`)
+  returns `ErrOverflow`, so it is never stored. This keeps `Neg`, `Abs`, and
+  `String` total (they can assume the magnitude negates without overflow). Every
+  operation that would produce a coefficient (or an intermediate) outside the
+  usable range returns `ErrOverflow`. Overflow is **never** a panic and
+  **never** silently wraps — every comparison and scaling step is written so it
+  cannot overflow an `int64` before the check (see Behavioral Specification).
 - **`Scale` is `int32` and always `>= 0`.** There is no negative scale (no
   "scale = -2 means hundreds"). `Round` and `Div` reject a negative target scale.
 - **Value equality vs. text form.** `1.5` and `1.50` are *equal in value*
@@ -185,7 +191,9 @@ var _ func(Decimal) bool = Decimal.IsZero
 
 ### `decimal.go` — `Neg`, `Abs`, `IsZero`
 
-Pure value methods, no error path.
+Pure value methods, no error path. They are total because no other operation
+ever stores `math.MinInt64` in `Coef` (Domain parameters) — so `-d.Coef` and
+`|d.Coef|` always fit `int64`.
 
 - **`(Decimal).Neg`** — returns `{Coef: -d.Coef, Scale: d.Scale}`. `Neg` of a
   zero coefficient is still a zero coefficient (there is no negative zero to
@@ -218,8 +226,12 @@ re-derive:
    byte of `digits` must be `'0'`–`'9'`; any other byte → `ErrSyntax`. (This is
    what rejects `"1,000"`, `"1_000"`, `"1e5"`, `" 1"`, `"1 "`.)
 6. Accumulate `digits` into an `int64` coefficient, most-significant digit first
-   (`coef = coef*10 + digit`). If the accumulation would exceed
-   `math.MaxInt64` → `ErrOverflow` (not `ErrSyntax`).
+   (`coef = coef*10 + digit`). The magnitude limit is `math.MaxInt64`
+   **regardless of sign** — check *before* each step (`coef > (MaxInt64 -
+   digit) / 10`), never let `coef` overflow then look. So
+   `"9223372036854775808"` and `"-9223372036854775808"` **both** →
+   `ErrOverflow` (not `ErrSyntax`): `math.MinInt64` is not a permitted
+   coefficient even though it would fit `int64` (Domain parameters).
 7. Apply the sign. `Scale` is `len(fracPart)` — the fractional-digit count **as
    written**, so `"1.50"` has `Scale` 2 and `"7"` has `Scale` 0. Leading zeros in
    `intPart` do not affect `Scale` (`"007.50"` → `{750, 2}`).
@@ -246,11 +258,15 @@ Cross-Bead Contract). Canonical rules:
 All three go through `align` first.
 
 - **`align(a, b)`** — `scale = max(a.Scale, b.Scale)`. Rescale each coefficient
-  by `10^(scale - that operand's scale)`. If either multiplication leaves
-  `int64` range → return `ErrOverflow`. Returns `(a.Coef * 10^…, b.Coef * 10^…,
-  scale, nil)`.
+  by `10^(scale - that operand's scale)`. Both the power itself and the
+  multiplication are computed by repeated `× 10` with an `int64`-range check
+  **before each step**; any step that would leave range → `ErrOverflow`. Never
+  materialise `10^k` as an `int64` and check only the following multiply.
+  Returns `(a.Coef * 10^…, b.Coef * 10^…, scale, nil)`.
 - **`Add(a, b)`** — `align`, then add the two rescaled coefficients. If the
-  integer addition overflows `int64` → `ErrOverflow`. Result `Scale` is the
+  integer addition would produce a value outside the usable range
+  `[-MaxInt64, MaxInt64]` → `ErrOverflow` (this includes a result of exactly
+  `math.MinInt64`). Result `Scale` is the
   aligned `scale` = `max(a.Scale, b.Scale)`: `Add({15,1}, {150,2})` → `{300+150
   = ... }` wait — `{15,1}` rescales to `{150,2}`, plus `{150,2}` → `{300, 2}` =
   `"3.00"`, **not** `"3.0"`.
@@ -263,7 +279,8 @@ All three go through `align` first.
 
 ### `mul.go` — `Mul`
 
-- **`Mul(a, b)`** — `Coef = a.Coef * b.Coef` (if this overflows `int64` →
+- **`Mul(a, b)`** — `Coef = a.Coef * b.Coef` (if this leaves the usable range
+  `[-MaxInt64, MaxInt64]`, checked without letting the product wrap first →
   `ErrOverflow`), `Scale = a.Scale + b.Scale`. Scales **add**, they are not
   aligned: `Mul({15,1}, {15,1})` → `{225, 2}` = `"2.25"`.
   `Mul({-200,2}, {3000,3})` → `{-600000, 5}` = `"-6.00000"`.
@@ -274,20 +291,28 @@ All three go through `align` first.
 - **`Round(d, scale, mode)`**:
   - If `scale < 0` → `ErrNegativeScale`.
   - If `scale >= d.Scale`: no digits are dropped. Return `d` rescaled *up* —
-    `Coef * 10^(scale - d.Scale)`, `Scale = scale` (if that multiply overflows →
-    `ErrOverflow`). `Round({15,1}, 3, …)` → `{15000, 3}` = `"1.500"`.
-  - Otherwise `drop = d.Scale - scale` digits come off. Let `div = 10^drop`,
-    `mag = |d.Coef|`, `q = mag / div`, `rem = mag % div`. Compute
-    `q' = applyRounding(q, rem, div, mode)`. Result is `{ sign * q', scale }`.
+    `Coef * 10^(scale - d.Scale)`, `Scale = scale`. The power and the multiply
+    use the same step-wise `× 10` + pre-check as `align`; any step out of range
+    → `ErrOverflow`. `Round({15,1}, 3, …)` → `{15000, 3}` = `"1.500"`.
+  - Otherwise `drop = d.Scale - scale` digits come off. If `drop >= 19` then
+    `10^drop > math.MaxInt64`, so `|d.Coef| / 10^drop == 0` and `rem == |d.Coef|`
+    for any in-range coefficient — compute `q' = applyRounding(0, mag, div, mode)`
+    where `div` conceptually exceeds `mag` (so `applyRounding` only ever compares
+    `mag` against `div - mag`, which stays in range — see below); result
+    `{ sign * q', scale }`. Otherwise `div = 10^drop` (computed step-wise),
+    `mag = |d.Coef|`, `q = mag / div`, `rem = mag % div`,
+    `q' = applyRounding(q, rem, div, mode)`; result `{ sign * q', scale }`.
 - **`applyRounding(q, rem, div, mode)`** — `q`, `rem`, `div` are all
-  non-negative and `0 <= rem < div`:
+  non-negative and `0 <= rem < div`. The tie comparisons are written as
+  `rem` vs `div - rem` (**not** `rem*2` vs `div`) because `rem*2` overflows
+  `int64` when `div` is near `math.MaxInt64`, which `Div` can produce:
   - If `rem == 0` → return `q` (exact, nothing to decide).
   - `RoundDown` → return `q`. **Always.** The remainder is irrelevant. This is
     the case a "round" implementation most often gets wrong by folding it into a
-    `rem*2 > div` branch — do not.
-  - `RoundHalfUp` → return `q + 1` if `rem*2 >= div`, else `q`.
-  - `RoundHalfEven` → return `q + 1` if `rem*2 > div`, **or** if `rem*2 == div`
-    **and** `q` is odd; else `q`.
+    `rem > div - rem` branch — do not.
+  - `RoundHalfUp` → return `q + 1` if `rem >= div - rem`, else `q`.
+  - `RoundHalfEven` → return `q + 1` if `rem > div - rem`, **or** if
+    `rem == div - rem` **and** `q` is odd; else `q`.
 
   The sign is reattached by `Round` *after* `applyRounding` — rounding always
   operates on the magnitude, so `RoundHalfUp` of `-2.5` is `-(round 2.5 up)` =
@@ -303,10 +328,13 @@ All three go through `align` first.
     fractional digits, scale the numerator by a further `10^scale`:
     - `num = |a.Coef| * 10^(b.Scale + scale)`
     - `den = |b.Coef| * 10^(a.Scale)`
-    - If forming `num` or `den` overflows `int64` → `ErrOverflow`. (This is why
-      `Div(10, 3, 20, …)` overflows: `10 * 10^20` does not fit.)
+    - Form each with the step-wise `× 10` + pre-check used by `align`; any step
+      out of `int64` range → `ErrOverflow`. (This is why `Div(10, 3, 20, …)`
+      overflows: `10 * 10^20` does not fit.)
   - `q = applyRounding(num / den, num % den, den, mode)` — the **same** helper
-    `Round` uses (Cross-Bead Contract). Result is `{ sign * q, scale }`.
+    `Round` uses (Cross-Bead Contract). Because `den` can be near
+    `math.MaxInt64` here, `applyRounding`'s `rem` vs `div - rem` form (not
+    `rem*2`) is load-bearing, not cosmetic. Result is `{ sign * q, scale }`.
   - Worked: `Div(1, 3, 4, RoundHalfEven)` → `num = 1*10^4 = 10000`, `den = 3`,
     `10000/3 = 3333` rem `1`, `2*1 < 3` → `q = 3333` → `{3333, 4}` = `"0.3333"`.
     `Div(2, 3, 5, RoundDown)` → `200000/3 = 66666` rem `2` → RoundDown keeps →
@@ -351,6 +379,7 @@ Notes pins carry the values into the bead specs.
 | `"1e5"` | `ErrSyntax` |
 | `" 1"` | `ErrSyntax` |
 | `"9223372036854775808"` | `ErrOverflow` (one past MaxInt64) |
+| `"-9223372036854775808"` | `ErrOverflow` (MinInt64 is not a permitted coefficient) |
 
 ### Required scenarios for the `format` bead
 
@@ -374,6 +403,7 @@ Notes pins carry the values into the bead specs.
 | `Sub({10,2}, {1,1})` | `{0, 2}` → `"0.00"` |
 | `Sub({1000,3}, {1,0})` | `{0, 3}` → `"0.000"` |
 | `Add({MaxInt64,0}, {1,0})` | `ErrOverflow` |
+| `Add({-MaxInt64,0}, {-1,0})` | `ErrOverflow` (result would be `MinInt64`) |
 | `Cmp({15,1}, {150,2})` | `0` |
 | `Cmp({-1,1}, {1,1})` | `-1` |
 | `Cmp({2,0}, {19999,4})` | `1` |
@@ -455,9 +485,10 @@ Notes pins carry the values into the bead specs.
 - **consumer**: `div`
 - **interface**: `applyRounding(q int64, rem int64, div int64, mode RoundingMode) int64`
   — with `q, rem, div >= 0` and `0 <= rem < div`. Returns: `q` if `rem == 0`;
-  `q` if `mode == RoundDown`; `q+1` if `mode == RoundHalfUp` and `rem*2 >= div`;
-  `q+1` if `mode == RoundHalfEven` and (`rem*2 > div` **or** (`rem*2 == div`
-  **and** `q` is odd)); otherwise `q`.
+  `q` if `mode == RoundDown`; `q+1` if `mode == RoundHalfUp` and
+  `rem >= div - rem`; `q+1` if `mode == RoundHalfEven` and (`rem > div - rem`
+  **or** (`rem == div - rem` **and** `q` is odd)); otherwise `q`. (`div - rem`,
+  never `rem*2` — `rem*2` overflows `int64` for a large `Div` divisor.)
 - **notes**: `Div` calls this exact function from `round.go` — it does **not**
   re-implement the tie logic. A `Div` result and the corresponding
   `Round(exactQuotientAtScale+guard, scale, mode)` must agree for every input.
@@ -470,7 +501,7 @@ Notes pins carry the values into the bead specs.
 - **consumer**: `parse`, `format`, `arith`, `mul`, `round`, `div`
 - **interface**: `run(line string) string`. The line is split on ASCII
   whitespace into fields. Commands (field count is exact; wrong count →
-  `"error: usage: …"`):
+  `"error: usage: <command> <args…>"` — see notes):
 
   | command | fields | action | output |
   |---|---|---|---|
@@ -483,12 +514,18 @@ Notes pins carry the values into the bead specs.
   | `round <a> <scale> <mode>` | 4 | `Round(Parse(a), scale, mode)` | `d.String()` or `"error: " + err` |
   | `div <a> <b> <scale> <mode>` | 5 | `Div` | same |
 
-- **notes**: `<mode>` is `half-up` / `half-even` / `down` via `parseMode`; any
-  other value → `"error: unknown rounding mode \"<mode>\""`. `<scale>` must parse
-  as a non-negative integer, else `"error: scale must be a non-negative integer"`.
-  A `Parse` failure on any operand short-circuits to `"error: " + err.Error()`.
-  Unknown command → `"error: unknown command <field0>"`. Every error string
-  begins with the literal `"error: "`.
+- **notes**: `run` validates in **left-to-right field order** and returns the
+  first failure — `fields[1]`, then `fields[2]`, then (for `round`/`div`)
+  `<scale>`, then `<mode>`. So `round abc -1 bogus` → `"error: decimal: invalid
+  syntax"` (the `abc` operand). A `Parse` failure on an operand →
+  `"error: " + err.Error()` (the two possible strings are
+  `"error: decimal: invalid syntax"` and `"error: decimal: int64 overflow"`).
+  `<scale>` that is not a non-negative integer → `"error: scale must be a
+  non-negative integer"`. `<mode>` not in `half-up` / `half-even` / `down` →
+  `"error: unknown rounding mode \"<mode>\""`. Wrong field count for a known
+  command → `"error: usage: <command> <args…>"` (e.g. `"error: usage: add <a>
+  <b>"`). Unknown command → `"error: unknown command <field0>"`. Every error
+  line begins with the literal `"error: "`.
 
 ## Decomposition Notes
 
@@ -504,18 +541,20 @@ Notes pins carry the values into the bead specs.
 6. **round** — `Round`, and the unexported `applyRounding`. Depends on bead 1.
    Owns `round.go`.
 7. **div** — `Div`. Depends on beads 1 and 6. Owns `div.go`.
-8. **cli** — `main`, `run`, `parseMode`. Depends on beads 2, 3, 4, 5, 6, 7.
-   Owns `main.go`. sizing rationale: `main.go` is one stdin loop plus one command
-   switch in `run`; no shared assembly logic, each case is an independent
+8. **cli** — `main`, `run`, `parseMode`. Depends on beads 1, 2, 3, 4, 5, 6, 7
+   (bead 1 for `RoundingMode`, which `parseMode` returns). Owns `main.go`.
+   sizing rationale: `main.go` is one stdin loop plus one command switch in
+   `run`; no shared assembly logic, each case is an independent
    two-or-three-line call into a library function already covered by its own bead.
 9. **integration** — the format↔parse round-trip plus one fixed CLI script.
-   Depends on beads 2, 3, 8.
+   Depends on beads 2, 3, 4, 8 (bead 4 for `Cmp`, used in the round-trip check).
 
 **Integration bead scenario (bounded):** build `[]Decimal{ {12345,2}, {-1,3},
 {0,0}, {70,1}, {5,2}, {600000,5} }`; for each, assert
 `Parse(d.String())` returns nil error, equal `Scale`, and `Cmp == 0`. Then feed
 this exact 6-line script to `run` (one call per line) and assert the exact output
-lines:
+lines (each line below is `<command fed to run>` then `->` then `<expected
+result>`; only the command text is fed):
 
 ```
 add 0.10 0.20        -> 0.30
@@ -531,7 +570,8 @@ cmp 2 2.0            -> 0
   → `ErrSyntax`; `""` → `ErrSyntax`; `"1.2.3"` → `ErrSyntax`; `"1,000"` →
   `ErrSyntax`; `"1e5"` → `ErrSyntax`; `" 1"` → `ErrSyntax`; `"+7.0"` →
   `{Coef: 70, Scale: 1}`; `"007.50"` → `{Coef: 750, Scale: 2}`;
-  `"9223372036854775808"` → `ErrOverflow` (not `ErrSyntax`). `Scale` is the
+  `"9223372036854775808"` **and** `"-9223372036854775808"` → `ErrOverflow` (not
+  `ErrSyntax`; `math.MinInt64` is not a permitted coefficient). `Scale` is the
   count of digits written after `.`.
 - **Pin — `format` bead, canonical form (verbatim):** `{0,0}` → `"0"`;
   `{0,3}` → `"0.000"`; `{5,2}` → `"0.05"`; `{150,2}` → `"1.50"`; `{-1,3}` →
@@ -540,7 +580,9 @@ cmp 2 2.0            -> 0
 - **Pin — `arith` bead, result scale is `max(a.Scale, b.Scale)` (verbatim):**
   `Add({15,1}, {150,2})` → `{300, 2}` = `"3.00"` (NOT `"3.0"`);
   `Sub({10,2}, {1,1})` → `{0, 2}` = `"0.00"`; `Cmp({15,1}, {150,2})` → `0`
-  (equal by value); `Add({9223372036854775807,0}, {1,0})` → `ErrOverflow`.
+  (equal by value); `Add({9223372036854775807,0}, {1,0})` → `ErrOverflow`;
+  `Add({-9223372036854775807,0}, {-1,0})` → `ErrOverflow` (a result of exactly
+  `math.MinInt64` overflows — the usable range is symmetric).
 - **Pin — `mul` bead, scales add (verbatim):** `Mul({15,1}, {15,1})` →
   `{225, 2}` = `"2.25"`; `Mul({1,1}, {1,1})` → `{1, 2}` = `"0.01"`;
   `Mul({-200,2}, {3000,3})` → `"-6.00000"` (Scale 5);
@@ -555,7 +597,8 @@ cmp 2 2.0            -> 0
     `2.675` at scale 2 → `"2.68"`, `9.95` at scale 1 → `"10.0"`.
   - `RoundDown` truncates toward zero **always**, ignoring the dropped digits:
     `2.9`→`"2"`, `-2.9`→`"-2"`. Do NOT implement `RoundDown` as a
-    `rem*2 > div` branch.
+    `rem > div - rem` branch. Tie comparisons everywhere use `rem` vs
+    `div - rem`, never `rem*2` (which overflows for a large `Div` divisor).
   - `scale >= d.Scale` raises the scale with zero padding: `1.5` at scale 3 →
     `"1.500"`. Negative scale → `ErrNegativeScale`.
 - **Pin — `div` bead, quotient scale + rounding + errors (verbatim):**

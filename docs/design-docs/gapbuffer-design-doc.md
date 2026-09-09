@@ -32,8 +32,9 @@ server, no files, no third-party dependency.
   `GapPosition() == pos + len(s)`. Inserting `""` is a no-op except that it
   moves the gap to `pos`.
 - **`Delete(pos, n)`** requires `pos >= 0`, `n >= 0`, and `pos + n <= Len()`.
-  After the call `GapPosition() == pos`. `pos < 0` or `n < 0` → `ErrArg`;
-  `pos + n > Len()` → `ErrRange`.
+  After the call `GapPosition() == pos`. Guards run **in order**: `pos < 0` or
+  `n < 0` → `ErrArg` (checked first); then `pos + n > Len()` → `ErrRange`. So
+  `Delete(-1, 100)` returns `ErrArg`.
 - **`At(pos)`** requires `0 <= pos < Len()` (strict upper bound — there is no
   byte at `Len()`).
 - **`Slice(start, end)`** requires `0 <= start <= end <= Len()`; `start == end`
@@ -192,12 +193,15 @@ var _ func(*GapBuffer, int, int) (int, error) = (*GapBuffer).LineColToPos
 
 ### `edit.go` — `Insert`, `Delete`, `GapPosition`
 
-- **`Insert(pos, s)`** — `pos < 0 || pos > Len()` → `ErrRange`. If `s == ""` →
-  `moveGap(pos)`, return nil. Otherwise: `grow(len(s))`, `moveGap(pos)`, copy
-  `s` into `data[gapStart : gapStart+len(s)]`, `gapStart += len(s)`. Net effect:
-  the text now contains `s` at `pos`, and `GapPosition() == pos + len(s)`.
-- **`Delete(pos, n)`** — `pos < 0 || n < 0` → `ErrArg`. `pos + n > Len()` →
-  `ErrRange`. If `n == 0` → `moveGap(pos)`, return nil. Otherwise
+- **`Insert(pos, s)`** — check `pos < 0 || pos > Len()` **first** → `ErrRange`.
+  If `s == ""` → `moveGap(pos)`, return nil. Otherwise: `grow(len(s))`,
+  `moveGap(pos)`, copy `s` into `data[gapStart : gapStart+len(s)]`,
+  `gapStart += len(s)`. Net effect: the text now contains `s` at `pos`, and
+  `GapPosition() == pos + len(s)`.
+- **`Delete(pos, n)`** — checks run **in this order**, returning on the first
+  that fails: (1) `pos < 0 || n < 0` → `ErrArg` (do **not** evaluate `pos + n`);
+  (2) `pos + n > Len()` → `ErrRange`. So `Delete(-1, 100)` returns `ErrArg`, not
+  `ErrRange`. Then: if `n == 0` → `moveGap(pos)`, return nil. Otherwise
   `moveGap(pos)`, then `gapEnd += n` (the next `n` bytes are absorbed into the
   gap). `GapPosition() == pos`.
 - **`GapPosition()`** — returns `gapStart`, i.e. the logical position where the
@@ -238,8 +242,14 @@ followed by `\n`.
 `unescape(s)` is its inverse (`\n`, `\t`, `\\` only; a lone `\` at end or before
 any other char is kept literally).
 
-`run(line)` — the first space splits `<cmd>` from `<rest>`; `<rest>` is
-preserved verbatim for text arguments (so it may contain spaces). Commands:
+**Line splitting.** Split `line` **once** on its first space into `<cmd>` and
+`<rest>`. For `init`, the whole `<rest>` (which may be empty) is the text
+argument. For `insert`, split `<rest>` **once** on its first space: the part
+before is `<pos>`, everything after that single space is the text argument —
+kept **byte-for-byte**, including leading and trailing spaces (so `insert 5
+  hi` inserts `"  hi"`). `insert 5` with no text argument at all → `Insert(5,
+"")` → `ok`. `delete`, `at`, `slice`, `linebounds`, `linecol`, `pos` take a
+fixed number of whitespace-separated integer fields (no text argument).
 
 | command | action | output |
 |---|---|---|
@@ -256,9 +266,17 @@ preserved verbatim for text arguments (so it may contain spaces). Commands:
 | `linecol <pos>` | `PosToLineCol(pos)` | `"<line> <col>"` or `error: <e>` |
 | `pos <line> <col>` | `LineColToPos(line, col)` | integer or `error: <e>` |
 
-Unknown command → `error: unknown command <cmd>`. Wrong field count for a
-fixed-arity command → `error: usage: ...`. A non-integer where a number is
-required → `error: bad position` / `error: bad argument`.
+**Error lines.** `<e>` is `err.Error()` — the buffer has exactly two error
+values, so the only two `error: <e>` lines are
+`error: gapbuffer: position out of range` (from `ErrRange`) and
+`error: gapbuffer: bad argument` (from `ErrArg`). Unknown command →
+`error: unknown command <cmd>`. Wrong field count for a fixed-arity command →
+`error: usage: ` plus that command's signature, e.g.
+`error: usage: delete <pos> <n>`, `error: usage: slice <start> <end>` (`init`
+and `insert` are variadic and never produce a usage error). A non-integer in
+**any** integer field emits `error: bad argument` (`at x`, `slice a b`,
+`delete 2 z`, `pos m 0` — all `error: bad argument`). Every error line begins
+with `error: `.
 
 ## Domain-Specific Test Scenarios
 
@@ -282,6 +300,7 @@ Starting from `New("hello world")` (Len 11, `GapPosition()` 11):
 | — | `Insert(12, "z")` | — | — | `ErrRange` |
 | — | `Delete(-1, 1)` | — | — | `ErrArg` |
 | — | `Delete(0, 100)` | — | — | `ErrRange` |
+| — | `Delete(-1, 100)` (both guards fire) | — | — | `ErrArg` (sign check runs first) |
 
 A white-box test may additionally drive ~1000 random `Insert`/`Delete` ops and
 assert `String()` matches an independently-maintained `[]byte`, and that
@@ -405,9 +424,10 @@ nil)`, `PosToLineCol(6)` == `(3, 0, nil)`.
   exactly, not re-derived):** `New(x)` leaves `GapPosition() == len(x)`.
   `Insert(pos, s)` leaves `GapPosition() == pos + len(s)` and requires
   `0 <= pos <= Len()` (`pos == Len()` is append). `Insert(pos, "")` just moves
-  the gap to `pos`. `Delete(pos, n)` leaves `GapPosition() == pos`, requires
-  `pos >= 0 && n >= 0` (`ErrArg` otherwise) and `pos + n <= Len()` (`ErrRange`
-  otherwise). From `New("hello world")`: `Insert(5,"XX")` → `"helloXX world"`,
+  the gap to `pos`. `Delete(pos, n)` leaves `GapPosition() == pos`. Its guards
+  run **in order**: `pos < 0 || n < 0` → `ErrArg` (checked first, without
+  evaluating `pos + n`), then `pos + n > Len()` → `ErrRange`; so
+  `Delete(-1, 100)` → `ErrArg`. From `New("hello world")`: `Insert(5,"XX")` → `"helloXX world"`,
   gap 7; then `Insert(0,">>")` → `">>helloXX world"`, gap 2; then
   `Delete(2,5)` → `">>XX world"`, gap 2.
 - **Pin — `access` bead, bounds (verbatim):** `At` requires `0 <= pos < Len()`
@@ -430,8 +450,13 @@ nil)`, `PosToLineCol(6)` == `(3, 0, nil)`.
   text must be moved to the **end** of the new backing slice (not left directly
   after the before-gap text) — a random sequence of ~1000 `Insert`/`Delete` ops
   must keep `String()` byte-identical to an independently maintained `[]byte`.
-- **Pin — `cli` / `integration` beads, output (verbatim):** text arguments are
-  the rest of the line with spaces preserved, `unescape`d (`\n` `\t` `\\`);
-  `text` / `at` / `slice` output is `escape`d to one line; `linebounds` prints
-  `"<start> <end>"`, `linecol` prints `"<line> <col>"`; every error line begins
-  with `"error: "`; unknown command → `"error: unknown command <cmd>"`.
+- **Pin — `cli` / `integration` beads, output (verbatim):** for `insert`, split
+  `<rest>` once on its first space — `<pos>` then the text argument kept
+  byte-for-byte (leading/trailing spaces preserved), `unescape`d (`\n` `\t`
+  `\\`); `insert 5` with no text → `Insert(5, "")` → `ok`. `text` / `at` /
+  `slice` output is `escape`d to one line. `linebounds` prints `"<start>
+  <end>"`, `linecol` prints `"<line> <col>"`. The only two `error: <e>` lines
+  are `"error: gapbuffer: position out of range"` and `"error: gapbuffer: bad
+  argument"`. A non-integer in any integer field → `"error: bad argument"`.
+  Wrong field count → `"error: usage: <command> <signature>"`. Unknown command →
+  `"error: unknown command <cmd>"`. Every error line begins with `"error: "`.

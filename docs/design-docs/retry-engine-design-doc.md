@@ -45,9 +45,11 @@ timers, no network.
 - **`NewBreaker` defaults** for any field `<= 0` / nil: `FailureThreshold` 5,
   `SuccessThreshold` 1, `HalfOpenMax` 1, `OpenTimeout` 30s, `Now` `time.Now`.
 - **Backoff formula.** For a 1-based `attempt`, `raw = Base * Factor^(attempt-1)`
-  computed in `float64`, then **capped at `Max`** (also capped if the float
-  overflows to +Inf). `attempt <= 1` uses `Base` (exponent 0). `Factor < 1` is
-  treated as `1`.
+  computed in `float64`, then **capped at `Max` only when `Max > 0`** — a
+  `Backoff` literal with `Max` left at its zero value (`0`) has **no cap**, and
+  the retry test/integration pins use exactly such a literal. When `Max > 0` the
+  cap also applies if `raw` is `+Inf`. `attempt <= 1` uses `Base` (exponent 0).
+  `Factor < 1` is treated as `1`.
 - **Jitter.** If `Rand == nil` or `JitterFrac <= 0`, `Delay` returns exactly
   `raw` (truncated to whole nanoseconds). Otherwise it draws **one**
   `Rand.Float64()` per `Delay` call and returns
@@ -288,14 +290,16 @@ prints `sim.run(line)` per line. Commands:
 | command | fields | action | output |
 |---|---|---|---|
 | `now` | 1 | — | `sim.now.Sub(start).String()` (e.g. `"0s"`, `"12s"`) |
-| `advance <dur>` | 2 | `now += ParseDuration(dur)` | `"ok"` (bad duration → `"error: bad duration <dur>"`) |
+| `advance <dur>` | 2 | `now += ParseDuration(dur)` | `"ok"`; bad duration → `"error: bad duration <dur>"` |
 | `allow` | 1 | `Breaker.Allow()` | `"allow"` / `"deny: open"` / `"deny: half-open full"` |
-| `record ok` \| `record fail` | 2 | `Breaker.Record(arg == "ok")` | `"ok"` |
+| `record <arg>` | 2 | `Breaker.Record(arg == "ok")` | `"ok"`; `<arg>` not `ok`/`fail` → `"error: usage: record ok\|fail"` |
 | `state` | 1 | `Breaker.State().String()` | `"closed"` / `"open"` / `"half-open"` |
-| `delay <attempt>` | 2 | `Backoff.Delay(attempt)` | Go duration string |
+| `delay <attempt>` | 2 | `Backoff.Delay(attempt)` | Go duration string; non-integer `<attempt>` → `"error: bad attempt <attempt>"` |
 
 Unknown command → `"error: unknown command <field0>"`. Wrong field count for a
-known command → `"error: usage: ..."`. `main` prints each result plus a newline.
+known command → `"error: usage: "` plus that command's signature, e.g.
+`"error: usage: advance <dur>"`, `"error: usage: delay <attempt>"`. `main` prints
+each result plus a newline. Every error line begins with `"error: "`.
 
 ## Domain-Specific Test Scenarios
 
@@ -487,7 +491,11 @@ With jitter (`JitterFrac` 0.5, `rand.NewSource(42)`), calling `Delay(1)` …
   after every attempt that ran.
 - **Pin — `cli` / `integration` beads, output (verbatim):** `allow` →
   `"allow"` / `"deny: open"` / `"deny: half-open full"`; `state` →
-  `"closed"` / `"open"` / `"half-open"`; `record ok|fail` and `advance <dur>` →
-  `"ok"`; `now` → the sim elapsed as a Go duration string; `delay <n>` → a Go
-  duration string. Unknown command → `"error: unknown command <name>"`. Each
-  result is printed on its own line.
+  `"closed"` / `"open"` / `"half-open"`; `record ok`/`record fail` and
+  `advance <dur>` → `"ok"`; `now` → the sim elapsed as a Go duration string;
+  `delay <n>` → a Go duration string. Error lines: `record <x>` with `x` not
+  `ok`/`fail` → `"error: usage: record ok|fail"`; `delay <x>` with non-integer
+  `x` → `"error: bad attempt <x>"`; `advance <x>` with a bad duration →
+  `"error: bad duration <x>"`; wrong field count → `"error: usage: <command>
+  <signature>"`; unknown command → `"error: unknown command <name>"`. Every
+  error line begins with `"error: "`. Each result is printed on its own line.
