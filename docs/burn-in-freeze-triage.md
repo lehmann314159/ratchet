@@ -183,9 +183,13 @@ decomposition / one clean, one escalated).
 retryref,gapref}` (uncommitted, `globref` precedent) — the worked-value pins are
 script-verified against them.
 
-**Still to do before running Tier 3:** each new doc needs the `check-design-doc`
-independent pass (fresh-subagent judgment + human sign-off) before `new-project`
-— `checkdesigndoc --checks=all` is clean but that is only the mechanical half.
+**`check-design-doc` pass — done for Tier 3 (2026-09-09, `a51499a`).** 4
+independent subagents, 20 findings, all applied: ~15 doc-precision + 4 bugs the
+reference impls shared (decimal `MinInt64` range, decimal `rem*2` overflow,
+retry CLI `delay` arg, gapbuffer CLI integer-field validation). New ambiguity
+class 18 (guard/error-variant precedence), independently raised by 3 of 4
+subagents. **Tier 2 (glob-studio) still needs its pass; Tier 1 does not** (see
+above).
 
 ---
 
@@ -195,4 +199,6 @@ independent pass (fresh-subagent judgment + human sign-off) before `new-project`
 - [x] `v0.4` tagged at `d92f807`, deployed, pushed. *(2026-09-09)*
 - [ ] Showstopper threshold ("majority of runs") acceptable
 - [x] Burn-in corpus: 3 tiers, n=2, ~18 runs (table above). *(2026-09-09)*
-- [x] Tier-3 docs authored by Claude via `draft-design-doc`; `check-design-doc` pass still pending per doc. *(2026-09-09)*
+- [x] Tier-3 docs authored + `check-design-doc` passed + findings applied (`a51499a`). *(2026-09-09)*
+- [ ] `check-design-doc` on glob-studio (Tier 2 — edited + never run)
+- [ ] merge `docs/burn-in-tier3-docs` → `main` and run the burn-in
