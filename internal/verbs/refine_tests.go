@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"ratchet/internal/db"
@@ -325,6 +326,12 @@ func runCompile(ctx context.Context, folderPath string) (ok bool, output string)
 // tests can shrink it rather than waiting out the real timeout.
 var maxSnippetRuntime = 10 * time.Second
 
+// snippetWaitDelay bounds how long CombinedOutput may block after the process
+// group is killed, in case a grandchild still holds the stdout/stderr pipe
+// write-end open (EOF needs all writers closed). Mirrors the WaitDelay in
+// internal/execution/tools.go's toolRunCommand. A var for tests.
+var snippetWaitDelay = 5 * time.Second
+
 // runGoSnippet compiles and runs a single self-contained Go source file
 // (package main, stdlib imports only) in an isolated temp directory,
 // returning its combined stdout+stderr (compile errors, panics, and normal
@@ -364,6 +371,18 @@ func runGoSnippet(ctx context.Context, src string) (output string, err error) {
 
 	cmd := exec.CommandContext(runCtx, "go", "run", "main.go")
 	cmd.Dir = dir
+	// `go run` compiles main.go to a binary in the build cache and forks a child
+	// process to execute it. A plain SIGKILL to `go` on timeout (exec's default
+	// Cancel) does not reach that child — it reparents to PID 1 and keeps
+	// running. For a snippet that blocks (http.ListenAndServe, select{}, for{})
+	// the orphan then runs forever holding whatever it grabbed (a real incident
+	// held :8080 for ~16h). Put `go` in its own process group and kill the whole
+	// group on timeout. Mirrors internal/execution/tools.go toolRunCommand.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = snippetWaitDelay
 	out, runErr := cmd.CombinedOutput()
 	if runCtx.Err() == context.DeadlineExceeded {
 		return "", fmt.Errorf("snippet exceeded %s timeout", maxSnippetRuntime)
@@ -373,6 +392,53 @@ func runGoSnippet(ctx context.Context, src string) (output string, err error) {
 		result = runErr.Error()
 	}
 	return result, nil
+}
+
+// snippetDirPrefix is the os.MkdirTemp prefix for run_go_snippet work dirs.
+const snippetDirPrefix = "ratchet-snippet-"
+
+// staleSnippetDirAge is how old a leftover snippet dir must be before
+// SweepStaleSnippetDirs will remove it — comfortably beyond
+// maxSnippetRuntime + snippetWaitDelay so a snippet running concurrently with
+// daemon startup is never touched.
+var staleSnippetDirAge = time.Hour
+
+// SweepStaleSnippetDirs deletes run_go_snippet temp dirs left in os.TempDir by a
+// previous daemon that crashed mid-snippet (the normal path removes its own dir
+// on return). Best-effort: it logs and continues past any single failure and
+// never returns an error. Called once at orchestrator startup, alongside
+// resetStaleRunning. It does NOT kill orphaned snippet *processes* — the
+// process-group kill in runGoSnippet prevents new ones; a pre-fix orphan is a
+// one-time operator cleanup (pkill -f go-build).
+func SweepStaleSnippetDirs() {
+	root := os.TempDir()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		slog.Warn("sweep stale snippet dirs: read temp dir", "dir", root, "error", err)
+		return
+	}
+	removed := 0
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), snippetDirPrefix) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if time.Since(info.ModTime()) < staleSnippetDirAge {
+			continue
+		}
+		p := filepath.Join(root, e.Name())
+		if err := os.RemoveAll(p); err != nil {
+			slog.Warn("sweep stale snippet dirs: remove", "path", p, "error", err)
+			continue
+		}
+		removed++
+	}
+	if removed > 0 {
+		slog.Info("sweep stale snippet dirs", "removed", removed)
+	}
 }
 
 func cycleID(job *db.HandoffJob) int64 {

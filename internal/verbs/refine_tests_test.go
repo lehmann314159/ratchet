@@ -4,9 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -116,6 +119,94 @@ func main() {
 			t.Errorf("output = %q, want %q", out, "ok")
 		}
 	})
+}
+
+// TestRunGoSnippet_KillsBlockingProcessGroup is the regression for
+// memory/project_run_go_snippet_orphan_process: `go run`'s forked child must be
+// killed on timeout, not orphaned. The snippet records its own PID and blocks
+// forever; after runGoSnippet times out, that process must be gone.
+func TestRunGoSnippet_KillsBlockingProcessGroup(t *testing.T) {
+	// Warm the build cache for the os/strconv/time deps so the timed run only
+	// has to recompile the tiny main package.
+	if _, err := runGoSnippet(context.Background(),
+		`package main
+import ("os"; "strconv"; "time")
+func main() { _ = os.Getpid(); _ = strconv.Itoa(0); _ = time.Now(); print("warm") }
+`); err != nil {
+		t.Fatalf("warmup snippet failed: %v", err)
+	}
+
+	origRT, origWD := maxSnippetRuntime, snippetWaitDelay
+	maxSnippetRuntime, snippetWaitDelay = 3*time.Second, 1*time.Second
+	defer func() { maxSnippetRuntime, snippetWaitDelay = origRT, origWD }()
+
+	// time.Sleep (not select{}) so the Go runtime's deadlock detector doesn't
+	// fire — this snippet genuinely runs until killed.
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	src := fmt.Sprintf(`package main
+import ("os"; "strconv"; "time")
+func main() {
+	os.WriteFile(%q, []byte(strconv.Itoa(os.Getpid())), 0o644)
+	time.Sleep(time.Hour)
+}
+`, pidFile)
+
+	if _, err := runGoSnippet(context.Background(), src); err == nil {
+		t.Fatal("expected a timeout error for a snippet that never terminates")
+	}
+
+	pidBytes, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Skipf("snippet never started within the timeout (slow compile?): %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil {
+		t.Fatalf("bad pid file contents %q: %v", pidBytes, err)
+	}
+
+	// The snippet process must terminate promptly (SIGKILL to the process group).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); err != nil {
+			return // ESRCH — process gone, as required
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL) // don't leak it out of the test
+	t.Fatalf("snippet process %d still alive after runGoSnippet returned — orphaned", pid)
+}
+
+func TestSweepStaleSnippetDirs(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	if os.TempDir() != tmp {
+		t.Skipf("os.TempDir() does not honor TMPDIR on this platform (got %q)", os.TempDir())
+	}
+
+	stale := filepath.Join(tmp, snippetDirPrefix+"stale")
+	fresh := filepath.Join(tmp, snippetDirPrefix+"fresh")
+	other := filepath.Join(tmp, "unrelated-dir")
+	for _, d := range []string{stale, fresh, other} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	SweepStaleSnippetDirs()
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale snippet dir not removed (err=%v)", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh snippet dir was removed: %v", err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Errorf("unrelated dir was removed: %v", err)
+	}
 }
 
 func TestRunGoSnippetToolDefinition(t *testing.T) {

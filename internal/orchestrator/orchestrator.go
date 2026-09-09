@@ -55,6 +55,10 @@ func Run(ctx context.Context, d *db.DB, oc *ollama.Client, opts ...Option) error
 		return err
 	}
 
+	// Delete run_go_snippet temp dirs left behind by a previous daemon that
+	// crashed mid-snippet.
+	verbs.SweepStaleSnippetDirs()
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil // clean shutdown
