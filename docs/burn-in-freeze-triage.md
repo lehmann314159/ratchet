@@ -197,8 +197,9 @@ above).
 
 - [x] Bucket B scope — B1, B2, and all of B3 (B3b detector-only, B3c tag-only). *(2026-09-09)*
 - [x] `v0.4` tagged at `d92f807`, deployed, pushed. *(2026-09-09)*
-- [ ] Showstopper threshold ("majority of runs") acceptable
+- [x] Showstopper threshold — break the freeze only for a defect blocking a **majority of runs** or making the corpus unanalysable; everything else → post-burn-in batch. *(2026-09-09)*
 - [x] Burn-in corpus: 3 tiers, n=2, ~18 runs (table above). *(2026-09-09)*
 - [x] Tier-3 docs authored + `check-design-doc` passed + findings applied (`a51499a`). *(2026-09-09)*
 - [x] `check-design-doc` on glob-studio (`6516187`, 6 findings applied). *(2026-09-09)*
-- [ ] merge `docs/burn-in-tier3-docs` → `main` and run the burn-in
+- [x] merge `docs/burn-in-tier3-docs` → `main` *(2026-09-09)*
+- [ ] run the burn-in
