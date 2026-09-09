@@ -19,8 +19,9 @@ for the burn-in without touching pipeline behaviour. Defer everything
 speculative, tuning-heavy, or dependent on evidence the burn-in itself will
 produce — the burn-in is what ranks that work.
 
-Status: **Bucket B signed off (2026-09-09).** Freeze mechanics + burn-in corpus
-still open — see the sign-off checklist.
+Status: **Bucket B COMPLETE (2026-09-09) — all on `main`, none deployed.** Next:
+cron-studio run 2 terminates → build once → tag `v0.4` → deploy → burn-in.
+Freeze mechanics + burn-in corpus still open — see the sign-off checklist.
 
 ---
 
@@ -78,38 +79,30 @@ gate was the last live-folder execution of exit criteria.
 the copy fails. The `declare_success` gate is the one caller.
 `memory/project_execute_workspace_hygiene`.
 
-### B3. Decomposition-framework v2 follow-ups — **improve burn-in doc authoring + corpus analysability**
+### B3. Decomposition-framework v2 follow-ups — **DONE (`1723e9a`, `87d0f8b`, `f5ee725`, on `main`, not deployed)**
 
-Three items from `memory/project_decomposition_framework`. Two are `cmd/checkdesigndoc`
-(freeze-neutral — no pipeline code); one is a tightly-scoped runtime change.
-**All three in** (Mike, 2026-09-09), with the scoping below.
+Three items from `memory/project_decomposition_framework`.
 
-- **B3a — `maxBehavioralLines` heading attribution** (`checkdesigndoc`, freeze-neutral).
-  Currently substring-matches an owned symbol anywhere in a `###` heading, producing
-  false under-spec NOTEs (e.g. "Node" inside `### Compile(node Node)…` flags `parser`).
-  Match the leading symbol / declared owner instead. Small, pure bug fix — no caveat.
+- **B3a — behavioral-subsection attribution** (`checkdesigndoc`, freeze-neutral). ✅
+  `maxBehavioralLines` matched an owned symbol as a substring anywhere in a `###`
+  heading, so `### Compile(node Node)…` attributed to whoever owns `Node`. New
+  `headingSubject` truncates the heading at its first separator (" — ", " - ") or
+  `(` and matches only that. `1723e9a`.
 
-- **B3b — bead-size lint NOTE** (`checkdesigndoc`, freeze-neutral).
-  Advisory flag for a single function carrying ≥2 multi-clause pins / heavy pinned
-  behavioural spec — the "hard single-function translator" class (`matcher.Compile`,
-  old `grammar.ParseSystem`) that has blocked 3+ from-scratch runs. **Ship the detector
-  now; do NOT hand-calibrate it.** Thresholds were already fiddled once (5→4 funcs);
-  hand-tuning against ~30 stale beads is a freeze-delaying rabbit hole. Land it with
-  loose/conservative thresholds, then let the burn-in produce the calibration data —
-  flag rate vs. actual bead outcome (stall/escalate) across N runs is a far better
-  signal than the stale corpus. Tighten in the first post-freeze batch. This makes
-  B3b un-rabbit-hole-able: if calibration isn't ~2h, ship loose and move on.
+- **B3b — dense-translator NOTE** (`checkdesigndoc`, freeze-neutral). ✅
+  New `heavyBehavioralSpec`: ≤3 declared functions + ≥70-line behavioral subsection,
+  at any integration level (`hiddenComplexity` only fires for integration hubs).
+  **70 is a deliberately conservative placeholder** — clears every bead that reached
+  COMPLETE (highest non-flagged: lsystem `render`, 48), catches cron-studio `field`
+  (113) + `schedule` (81). Calibrate from burn-in flag-vs-outcome data, not the
+  current corpus. CorpusGate now asserts NOTE presence/absence both ways. `87d0f8b`.
 
-- **B3c — escalation classification** (runtime — `internal/verbs` escalation path,
-  **not** `checkdesigndoc`; in the frozen binary). When a bead hits repeated-stall
-  *after* ADJUDICATE ran the specificity ratchet (≥2 `execute_revised` adding impl
-  detail), set a classification tag/reason of "exceeds EXECUTE ceiling → recommend
-  structural split" instead of raw stall telemetry. **Scope: a tag/reason field only —
-  change nothing about control flow.** The bead escalates identically either way; blast
-  radius is a string field. Reads decisions already made; no prediction, no difficulty
-  *predictor* (Mike's steer: the escalation loop *is* the difficulty oracle). Value:
-  without it, every escalation in the burn-in corpus is hand-classified from traces.
-  A few hours.
+- **B3c — EXECUTE-ceiling escalation tag** (runtime — `internal/verbs`, in the frozen
+  binary). ✅ `escalateOnRepeatedStall`: if ADJUDICATE already wrote ≥2
+  `execute_revised` specs (bead_revisions count) and the bead still stalls, tag it
+  `escalation_class=exceeds_execute_ceiling` (slog) + "exceeds the EXECUTE model's
+  ceiling; recommend a doc-side structural split" (bead report **Status:** line).
+  **Tag only — control flow unchanged.** `f5ee725`.
 
 ---
 
