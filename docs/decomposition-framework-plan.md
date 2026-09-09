@@ -302,16 +302,22 @@ need that workaround.
 
 ## Order
 
-All four done. Remaining before this can be called finished: deploy check for 2
-(below), and a from-scratch run to confirm the guidance actually changes what
-the author does and 2 doesn't false-reject a real decomposition.
+All four done, plus item 2's deploy check (below, clean). Remaining before merge:
+one from-scratch run to see the guide + gates work end-to-end on a real
+decomposition — separate conversation, per the framework/project-run split.
 
-**Deploy note for 2:** it is the only live-DECOMPOSE change. `TestBeadStructureViolations_RealDocsClean`
-is the false-positive baseline (every real doc's natural 1:1 decomposition →
-zero violations). Before deploying, rebuild the live binary
-(`go build -o ratchet ./cmd/ratchet/`) and, ideally, replay a completed
-baseline's stored DECOMPOSE output through `beadStructureViolations` to confirm
-no reject on a decomposition that actually shipped.
+**Deploy check for 2 — DONE 2026-09-08, clean.** Replayed the stored
+DECOMPOSE_SPEC rev-1 beads of three completed fixtures against their on-disk
+`design_doc.md` through `beadStructureViolations`:
+- `qual-corpus-fractalviz-1` (8 beads) — clean
+- `qual-corpus-lsystem-6` (13 beads, incl. the 3 grammar sub-beads) — clean;
+  this is the run-6 split doc, the exact case item 2 most needs not to break
+- `qual-corpus-baseline-16` exprvm-web (9 beads) — clean; the `handlers-templates`
+  bead owns both files but the doc lists `handlers+templates` as one numbered
+  entry, so it is a title match, not a merge
+`goFixBeadSpec` changed no `output_files` on any of the ~30 beads (item 4 is a
+no-op on shipped decompositions, as expected). **Zero false rejections.**
+`TestBeadStructureViolations_RealDocsClean` is the committed regression baseline.
 
 ## Validation philosophy
 
