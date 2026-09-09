@@ -51,10 +51,14 @@ Character-class details:
   closing bracket: `[]a]` matches `]` or `a`.
 - A `-` that is the first or last member of a class (not part of a range) is a
   literal `-`: `[a-]` matches `a` or `-`.
-- An empty class (`[]` with nothing before the terminator, or `[!]`) is a
-  **pattern error**.
-- A reversed range (`[z-a]`, high endpoint before low) is a **pattern error**.
-- An unterminated class (`[` with no closing `]`) is a **pattern error**.
+- An empty class — `[]`, `[!]`, or `[^]` (no members after the optional negation
+  mark) — is a **pattern error** (`"empty character class"`, reported by
+  `Parse`; `Lex` accepts these as an empty-body `TokClass`).
+- A reversed range (`[z-a]`, high endpoint before low) is a **pattern error**
+  (`"reversed range"`). `[c-a-z]` is scanned greedily left-to-right, so `c-a` is
+  the first range → reversed-range error.
+- An unterminated class (`[` with no closing `]`) is a **pattern error**
+  (`"unterminated character class"`, reported by `Lex`).
 - A negated class never matches `/`, the same as a positive class.
 
 Pattern errors:
@@ -81,7 +85,7 @@ globstudio/
 ├── segments.go           — Segments
 ├── studio.go             — MatchRow, Result, Evaluate
 ├── presets.go            — Preset, Presets
-├── templates.go          — InitTemplates, RenderPage, RenderResult
+├── templates.go          — InitTemplates, RenderPage
 ├── handlers.go           — PageView, assemble, HandleIndex, HandleMatch, HandleSelect
 └── *_test.go             — one test file per source file above, plus integration_test.go
 ```
@@ -118,8 +122,8 @@ scaffolding step; do not list them as SURVEY outputs.
   It defines no glob logic of its own.
 - `presets.go` contains `Preset` and `var Presets []Preset`. No functions other
   than the slice literal.
-- `templates.go` contains `InitTemplates`, `RenderPage`, `RenderResult`. No
-  handler functions, no type declarations, no glob logic.
+- `templates.go` contains `InitTemplates` and `RenderPage`. No handler
+  functions, no type declarations, no glob logic.
 - `handlers.go` contains `PageView`, `assemble`, `HandleIndex`, `HandleMatch`,
   `HandleSelect`. No template parsing, no re-implementation of `Evaluate`.
 - Do **not** put `Lex` in `parser.go`, `Parse` in `matcher.go`, or `Compile` /
@@ -161,12 +165,14 @@ type Token struct {
 //   - A run of one '*' -> TokStar. A run of two or more '*' that forms a whole
 //     segment (bounded by '/' or the start/end of the pattern) -> TokDoubleStar;
 //     otherwise the whole run -> a single TokStar.
-//   - '[' begins a class: Lex scans to the matching ']' (honoring a literal ']'
-//     immediately after '[', '[!', or '[^') and emits one TokClass whose Text is
-//     the body between the brackets. Lex does NOT check the body for validity.
+//   - '[' begins a class: Lex skips a leading '!' or '^', then skips a single
+//     leading ']' ONLY if another character precedes the next ']' (so '[]a]' has
+//     body ']a', but '[]', '[!]', '[^]' are classes with an empty body). It
+//     scans to the closing ']' and emits one TokClass whose Text is the body.
+//     Lex does NOT check the body for validity (Parse rejects an empty body).
 //   - '\' escapes the next character, which is emitted as a literal. A '\' with no
 //     following character is an error.
-// Errors: dangling backslash; unterminated character class.
+// Errors (exact strings): "dangling backslash"; "unterminated character class".
 func Lex(pattern string) ([]Token, error)
 
 // ---- parser.go ----
@@ -185,11 +191,12 @@ type Node struct {
     Elems []Elem
 }
 
-// Parse converts a token list into a Node and validates every character class:
-// the class body must be non-empty, and every "a-b" range must have a code
-// point for a that is <= the code point for b. Adjacent TokLiteral tokens are
-// merged. Parse does no lexing and no matching.
-// Errors: empty character class; reversed range.
+// Parse converts a token list into a Node and validates every character class
+// by a left-to-right member scan (see Behavioral Specification): the class body
+// must have at least one member after the optional negation mark, and every
+// "a-b" range must have a code point for a that is <= the code point for b.
+// Adjacent TokLiteral tokens are merged. Parse does no lexing and no matching.
+// Errors (exact strings): "empty character class"; "reversed range".
 func Parse(tokens []Token) (Node, error)
 
 // ---- matcher_classes.go ----
@@ -282,11 +289,10 @@ var Presets []Preset
 // panics on a parse error (template text is a compile-time constant).
 func InitTemplates() *template.Template
 
-// RenderPage renders the full page (form + optional result) from v.
+// RenderPage renders the full page (form + optional result) from v. Every
+// handler renders via RenderPage — this is a plain form-POST app with no
+// fragment swaps, so every response is a full page.
 func RenderPage(w http.ResponseWriter, v PageView)
-
-// RenderResult renders only the result fragment from v (form is not re-rendered).
-func RenderResult(w http.ResponseWriter, v PageView)
 
 // ---- handlers.go ----
 
@@ -324,7 +330,6 @@ var _ func(Node) []string = Segments
 var _ func(string, []string) (Result, error) = Evaluate
 var _ func() *template.Template = InitTemplates
 var _ func(http.ResponseWriter, PageView) = RenderPage
-var _ func(http.ResponseWriter, PageView) = RenderResult
 var _ func(http.ResponseWriter, *http.Request) = HandleIndex
 var _ func(http.ResponseWriter, *http.Request) = HandleMatch
 var _ func(http.ResponseWriter, *http.Request) = HandleSelect
@@ -339,9 +344,15 @@ var _ []Preset = Presets
 Single left-to-right scan. `\` consumes the next character and contributes it to
 the current literal run (so `\a` and `a` lex identically; `\*` becomes a literal
 `*`). `[` starts a class scan: skip an optional leading `!` or `^`, then skip a
-single leading `]` if present, then scan to the next `]`; if the end of the
-pattern is reached first, return an error. The class body emitted in
-`Token.Text` keeps the leading `!` or `^` but not the brackets. A run of `*` is
+single leading `]` **only if at least one more character precedes the next `]`**
+(so `[]a]` has body `]a` and `[]]` has body `]`, but `[]`, `[!]`, and `[^]` are
+recognized as classes with an **empty body** — `Token.Text` is `""`, `"!"`, or
+`"^"` — and `Lex` does **not** error on them); then scan to the next `]`. If the
+end of the pattern is reached before a closing `]` → return the exact error
+string `"unterminated character class"` from `Lex`. An empty-body class is
+`Lex`-valid and reaches `Parse`, which rejects it (`"empty character class"`).
+The class body emitted in `Token.Text` keeps the leading `!` or `^` but not the
+brackets. A run of `*` is
 counted; it becomes `TokDoubleStar` only if its length is >= 2 **and** the
 character before the run is `/` or the start of the pattern **and** the
 character after the run is `/` or the end of the pattern; otherwise the entire
@@ -350,12 +361,16 @@ run is one `TokStar`.
 ### `Parse(tokens []Token) (Node, error)`
 
 Copies tokens into `Node.Elems`, merging consecutive `TokLiteral`. For each
-`TokClass`, parse the body into members: a leading `!`/`^` marks negation and is
-consumed; a `]` as the very first body character (after the optional negation
-mark) is a literal member; a `-` that is not between two other members is a
-literal member; `a-b` is a range. Reject an empty class (no members) and any
-range whose low endpoint's code point exceeds its high endpoint's. Parse builds
-no matcher.
+`TokClass`, parse the body into members by a **left-to-right scan**: consume a
+leading `!`/`^` as the negation mark. Then, at each position: if the current
+character is followed by `-` **and** that `-` is followed by a character (i.e.
+the `-` is not the last body character), consume all three as a range `low-high`;
+otherwise the current character is a single-character member. A `-` in the first
+member position, in the last member position, or immediately after a completed
+range is a literal `-` member. Under this scan `[c-a-z]` parses `c-a` as the
+first range. Reject an **empty class** (no members after the negation mark →
+`"empty character class"`) and any **range whose low endpoint's code point
+exceeds its high endpoint's** (`"reversed range"`). Parse builds no matcher.
 
 ### `classToRegex(body string) string`
 
@@ -398,8 +413,11 @@ Per-element fragments:
 
 `TokDoubleStar` is, by construction (the lexer only emits it as a whole
 segment), always adjacent to a `TokSep` on at least one side, or is the entire
-pattern. Translate the `**` **together with** its adjacent `TokSep`(s) as one
-unit, and do not separately emit those `TokSep`(s):
+pattern. **First collapse any maximal run of `TokDoubleStar` elements separated
+by single `TokSep`s** (`** / **`, `** / ** / **`, …) into **one** `TokDoubleStar`
+— a chain of "any depth" is still "any depth". Then translate each remaining
+`**` **together with** its adjacent `TokSep`(s) as one unit, and do not
+separately emit those `TokSep`(s):
 
 | context | element run | fragment |
 |---|---|---|
@@ -411,6 +429,8 @@ unit, and do not separately emit those `TokSep`(s):
 Worked regexps (these must be exact): `*.go` → `` `\A[^/]*\.go\z` ``;
 `**/*.go` → `` `\A(?:.*/)?[^/]*\.go\z` ``; `src/**` → `` `\Asrc(?:/.*)?\z` ``;
 `src/**/test` → `` `\Asrc/(?:.*/)?test\z` ``; `**` → `` `\A.*\z` ``;
+`**/**` → `` `\A.*\z` `` (the chain collapses to a single whole-pattern `**`);
+`a/**/**/b` → `` `\Aa/(?:.*/)?b\z` `` (chain collapses to one interior `**`);
 `[!a-c]at` → `` `\A[^/a-c]at\z` ``.
 
 Net semantics this produces, relative to `/`: `?` / `*` / a character class each
@@ -441,21 +461,24 @@ pattern verbatim.
 
 ### Handlers
 
-`HandleIndex` (`GET /`): render the page with an empty form and the preset
+All three handlers produce their response by calling `RenderPage(w, v)` with a
+fully-populated `PageView` — there is no fragment-only response.
+
+`HandleIndex` (`GET /`): `RenderPage` with an empty form and the preset
 buttons. `PageView.Result` is nil, `ParseError` is "".
 
 `HandleMatch` (`POST /match`): read form fields `pattern` and `paths`. Split
 `paths` on `"\n"` and, for each line, trim a single trailing `"\r"` (so a
 CRLF-submitted textarea works) but do not trim other whitespace; drop lines that
-are empty after that trim. Call `Evaluate(pattern, lines)`. On success render
-with `PageView.Result` set. On error render with `PageView.ParseError` set to
-`err.Error()` and `Result` nil. **Always HTTP 200** — a bad pattern is user
-input, not an HTTP error.
+are empty after that trim. Call `Evaluate(pattern, lines)`. On success:
+`RenderPage` with `PageView.Result` set. On error: `RenderPage` with
+`PageView.ParseError` set to `err.Error()` and `Result` nil. **Always HTTP
+200** — a bad pattern is user input, not an HTTP error.
 
 `HandleSelect` (`POST /select`): read form field `preset`. If it names a
-`Presets` entry, render the page with that preset's `Pattern` and its `Paths`
+`Presets` entry, `RenderPage` with that preset's `Pattern` and its `Paths`
 joined by `"\n"` pre-filled in the form, `Result` nil. If it names no entry,
-render the empty form (HTTP 200).
+`RenderPage` with the empty form (HTTP 200).
 
 **Form-body encoding.** `r.ParseForm()` / `r.PostForm.Get` decode
 `application/x-www-form-urlencoded`, where `+` decodes to a space and `%NN` is a
@@ -565,15 +588,18 @@ concern; these rows exercise `Compile`/`Match` end to end and assume
 
 ### Required test scenarios for the `parser` bead (`Parse` errors)
 
-| tokens from | `Parse` |
+| pattern | `Lex` then `Parse` |
 |---|---|
-| `[abc` (never terminated) | error from `Lex` first — "unterminated character class"; `Parse` is not reached |
-| `[]` | error: empty character class |
-| `[!]` | error: empty character class |
-| `[z-a]` | error: reversed range |
-| `ab\` | error from `Lex` first — "dangling backslash" |
+| `[abc` (never terminated) | `Lex` error, exact string `"unterminated character class"`; `Parse` not reached |
+| `[]` | `Lex` OK (empty-body `TokClass`, `Text` `""`); `Parse` error, exact string `"empty character class"` |
+| `[!]` | `Lex` OK (`Text` `"!"`); `Parse` error `"empty character class"` |
+| `[^]` | `Lex` OK (`Text` `"^"`); `Parse` error `"empty character class"` |
+| `[z-a]` | `Parse` error, exact string `"reversed range"` |
+| `[c-a-z]` | `Parse` error `"reversed range"` (greedy scan: `c-a` is the first range) |
+| `ab\` | `Lex` error, exact string `"dangling backslash"`; `Parse` not reached |
 | `[a-c]` | ok |
 | `[]a]` | ok — one literal `]` and one `a` |
+| `[]]` | ok — one literal `]` |
 | `[a-]` | ok — literal `a` and literal `-` |
 
 ### Required test scenarios for the `explain` bead (`Explain`)
@@ -723,11 +749,15 @@ The element lines are, by `Elem.Kind`:
 - **consumer**: templates
 - **interface**: `type PageView struct { Pattern string; Paths string; Presets []Preset; Result *Result; ParseError string }`.
 - **notes**: Inside a `{{range .Presets}}` loop the template must use `$.` to
-  reach page-level fields if needed. `{{if .Result}}` gates the result fragment;
+  reach page-level fields if needed. `{{if .Result}}` gates the result block;
   `{{if .ParseError}}` gates the error line. All of `Pattern`, `Paths`, every
   `MatchRow.Path`, and every `Explanation` line render through `html/template`
   and are escaped by context — see Behavioral Specification → Handlers →
-  Rendered-HTML assertions. The page's outermost element has `id="app"`.
+  Rendered-HTML assertions. **Load-bearing exact strings the templates bead must
+  emit** (the integration bead asserts on them): the page's outermost element
+  has `id="app"`; each result row carries `class="match"` when its
+  `MatchRow.Matched` is true and `class="nomatch"` when false — those exact
+  class names, not synonyms.
 
 ## Decomposition Notes
 
@@ -748,9 +778,9 @@ The element lines are, by `Elem.Kind`:
 7. **studio** — `MatchRow`, `Result`, `Evaluate`. Depends on beads 1, 2, 4, 5,
    6. Owns `studio.go`.
 8. **presets** — `Preset`, `Presets`. No dependencies. Owns `presets.go`.
-9. **templates** — `InitTemplates`, `RenderPage`, `RenderResult`. Decompose
-   **before** handlers so the handler bead's httptest assertions run against
-   real rendered HTML. Owns `templates.go`.
+9. **templates** — `InitTemplates`, `RenderPage`. Decompose **before** handlers
+   so the handler bead's httptest assertions run against real rendered HTML.
+   Owns `templates.go`.
 10. **handlers** — `PageView`, `assemble`, `HandleIndex`, `HandleMatch`,
     `HandleSelect`. Depends on beads 7, 8, 9. Owns `handlers.go`.
     sizing rationale: `assemble` builds the view model; the three `Handle*`
@@ -840,10 +870,12 @@ not re-derive or paraphrase):**
   `/` unless the next element is `TokDoubleStar`. A `TokDoubleStar` **with its
   adjacent `TokSep`(s)** translates as one unit: whole pattern `**` → `.*`;
   start `**` `/` → `(?:.*/)?`; end `/` `**` → `(?:/.*)?`; interior `/` `**` `/`
-  → `/(?:.*/)?`. Wrap the concatenation as `` `\A` + body + `\z` `` and
-  `regexp.MustCompile`. Exact results: `*.go` → `\A[^/]*\.go\z`; `**/*.go` →
-  `\A(?:.*/)?[^/]*\.go\z`; `src/**` → `\Asrc(?:/.*)?\z`; `src/**/test` →
-  `\Asrc/(?:.*/)?test\z`; `**` → `\A.*\z`.
+  → `/(?:.*/)?`. **Before translating, collapse a run of `**` elements separated
+  by single `/`** (`**/**`, `a/**/**/b`, …) into one `**`. Wrap the
+  concatenation as `` `\A` + body + `\z` `` and `regexp.MustCompile`. Exact
+  results: `*.go` → `\A[^/]*\.go\z`; `**/*.go` → `\A(?:.*/)?[^/]*\.go\z`;
+  `src/**` → `\Asrc(?:/.*)?\z`; `src/**/test` → `\Asrc/(?:.*/)?test\z`; `**` →
+  `\A.*\z`; `**/**` → `\A.*\z`; `a/**/**/b` → `\Aa/(?:.*/)?b\z`.
 - **Pin — `matcher-classes` bead, `classToRegex` (verbatim):** `classToRegex`
   takes the raw class body (leading `!`/`^` kept). A leading `!` or `^` → the
   class is negated: drop it, and return `"[^/" + rest + "]"` (a negated class
@@ -856,10 +888,13 @@ not re-derive or paraphrase):**
   `bat`, and **never** `/at`. `[]abc]` matches `]` and `a` (leading `]` is
   literal). `[a-]` matches `a` and `-`. `\*.txt` matches the literal `*.txt`,
   not `a.txt`.
-- **Pin — `parser` bead, error cases:** `[]` and `[!]` → empty-class error;
-  `[z-a]` → reversed-range error; an unterminated `[` and a dangling trailing
-  `\` are `Lex` errors that surface before `Parse`. `[]a]`, `[a-]`, `[a-c]`
-  parse cleanly.
+- **Pin — `parser` bead, error cases (exact error strings):** `[]`, `[!]`, `[^]`
+  → `Lex` accepts them as empty-body `TokClass`; `Parse` returns exactly
+  `"empty character class"`. `[z-a]` and `[c-a-z]` → `Parse` returns exactly
+  `"reversed range"` (`[c-a-z]` is scanned greedily, `c-a` first). `[abc`
+  (unterminated) → `Lex` returns exactly `"unterminated character class"`;
+  `ab\` → `Lex` returns exactly `"dangling backslash"` — both surface before
+  `Parse`. `[]a]`, `[]]`, `[a-]`, `[a-c]` parse cleanly.
 - **Pin — `explain` bead, `Explain` output:** `Explain` on the parsed
   `src/**/*.go` returns exactly
   `["literal text \"src\"", "path separator", "** — any run (including empty) of any characters, crossing /", "path separator", "* — any run (including empty) of characters other than /", "literal text \".go\""]`.
@@ -873,11 +908,16 @@ not re-derive or paraphrase):**
   `Segments` = `["src", "*.go"]`, and `Explanation` the four-line slice for
   `src/*.go` pinned above. `Evaluate("[z-a]", nil)` returns
   `(Result{}, err)` with `err` non-nil.
+- **Pin — `templates` bead, load-bearing exact strings:** `RenderPage` output's
+  outermost element has `id="app"`; each result row has `class="match"` when
+  `MatchRow.Matched` is true and `class="nomatch"` when false — these exact
+  class names.
 - **Pin — `integration` bead:** `POST /match` with `pattern` = `src/**/*.go`
   and `paths` = `"main.go\nsrc/app.go\nsrc/a/b/util.go\nsrc/app.rs"` (body
   `url.Values{...}.Encode()`) → HTTP 200; body contains `id="app"`;
   `src/a/b/util.go` is shown with `class="match"`; `src/app.rs` is shown with
   `class="nomatch"`; `main.go` and `src/app.go` are shown with `class="match"`.
+  All handlers render via `RenderPage`, so this response is a full page.
 
 ## Open Questions
 
