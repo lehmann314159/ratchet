@@ -176,7 +176,7 @@ decomposition / one clean, one escalated).
 | tier | docs | purpose |
 |---|---|---|
 | **1 — regression anchors** | fractalviz, lsystem-studio, cron-studio, tasklist | regressions from v0.4 + baseline variance. NOT exprvm-web (overfit). |
-| **2 — validate fixes** | glob-studio (post-split, never run) | matcher split + B3b exercise |
+| **2 — validate fixes** | glob-studio (post-split, never run) | matcher split + B3b exercise; `check-design-doc` done `6516187` (6 findings applied) |
 | **3 — new domains** (authored 2026-09-09, `docs/design-docs/`, checkdesigndoc-clean) | `decimal` (exact fixed-point arithmetic), `toml-mini` (parse **+** serialize round-trip), `retry-engine` (circuit-breaker state machine + seeded backoff), `gapbuffer` (mutable data structure + line nav) | break the parser+HTMX monoculture: exact-value pins, symmetric contracts, a state machine, a real data structure. Each library + CLI, no web layer. |
 
 ~18 runs ≈ 4–6 days. Tier-3 reference impls live in `scratchpad/{decref,tomlref,
@@ -188,7 +188,7 @@ independent subagents, 20 findings, all applied: ~15 doc-precision + 4 bugs the
 reference impls shared (decimal `MinInt64` range, decimal `rem*2` overflow,
 retry CLI `delay` arg, gapbuffer CLI integer-field validation). New ambiguity
 class 18 (guard/error-variant precedence), independently raised by 3 of 4
-subagents. **Tier 2 (glob-studio) still needs its pass; Tier 1 does not** (see
+subagents. **Tier 2 (glob-studio) pass done `6516187` (6 findings — Lex empty-class, `RenderResult` deleted, `**/**` chain, class-scan procedure, `class="match"` pin, verbatim error strings); Tier 1 skipped** (see
 above).
 
 ---
@@ -200,5 +200,5 @@ above).
 - [ ] Showstopper threshold ("majority of runs") acceptable
 - [x] Burn-in corpus: 3 tiers, n=2, ~18 runs (table above). *(2026-09-09)*
 - [x] Tier-3 docs authored + `check-design-doc` passed + findings applied (`a51499a`). *(2026-09-09)*
-- [ ] `check-design-doc` on glob-studio (Tier 2 — edited + never run)
+- [x] `check-design-doc` on glob-studio (`6516187`, 6 findings applied). *(2026-09-09)*
 - [ ] merge `docs/burn-in-tier3-docs` → `main` and run the burn-in
