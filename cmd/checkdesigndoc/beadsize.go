@@ -409,6 +409,22 @@ func behavioralSubsections(content string) []behavioralSub {
 	return out
 }
 
+// headingSubject returns the part of a behavioral-subsection heading that names
+// what the subsection defines — the text before the first heading separator
+// (" — ", " – ", " -- ", " - ") or the "(" of a signature. Identifiers that
+// appear only after that point (argument types in `Compile(node Node)`, prose)
+// are references to other beads' symbols, not ownership markers, and must not
+// attribute the subsection's length to those beads.
+func headingSubject(h string) string {
+	cut := len(h)
+	for _, sep := range []string{" — ", " – ", " -- ", " - ", "("} {
+		if i := strings.Index(h, sep); i >= 0 && i < cut {
+			cut = i
+		}
+	}
+	return h[:cut]
+}
+
 // maxBehavioralLines returns the largest line count among behavioral
 // subsections whose heading names one of the bead's owned symbols, one of its
 // owned files' stems, or the bead itself ("... grammar-modules bead ...").
@@ -422,7 +438,7 @@ func maxBehavioralLines(subs []behavioralSub, b beadSizeInfo) int {
 	}
 	max := 0
 	for _, s := range subs {
-		h := normalizeContractName(s.heading)
+		h := normalizeContractName(headingSubject(s.heading))
 		hit := false
 		for stem := range stems {
 			if stem != "" && strings.Contains(h, stem) {

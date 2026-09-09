@@ -199,6 +199,47 @@ func TestBeadSize_lastBeadBodyDoesNotRunToSectionEnd(t *testing.T) {
 	}
 }
 
+// TestBeadSize_behavioralHeadingArgTypeNotOwnership is the B3a regression
+// (memory/project_decomposition_framework): a behavioral subsection headed with
+// a full signature — `### Compile(node Node) ...` — must be attributed to the
+// bead that owns `Compile`, not to the bead that owns the `Node` argument type.
+// Before the headingSubject fix, the substring "node" in the normalized heading
+// gave `parser` a 35-line behavioral subsection it does not own, producing a
+// false hidden-complexity NOTE.
+func TestBeadSize_behavioralHeadingArgTypeNotOwnership(t *testing.T) {
+	longCompile := "### `Compile(node Node) (*IR, error)`\n\n" +
+		strings.Repeat("A compilation rule.\n", 35) + "\n"
+	doc := "## Architecture\n\n```\n" +
+		"app/\n├── parser.go   — Node, Parse\n└── compiler.go — Compile\n```\n\n" +
+		"## Data Types and Function Signatures\n\n```go\n" +
+		"// ---- parser.go ----\ntype Node struct{}\nfunc Parse(s string) (Node, error)\n" +
+		"// ---- compiler.go ----\nfunc Compile(node Node) (*IR, error)\n```\n\n" +
+		"## Behavioral Specification\n\n" +
+		"### `Parse`\n\nParses.\n\n" +
+		longCompile +
+		"## Cross-Bead Contracts\n\n" +
+		"### parser → compiler (data-shape)\n\n`Node` flows.\n\n" +
+		"### parser → x (protocol)\n\nx.\n\n" +
+		"### parser → y (protocol)\n\ny.\n\n" +
+		"## Decomposition Notes\n\n**Bead dependency order (do not reorder):**\n\n" +
+		"1. **parser** — `Node`, `Parse`. No dependencies. Owns `parser.go`.\n" +
+		"2. **compiler** — `Compile`. Depends on bead 1. Owns `compiler.go`.\n"
+
+	b := parseBeads(t, doc)
+	// parser owns only the short `### Parse` subsection; the 35-line
+	// `### Compile(node Node)` subsection must NOT attribute to it via the "node"
+	// substring in the signature.
+	if got := b["parser"].behavioralLines; got >= 35 {
+		t.Errorf("parser.behavioralLines = %d — absorbed the Compile(node Node) subsection it does not own", got)
+	}
+	if b["parser"].hiddenComplexity() {
+		t.Errorf("parser must not NOTE: it does not own the Compile behavioral subsection (lines=%d)", b["parser"].behavioralLines)
+	}
+	if got := b["compiler"].behavioralLines; got < 35 {
+		t.Errorf("compiler.behavioralLines = %d, want >=35 — it owns Compile", got)
+	}
+}
+
 // TestBeadSize_CorpusGate locks the check's behavior against the real design
 // docs. Every bead that reached COMPLETE in a baseline must PASS; the known
 // oversized/borderline beads must FLAG.
