@@ -1,0 +1,112 @@
+=== saved bead ===
+  SaveExpr ok=<nil> file="0 9 * * 1-5"
+  SaveExpr(bad name!) err=true fileExists=false
+  ListSaved -> [{Name:a Expr:* * * * *} {Name:b Expr:0 0 * * 0} {Name:weekday-mornings Expr:0 9 * * 1-5}]
+  ListSaved(missing) -> [] <nil>
+  ListSaved(regular file) -> [] <nil>
+=== parseAtom / parseField masks (as sorted value lists) ===
+  "*"            [0,59] -> [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59]
+  "*/15"         [0,59] -> [0 15 30 45]
+  "5"            [0,59] -> [5]
+  "0,15,30,45"   [0,59] -> [0 15 30 45]
+  "10-30/5"      [0,59] -> [10 15 20 25 30]
+  "5/15"         [0,59] -> [5 20 35 50]
+  "*/6"          [0,23] -> [0 6 12 18]
+  "9-17"         [0,23] -> [9 10 11 12 13 14 15 16 17]
+  "1-5"          [0,7] -> [1 2 3 4 5]
+  "mon-fri"      [0,7] -> [1 2 3 4 5]
+  "sun"          [0,7] -> [0]
+  "7"            [0,7] -> [0]
+  "0,7"          [0,7] -> [0]
+  "jan,jun,dec"  [1,12] -> [1 6 12]
+  "*/3"          [1,12] -> [1 4 7 10]
+  "15-45/15"     [0,59] -> [15 30 45]
+
+=== parse errors ===
+  "* * * *"            -> expected 5 fields, got 4
+  "* * * * * *"        -> expected 5 fields, got 6
+  ""                   -> empty expression
+  "60 * * * *"         -> minute: value 60 out of range [0,59]
+  "* 24 * * *"         -> hour: value 24 out of range [0,23]
+  "* * 0 * *"          -> day-of-month: value 0 out of range [1,31]
+  "* * * 13 *"         -> month: value 13 out of range [1,12]
+  "* * * * 8"          -> day-of-week: value 8 out of range [0,7]
+  "* * * jan *"        -> <nil>
+  "sat-sun * * * *"    -> minute: not a number or known name: "sat"
+  "fri-mon * * * *"    -> minute: not a number or known name: "fri"
+  "@bogus"             -> unknown macro "@bogus"
+  "*/0 * * * *"        -> minute: bad step "0" in "*/0"
+  "5-1 * * * *"        -> minute: range "5-1" is descending (5 > 1); ranges do not wrap
+  parseField("sat-sun", dow) -> range "sat-sun" is descending (6 > 0); ranges do not wrap
+
+=== more field cases ===
+  "jan"        -> ERROR not a number or known name: "jan"
+  "MON-FRI"    -> [1 2 3 4 5] (allOnes=false)
+  "mon-fri/2"  -> [1 3 5] (allOnes=false)
+  "?"          -> ERROR not a number or known name: "?"
+  "0-59"       -> [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59] (allOnes=true)
+  Parse("  0   9  *  *  1-5  ") -> minute=[0] domR=false dowR=true
+  Parse("? * * * *") -> ERROR minute: not a number or known name: "?"
+  Parse("*/2 * * * *") -> minute=[0 2 4 6 8 10 12 14 16 18 20 22 24 26 28 30 32 34 36 38 40 42 44 46 48 50 52 54 56 58] domR=false dowR=false
+  Next("0 9 * * *", exactly 2026-01-01T09:00Z) -> 2026-01-02T09:00:00Z true (must be next day, strictly after)
+  Next("0 9 * * *", 2026-01-01T08:59Z) -> 2026-01-01T09:00:00Z
+
+=== macro expansions (Schedule fields) ===
+  @yearly    minute=[0] hour=[0] dom=[1] month=[1] dow=[0 1 2 3 4 5 6] domR=true dowR=false
+  @annually  minute=[0] hour=[0] dom=[1] month=[1] dow=[0 1 2 3 4 5 6] domR=true dowR=false
+  @monthly   minute=[0] hour=[0] dom=[1] month=[1 2 3 4 5 6 7 8 9 10 11 12] dow=[0 1 2 3 4 5 6] domR=true dowR=false
+  @weekly    minute=[0] hour=[0] dom=[1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31] month=[1 2 3 4 5 6 7 8 9 10 11 12] dow=[0] domR=false dowR=true
+  @daily     minute=[0] hour=[0] dom=[1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31] month=[1 2 3 4 5 6 7 8 9 10 11 12] dow=[0 1 2 3 4 5 6] domR=false dowR=false
+  @midnight  minute=[0] hour=[0] dom=[1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31] month=[1 2 3 4 5 6 7 8 9 10 11 12] dow=[0 1 2 3 4 5 6] domR=false dowR=false
+  @hourly    minute=[0] hour=[0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23] dom=[1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31] month=[1 2 3 4 5 6 7 8 9 10 11 12] dow=[0 1 2 3 4 5 6] domR=false dowR=false
+
+=== Match ===
+  "0 9 * * 1-5"  @ 2026-01-05T09:00:00Z -> true
+  "0 9 * * 1-5"  @ 2026-01-05T09:01:00Z -> false
+  "0 9 * * 1-5"  @ 2026-01-03T09:00:00Z -> false
+  "*/15 * * * *" @ 2026-01-05T13:30:00Z -> true
+  "*/15 * * * *" @ 2026-01-05T13:31:00Z -> false
+  "0 0 13 * 5"   @ 2026-02-13T00:00:00Z -> true
+  "0 0 13 * 5"   @ 2026-03-13T00:00:00Z -> true
+  "0 0 13 * 5"   @ 2026-11-13T00:00:00Z -> true
+  "0 0 13 * 5"   @ 2026-01-13T00:00:00Z -> true
+  "0 0 13 * 5"   @ 2026-01-02T00:00:00Z -> true
+  "0 0 * * 0"    @ 2026-01-04T00:00:00Z -> true
+  "0 12 1 * *"   @ 2026-05-01T12:00:00Z -> true
+
+=== Next / NextN ===
+  "0 9 * * 1-5"  after 2026-01-01T00:00:00Z (n=6) -> [2026-01-01T09:00:00Z 2026-01-02T09:00:00Z 2026-01-05T09:00:00Z 2026-01-06T09:00:00Z 2026-01-07T09:00:00Z 2026-01-08T09:00:00Z]
+  "*/15 * * * *" after 2026-01-01T00:00:00Z (n=5) -> [2026-01-01T00:15:00Z 2026-01-01T00:30:00Z 2026-01-01T00:45:00Z 2026-01-01T01:00:00Z 2026-01-01T01:15:00Z]
+  "0 0 29 2 *"   after 2026-01-01T00:00:00Z (n=3) -> [2028-02-29T00:00:00Z 2032-02-29T00:00:00Z 2036-02-29T00:00:00Z]
+  "0 0 30 2 *"   after 2026-01-01T00:00:00Z (n=1) -> []
+  "0 0 1 1 *"    after 2026-06-15T12:00:00Z (n=3) -> [2027-01-01T00:00:00Z 2028-01-01T00:00:00Z 2029-01-01T00:00:00Z]
+  "30 3 * * 1"   after 2026-01-01T00:00:00Z (n=4) -> [2026-01-05T03:30:00Z 2026-01-12T03:30:00Z 2026-01-19T03:30:00Z 2026-01-26T03:30:00Z]
+  "0 0 13 * 5"   after 2026-01-01T00:00:00Z (n=4) -> [2026-01-02T00:00:00Z 2026-01-09T00:00:00Z 2026-01-13T00:00:00Z 2026-01-16T00:00:00Z]
+  "0 0 * * 0"    after 2026-01-01T00:00:00Z (n=3) -> [2026-01-04T00:00:00Z 2026-01-11T00:00:00Z 2026-01-18T00:00:00Z]
+  "15 14 1 * *"  after 2026-01-01T00:00:00Z (n=3) -> [2026-01-01T14:15:00Z 2026-02-01T14:15:00Z 2026-03-01T14:15:00Z]
+  "@hourly"      after 2026-01-01T00:30:00Z (n=3) -> [2026-01-01T01:00:00Z 2026-01-01T02:00:00Z 2026-01-01T03:00:00Z]
+  Next("0 0 30 2 *", 2026-01-01) -> 0001-01-01T00:00:00Z false
+
+=== weekday sanity ===
+  2026-01-13 is Tuesday
+  2026-02-13 is Friday
+  2026-03-13 is Friday
+  2026-11-13 is Friday
+  2026-01-02 is Friday
+  2026-01-01 is Thursday
+  2026-01-05 is Monday
+  2026-01-04 is Sunday
+
+=== Describe ===
+  "*/15 9-17 * * 1-5":
+    Minute="0, 15, 30, 45" Hour="9, 10, 11, 12, 13, 14, 15, 16, 17" DoM="every day-of-month" Month="every month" DoW="Monday, Tuesday, Wednesday, Thursday, Friday" DomDowOr=false
+  "0 0 1 1 *":
+    Minute="0" Hour="0" DoM="1" Month="January" DoW="every day-of-week" DomDowOr=false
+  "0 0 13 * 5":
+    Minute="0" Hour="0" DoM="13" Month="every month" DoW="Friday" DomDowOr=true
+  "* * * * *":
+    Minute="every minute" Hour="every hour" DoM="every day-of-month" Month="every month" DoW="every day-of-week" DomDowOr=false
+  "0 0,12 * jan,jun,dec *":
+    Minute="0" Hour="0, 12" DoM="every day-of-month" Month="January, June, December" DoW="every day-of-week" DomDowOr=false
+  "30 3 * * 1":
+    Minute="30" Hour="3" DoM="every day-of-month" Month="every month" DoW="Monday" DomDowOr=false
