@@ -75,6 +75,7 @@ globstudio/
 ├── main.go               — var templates *template.Template; func main() only
 ├── lexer.go              — Token, TokenKind + constants, Lex
 ├── parser.go             — Node, Elem, Parse
+├── matcher_classes.go    — classToRegex
 ├── matcher.go            — Program, Compile, Match
 ├── explain.go            — Explain
 ├── segments.go           — Segments
@@ -99,8 +100,14 @@ scaffolding step; do not list them as SURVEY outputs.
 - `parser.go` contains `Node`, `Elem`, and `Parse`. It **uses** `Token` /
   `TokenKind` from `lexer.go` (same package, no import). It does **not** call
   `Lex`, and it does no matching.
+- `matcher_classes.go` contains exactly `classToRegex` — a string→string helper
+  that translates one character-class body (the raw `Elem.Text` for a `TokClass`,
+  leading `!`/`^` preserved) into a Go `regexp` bracket expression. No other
+  functions, no types. It does **not** import `regexp`, call `Lex` / `Parse`, or
+  touch `Node` / `Elem`.
 - `matcher.go` contains `Program`, `Compile`, and `Match`. It **uses** `Node` /
-  `Elem` from `parser.go`. It does **not** call `Lex` or `Parse` and does not
+  `Elem` from `parser.go` and calls `classToRegex` from `matcher_classes.go`
+  (same package, no import). It does **not** call `Lex` or `Parse` and does not
   build English text.
 - `explain.go` contains `Explain`. It **uses** `Node` / `Elem`. No matching, no
   lexing.
@@ -117,6 +124,9 @@ scaffolding step; do not list them as SURVEY outputs.
   `HandleSelect`. No template parsing, no re-implementation of `Evaluate`.
 - Do **not** put `Lex` in `parser.go`, `Parse` in `matcher.go`, or `Compile` /
   `Match` in `studio.go`.
+- Do **not** put `classToRegex` in `matcher.go` — it belongs in
+  `matcher_classes.go`. Do **not** inline the character-class translation into
+  `Compile`; `Compile` calls `classToRegex`.
 - Do **not** put `Node` / `Elem` in `lexer.go` — they belong in `parser.go`.
 - Do **not** put `PageView` in `templates.go` — it belongs in `handlers.go`.
 - Do **not** put any `Handle*` function in `templates.go` or `studio.go`.
@@ -182,6 +192,23 @@ type Node struct {
 // Errors: empty character class; reversed range.
 func Parse(tokens []Token) (Node, error)
 
+// ---- matcher_classes.go ----
+
+// classToRegex translates one character-class body into a Go regexp bracket
+// expression. body is the raw Elem.Text for a TokClass: the characters between
+// the outer [ ], with a leading '!' or '^' kept if the class is negated.
+//   - A leading '!' or '^' means negated.
+//   - A negated class is emitted as "[^/" + rest + "]" — it excludes '/' as well
+//     as its members.
+//   - A positive class is emitted as "[" + body + "]" (a positive class is not
+//     expected to contain '/').
+//   - A ']' that is the first body character (after an optional negation mark)
+//     is a literal member and must be emitted as "\]" so Go's regexp accepts it.
+//   - A trailing '-' is left as-is (Go treats it as a literal).
+// classToRegex assumes Parse already accepted the class (non-empty, ranges not
+// reversed); it does not re-validate.
+func classToRegex(body string) string
+
 // ---- matcher.go ----
 
 // Program is a compiled matcher. Its internal representation is unspecified; it
@@ -190,8 +217,11 @@ type Program struct {
     // unexported fields
 }
 
-// Compile turns a parsed Node into a Program. Compile never fails on a Node that
-// Parse returned (Parse has already rejected the invalid cases).
+// Compile turns a parsed Node into a Program by translating node.Elems into a
+// single anchored Go regexp (\A ... \z) per the table in Behavioral
+// Specification -> Compile, calling classToRegex for every TokClass. Compile
+// never fails on a Node that Parse returned (Parse has already rejected the
+// invalid cases).
 func Compile(node Node) *Program
 
 // Match reports whether the whole of path matches the whole of the pattern that
@@ -286,6 +316,7 @@ var templates *template.Template
 ```go
 var _ func(string) ([]Token, error) = Lex
 var _ func([]Token) (Node, error) = Parse
+var _ func(string) string = classToRegex
 var _ func(Node) *Program = Compile
 var _ func(*Program, string) bool = Match
 var _ func(Node) []string = Explain
@@ -326,27 +357,67 @@ literal member; `a-b` is a range. Reject an empty class (no members) and any
 range whose low endpoint's code point exceeds its high endpoint's. Parse builds
 no matcher.
 
-### `Compile(node Node) *Program` and `Match(prog *Program, path string) bool`
+### `classToRegex(body string) string`
 
-`Compile` is a pure transform and never fails on a `Node` from `Parse`. `Match`
-is anchored: it succeeds only when the pattern consumes the entire path.
+`body` is the raw class body for a `TokClass` `Elem` — the text between the outer
+`[ ]`, with a leading `!` or `^` kept if the class is negated. `Parse` has
+already accepted it (non-empty, no reversed range); `classToRegex` does not
+re-validate.
 
-Semantics relative to `/`:
+1. If `body` begins with `!` or `^`, the class is **negated**; drop that first
+   byte and call the remainder `rest`. Otherwise the class is **positive** and
+   `rest` is `body` unchanged.
+2. If `rest` begins with `]`, replace that leading `]` with `\]` (Go's `regexp`
+   does not treat a leading `]` in a class as a literal, unlike a shell glob).
+3. Negated → return `"[^/" + rest + "]"`. The `/` makes a negated class exclude
+   the path separator as well as its listed members.
+4. Positive → return `"[" + rest + "]"`. (A positive class is not expected to
+   contain `/`.)
 
-- `TokAny` (`?`) consumes exactly one byte and that byte must not be `/`.
-- `TokStar` (`*`) consumes zero or more bytes, none of which may be `/`.
-- `TokClass` consumes exactly one byte; that byte must not be `/`; for a
-  positive class the byte must be a member, for a negated class it must not be.
-- `TokSep` (`/`) consumes exactly one `/`.
-- `TokLiteral` consumes its exact text.
-- `TokDoubleStar` (`**`), which by construction is always adjacent to a `TokSep`
-  on at least one side (or is the whole pattern), consumes zero or more bytes
-  **including** `/`, and additionally absorbs one adjacent `/`: concretely,
-  `a/**/b` matches `a/b` (the `**` and one `/` consume nothing and the other),
-  `a/x/b`, and `a/x/y/b`; a leading `**/` matches with the `**` and `/`
-  consuming nothing (`**/x` matches `x`); a trailing `/**` matches with both
-  consuming nothing (`a/**` matches `a`); a lone `**` matches any path including
-  the empty string.
+Worked: `classToRegex("a-c")` = `"[a-c]"`; `classToRegex("!a-c")` = `"[^/a-c]"`;
+`classToRegex("]abc")` = `"[\]abc]"`; `classToRegex("a-")` = `"[a-]"`.
+
+### `Compile` and `Match`
+
+`Compile` is a pure transform and never fails on a `Node` from `Parse`. It walks
+`node.Elems` in order, emits one regexp fragment per element per the table
+below, concatenates them, wraps the result as `` `\A` + body + `\z` ``, and
+compiles it with `regexp.MustCompile` (the anchors make `Match` whole-string).
+`Match` returns `prog`'s compiled regexp `.MatchString(path)`.
+
+Per-element fragments:
+
+| element | fragment |
+|---|---|
+| `TokLiteral` | `regexp.QuoteMeta(Elem.Text)` |
+| `TokAny` (`?`) | `[^/]` |
+| `TokStar` (`*`) | `[^/]*` |
+| `TokClass` | `classToRegex(Elem.Text)` |
+| `TokSep` (`/`) | `/` — **except** when the next element is `TokDoubleStar` (see below) |
+| `TokDoubleStar` (`**`) | depends on adjacent `TokSep` — see below |
+
+`TokDoubleStar` is, by construction (the lexer only emits it as a whole
+segment), always adjacent to a `TokSep` on at least one side, or is the entire
+pattern. Translate the `**` **together with** its adjacent `TokSep`(s) as one
+unit, and do not separately emit those `TokSep`(s):
+
+| context | element run | fragment |
+|---|---|---|
+| whole pattern | `**` | `.*` |
+| start of pattern | `**` `/` | `(?:.*/)?` |
+| end of pattern | `/` `**` | `(?:/.*)?` |
+| interior | `/` `**` `/` | `/(?:.*/)?` |
+
+Worked regexps (these must be exact): `*.go` → `` `\A[^/]*\.go\z` ``;
+`**/*.go` → `` `\A(?:.*/)?[^/]*\.go\z` ``; `src/**` → `` `\Asrc(?:/.*)?\z` ``;
+`src/**/test` → `` `\Asrc/(?:.*/)?test\z` ``; `**` → `` `\A.*\z` ``;
+`[!a-c]at` → `` `\A[^/a-c]at\z` ``.
+
+Net semantics this produces, relative to `/`: `?` / `*` / a character class each
+consume exactly the bytes their fragment allows and never `/`; `TokSep` consumes
+one `/`; `**` consumes zero or more bytes including `/` and absorbs one adjacent
+`/` (so `a/**/b` matches `a/b`, `a/x/b`, `a/x/y/b`; `**/x` matches `x`; `a/**`
+matches `a`; a lone `**` matches any path including the empty string).
 
 ### `Explain(node Node) []string`
 
@@ -418,10 +489,28 @@ character is `/`. `*`, `?`, and character classes never cross a `/`; `**` (as a
 whole segment) does. "Anchored" means the match must begin at position 0 and end
 at the last byte.
 
+### Required test scenarios for the `matcher-classes` bead (`classToRegex`)
+
+Each row: `classToRegex(body)` returns exactly the stated string.
+
+| `body` | result |
+|---|---|
+| `a-c` | `[a-c]` |
+| `!a-c` | `[^/a-c]` |
+| `^a-c` | `[^/a-c]` |
+| `0-9` | `[0-9]` |
+| `!0-9` | `[^/0-9]` |
+| `]abc` | `[\]abc]` |
+| `!]abc` | `[^/\]abc]` |
+| `a-` | `[a-]` |
+| `abc` | `[abc]` |
+
 ### Required test scenarios for the `matcher` bead (`Compile` + `Match`)
 
 Each row: compile the pattern, then `Match` against the path, expecting the
-stated boolean.
+stated boolean. (Character-class translation is the `matcher-classes` bead's
+concern; these rows exercise `Compile`/`Match` end to end and assume
+`classToRegex` is correct.)
 
 | pattern | path | `Match` |
 |---|---|---|
@@ -546,7 +635,19 @@ The element lines are, by `Elem.Kind`:
   `type Node struct { Elems []Elem }`. For `TokClass`, `Elem.Text` is the raw
   body (leading `!`/`^` preserved). `Node` is flat and ordered.
 - **notes**: `Compile` may assume every `Elem` is well-formed — `Parse` has
-  already rejected empty classes and reversed ranges.
+  already rejected empty classes and reversed ranges. `Compile` passes
+  `Elem.Text` for a `TokClass` straight to `classToRegex`.
+
+### matcher-classes → matcher (protocol)
+
+- **type**: protocol
+- **producer**: matcher-classes
+- **consumer**: matcher
+- **interface**: `func classToRegex(body string) string` — `body` is the raw
+  `TokClass` `Elem.Text` (leading `!`/`^` preserved); the return value is a Go
+  `regexp` bracket expression, negated forms already excluding `/`.
+- **notes**: `Compile` emits `classToRegex(Elem.Text)` verbatim as the fragment
+  for every `TokClass` element and does not post-process it.
 
 ### parser → explain (data-shape)
 
@@ -635,33 +736,57 @@ The element lines are, by `Elem.Kind`:
 1. **lexer** — `Token`, `TokenKind` + constants, `Lex`. No dependencies. Owns
    `lexer.go`.
 2. **parser** — `Elem`, `Node`, `Parse`. Depends on bead 1. Owns `parser.go`.
-3. **matcher** — `Program`, `Compile`, `Match`. Depends on bead 2. Owns
-   `matcher.go`.
-4. **explain** — `Explain`. Depends on bead 2. Owns `explain.go`.
-5. **segments** — `Segments`. Depends on bead 2. Owns `segments.go`.
-6. **studio** — `MatchRow`, `Result`, `Evaluate`. Depends on beads 1, 2, 3, 4,
-   5. Owns `studio.go`.
-7. **presets** — `Preset`, `Presets`. No dependencies. Owns `presets.go`.
-8. **templates** — `InitTemplates`, `RenderPage`, `RenderResult`. Decompose
+3. **matcher-classes** — `classToRegex`. Depends on bead 2 (for the `Elem.Text`
+   class-body shape only; it takes a `string`, not a `Node`). Owns
+   `matcher_classes.go`.
+4. **matcher** — `Program`, `Compile`, `Match`. Depends on beads 2 and 3.
+   `Compile` is a table-driven translation of `Node.Elems` to one anchored Go
+   regexp (see Behavioral Specification → `Compile`), calling `classToRegex` for
+   each `TokClass`. Owns `matcher.go`.
+5. **explain** — `Explain`. Depends on bead 2. Owns `explain.go`.
+6. **segments** — `Segments`. Depends on bead 2. Owns `segments.go`.
+7. **studio** — `MatchRow`, `Result`, `Evaluate`. Depends on beads 1, 2, 4, 5,
+   6. Owns `studio.go`.
+8. **presets** — `Preset`, `Presets`. No dependencies. Owns `presets.go`.
+9. **templates** — `InitTemplates`, `RenderPage`, `RenderResult`. Decompose
    **before** handlers so the handler bead's httptest assertions run against
    real rendered HTML. Owns `templates.go`.
-9. **handlers** — `PageView`, `assemble`, `HandleIndex`, `HandleMatch`,
-   `HandleSelect`. Depends on beads 6, 7, 8. Owns `handlers.go`.
-   sizing rationale: `assemble` builds the view model; the three `Handle*`
-   functions are thin parse-request / call-`Evaluate` / render wrappers with no
-   shared logic beyond `assemble`.
-10. **main** — `var templates`, `func main()`. Wires the mux. Depends on bead 9.
+10. **handlers** — `PageView`, `assemble`, `HandleIndex`, `HandleMatch`,
+    `HandleSelect`. Depends on beads 7, 8, 9. Owns `handlers.go`.
+    sizing rationale: `assemble` builds the view model; the three `Handle*`
+    functions are thin parse-request / call-`Evaluate` / render wrappers with no
+    shared logic beyond `assemble`.
+11. **main** — `var templates`, `func main()`. Wires the mux. Depends on bead 10.
     Owns `main.go`.
-11. **integration** — one bounded `httptest` scenario (below).
+12. **integration** — one bounded `httptest` scenario (below).
 
 <!-- Bead sizing: the first draft of this list had a single "glob" bead owning
      lexer.go + parser.go + matcher.go (Lex, Parse, Compile, Match). checkdesigndoc
      --checks=bead-size flagged it: 4 owned functions AND named in 3 Cross-Bead
      Contracts (glob->explain, glob->segments, glob->studio). Split into
-     lexer / parser / matcher (beads 1-3), each expr-sized, each with its own
-     Behavioral Specification subsection and its own contract entries. Re-running
-     the check: only bead 9 (handlers) flags now, cleared by the sizing rationale
-     above. -->
+     lexer / parser / matcher, each with its own Behavioral Specification
+     subsection and its own contract entries.
+
+     Second split (after the decomposition-framework validation run, 2026-09-08):
+     the `matcher` bead escalated on a repeated EXECUTE stall — checkdesigndoc
+     --checks=bead-size passed it (2 funcs, fan-in 1, 2 contracts) but its one
+     function `Compile` was doing too much: it had to *invent* the glob->regexp
+     translation (the `**`/`/` adjacency rules are subtle and the spec only gave
+     semantics, not a strategy). Fix: (a) peel character-class translation into a
+     `matcher-classes` bead owning `classToRegex`; (b) rewrite the `Compile`
+     Behavioral Spec as an explicit per-element fragment table incl. the four
+     `**`-with-adjacent-`/` forms, so `Compile` is a transcription, not a
+     derivation. This is the "one function doing too much" blind spot the
+     size×integration lint cannot see. -->
+
+<!-- verified: scratchpad/globref implements exactly this glob->regexp mapping
+     (classToRegex + the four ** forms) and passes 46/46 Match rows + all
+     classToRegex rows. -->
+
+**`matcher-classes` / `matcher` split note:** `classToRegex` is a self-contained
+`string`→`string` function (~4 branches, 9 pinned rows). `Compile` walks
+`Node.Elems` and emits the pinned per-element fragments, wrapping the whole in
+`` `\A`…`\z` ``. Neither sub-bead has to reason about the other's internals.
 
 **Integration bead — one bounded scenario:** stand up `httptest.NewServer` with
 the real mux. Issue `POST /match` with form fields `pattern` = `src/**/*.go` and
@@ -709,11 +834,28 @@ not re-derive or paraphrase):**
   `src/test`, `src/a/test`, `src/a/b/test`, not `src/test/x`. `?at` does not
   match `/at`. `a**b` (not a whole segment) matches `axxb` but not `ax/xb`.
   `**` alone matches `a/b/c` and the empty string. `*` matches `abc` not `a/b`.
-- **Pin — `matcher` bead, character classes:** `[a-c]at` matches `bat`, not
-  `dat`, not `Bat` (`'B'`=66 < `'a'`=97). `[!a-c]at` matches `dat`, not `bat`,
-  and **never** `/at`. `[]abc]` matches `]` and `a` (leading `]` is literal).
-  `[a-]` matches `a` and `-`. `\*.txt` matches the literal `*.txt`, not
-  `a.txt`.
+- **Pin — `matcher` bead, `Compile` → regexp translation (verbatim, do not
+  re-derive):** per element — `TokLiteral` → `regexp.QuoteMeta(text)`; `TokAny`
+  → `[^/]`; `TokStar` → `[^/]*`; `TokClass` → `classToRegex(text)`; `TokSep` →
+  `/` unless the next element is `TokDoubleStar`. A `TokDoubleStar` **with its
+  adjacent `TokSep`(s)** translates as one unit: whole pattern `**` → `.*`;
+  start `**` `/` → `(?:.*/)?`; end `/` `**` → `(?:/.*)?`; interior `/` `**` `/`
+  → `/(?:.*/)?`. Wrap the concatenation as `` `\A` + body + `\z` `` and
+  `regexp.MustCompile`. Exact results: `*.go` → `\A[^/]*\.go\z`; `**/*.go` →
+  `\A(?:.*/)?[^/]*\.go\z`; `src/**` → `\Asrc(?:/.*)?\z`; `src/**/test` →
+  `\Asrc/(?:.*/)?test\z`; `**` → `\A.*\z`.
+- **Pin — `matcher-classes` bead, `classToRegex` (verbatim):** `classToRegex`
+  takes the raw class body (leading `!`/`^` kept). A leading `!` or `^` → the
+  class is negated: drop it, and return `"[^/" + rest + "]"` (a negated class
+  excludes `/` too). Otherwise return `"[" + body + "]"`. If `rest` (after any
+  negation mark) begins with `]`, rewrite that leading `]` as `\]`. Exact:
+  `classToRegex("a-c")` = `[a-c]`; `classToRegex("!a-c")` = `[^/a-c]`;
+  `classToRegex("]abc")` = `[\]abc]`; `classToRegex("a-")` = `[a-]`.
+- **Pin — `matcher` bead, end-to-end class behavior:** `[a-c]at` matches `bat`,
+  not `dat`, not `Bat` (`'B'`=66 < `'a'`=97). `[!a-c]at` matches `dat`, not
+  `bat`, and **never** `/at`. `[]abc]` matches `]` and `a` (leading `]` is
+  literal). `[a-]` matches `a` and `-`. `\*.txt` matches the literal `*.txt`,
+  not `a.txt`.
 - **Pin — `parser` bead, error cases:** `[]` and `[!]` → empty-class error;
   `[z-a]` → reversed-range error; an unterminated `[` and a dangling trailing
   `\` are `Lex` errors that surface before `Parse`. `[]a]`, `[a-]`, `[a-c]`
