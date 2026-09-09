@@ -60,6 +60,17 @@ const (
 	// described three parsers' worth of behavior. Emit a NOTE (not a flag) so
 	// the author lists the helper signatures and the real size becomes visible.
 	beadSizeHiddenComplexityLines = 30
+	// A bead with a small function count but a very long behavioral subsection is
+	// a single hard translator doing too much (cron-studio `field` — 3 chained
+	// parsers, 113 behavioral lines, stalled EXECUTE; the pre-split
+	// grammar.ParseSystem) — a doc-side split candidate even when integration is
+	// low, which is the case hiddenComplexity (integration-hub-gated) misses.
+	// DELIBERATELY conservative: 70 clears every bead that reached COMPLETE in a
+	// baseline (highest non-flagged: lsystem `render` at 48) and catches the
+	// known staller. It is a placeholder to be calibrated against burn-in
+	// flag-vs-outcome data, NOT hand-tuned against the current corpus
+	// (memory/project_burn_in_freeze B3b).
+	beadSizeHeavyBehaviorLines = 70
 )
 
 type beadSizeInfo struct {
@@ -79,6 +90,22 @@ type beadSizeInfo struct {
 func (b beadSizeInfo) hiddenComplexity() bool {
 	return b.integrationHigh() && b.funcCount <= 1 &&
 		b.behavioralLines >= beadSizeHiddenComplexityLines
+}
+
+// heavyBehavioralSpec: few declared functions but a very long behavioral
+// subsection — a single hard translator doing too much (cron-studio `field`,
+// the pre-split grammar.ParseSystem) that stalls EXECUTE. Distinct from
+// hiddenComplexity, which also requires the bead to be an integration hub.
+// Advisory, not a flag.
+func (b beadSizeInfo) heavyBehavioralSpec() bool {
+	return !b.flagged() && !b.sizingRationale && !b.hiddenComplexity() &&
+		b.funcCount >= 1 && b.funcCount <= 3 &&
+		b.behavioralLines >= beadSizeHeavyBehaviorLines
+}
+
+// noted reports whether the bead draws any advisory NOTE.
+func (b beadSizeInfo) noted() bool {
+	return b.hiddenComplexity() || b.heavyBehavioralSpec()
 }
 
 func (b beadSizeInfo) sizeHigh() bool { return b.funcCount >= beadSizeFuncThreshold }
@@ -144,7 +171,7 @@ func reportBeadSize(w *os.File, path, content string) {
 			anyFlag = true
 		} else if b.sizeHigh() && b.integrationHigh() && b.sizingRationale {
 			verdict = "PASS (sizing rationale noted)"
-		} else if b.hiddenComplexity() {
+		} else if b.noted() {
 			verdict = "NOTE"
 			anyNote = true
 		}
@@ -168,14 +195,19 @@ func reportBeadSize(w *os.File, path, content string) {
 			fmt.Fprintf(w, "       under-specified: %d-line behavioral subsection but Data Types lists only\n", b.behavioralLines)
 			fmt.Fprintf(w, "       %d function(s) for this bead. If it needs unexported helpers, list their\n", b.funcCount)
 			fmt.Fprintln(w, "       signatures in Data Types so the real surface area is visible to this check.")
+		case b.heavyBehavioralSpec():
+			fmt.Fprintf(w, "       dense spec: %d declared function(s) but a %d-line behavioral subsection.\n", b.funcCount, b.behavioralLines)
+			fmt.Fprintln(w, "       A single hard translator doing this much (glob->regexp, chained parsers)")
+			fmt.Fprintln(w, "       has stalled EXECUTE before — split it doc-side into named fragments, or add")
+			fmt.Fprintln(w, "       a \"sizing rationale:\" note if it is genuinely irreducible.")
 		}
 	}
 	fmt.Fprintln(w)
 	switch {
 	case anyFlag:
-		fmt.Fprintf(w, "%d bead(s) flagged, %d note(s).\n", countBy(beads, beadSizeInfo.flagged), countBy(beads, beadSizeInfo.hiddenComplexity))
+		fmt.Fprintf(w, "%d bead(s) flagged, %d note(s).\n", countBy(beads, beadSizeInfo.flagged), countBy(beads, beadSizeInfo.noted))
 	case anyNote:
-		fmt.Fprintf(w, "0 beads flagged, %d note(s) — see NOTE lines above.\n", countBy(beads, beadSizeInfo.hiddenComplexity))
+		fmt.Fprintf(w, "0 beads flagged, %d note(s) — see NOTE lines above.\n", countBy(beads, beadSizeInfo.noted))
 	default:
 		fmt.Fprintln(w, "0 beads flagged. Still worth an eyeball — this counts functions and")
 		fmt.Fprintln(w, "dependencies, it does not judge whether one function is doing too much.")

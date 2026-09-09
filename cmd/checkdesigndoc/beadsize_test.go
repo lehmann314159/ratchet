@@ -240,6 +240,42 @@ func TestBeadSize_behavioralHeadingArgTypeNotOwnership(t *testing.T) {
 	}
 }
 
+// TestBeadSize_heavyBehavioralSpecNote (B3b): a bead with a small function
+// count but a very long behavioral subsection draws a NOTE even when it is not
+// an integration hub — the case hiddenComplexity misses.
+func TestBeadSize_heavyBehavioralSpecNote(t *testing.T) {
+	longField := "### `parseField` and friends\n\n" +
+		strings.Repeat("A field-parsing rule with several clauses.\n", 75) + "\n"
+	doc := "## Architecture\n\n```\napp/\n├── field.go  — parseValue, parseAtom, parseField\n└── run.go    — Run\n```\n\n" +
+		"## Data Types and Function Signatures\n\n```go\n" +
+		"// ---- field.go ----\nfunc parseValue(s string) (int, error)\nfunc parseAtom(s string) (uint64, error)\nfunc parseField(s string) (uint64, error)\n" +
+		"// ---- run.go ----\nfunc Run() error\n```\n\n" +
+		"## Behavioral Specification\n\n" + longField +
+		"### `Run`\n\nRuns.\n\n" +
+		"## Cross-Bead Contracts\n\n### field → run (data-shape)\n\nmask flows.\n\n" +
+		"## Decomposition Notes\n\n**Bead dependency order (do not reorder):**\n\n" +
+		"1. **field** — `parseValue`, `parseAtom`, `parseField`. No dependencies. Owns `field.go`.\n" +
+		"2. **run** — `Run`. Depends on bead 1. Owns `run.go`.\n"
+
+	b := parseBeads(t, doc)
+	field := b["field"]
+	if !field.heavyBehavioralSpec() {
+		t.Errorf("field should NOTE: funcs=%d behLines=%d (threshold %d), integrationHigh=%v",
+			field.funcCount, field.behavioralLines, beadSizeHeavyBehaviorLines, field.integrationHigh())
+	}
+	if field.flagged() {
+		t.Errorf("field should not FLAG (only 3 funcs, low integration)")
+	}
+
+	// With a sizing-rationale note the advisory is suppressed.
+	withRationale := strings.Replace(doc,
+		"1. **field** — `parseValue`, `parseAtom`, `parseField`. No dependencies. Owns `field.go`.",
+		"1. **field** — `parseValue`, `parseAtom`, `parseField`. sizing rationale: one cohesive parser chain. No dependencies. Owns `field.go`.", 1)
+	if parseBeads(t, withRationale)["field"].heavyBehavioralSpec() {
+		t.Errorf("a sizing-rationale note must suppress the heavy-behavioral-spec NOTE")
+	}
+}
+
 // TestBeadSize_CorpusGate locks the check's behavior against the real design
 // docs. Every bead that reached COMPLETE in a baseline must PASS; the known
 // oversized/borderline beads must FLAG.
@@ -254,6 +290,11 @@ func TestBeadSize_CorpusGate(t *testing.T) {
 		"lsystem-studio-design-doc.md":  {flag: map[string]bool{"handlers": true}},
 		"exprvm-web-design-doc.md":      {flag: map[string]bool{"handlers+templates": true}},
 		"exprvm-design-doc.md":          {flag: map[string]bool{}},
+		"glob-studio-design-doc.md":     {flag: map[string]bool{}},
+		// cron-studio run 1 stalled EXECUTE on `field` (3 chained parsers, 113
+		// behavioral lines); `schedule` is comparably dense. Both draw the
+		// heavy-behavioral-spec NOTE. If the doc is later split doc-side, update.
+		"cron-studio-design-doc.md": {flag: map[string]bool{}, note: map[string]bool{"field": true, "schedule": true}},
 		"connect-four-v1-design-doc.md": {skip: true},
 		"tictactoe-v1-design-doc.md":    {skip: true},
 		"tasklist-design-doc.md":        {skip: true},
@@ -284,8 +325,9 @@ func TestBeadSize_CorpusGate(t *testing.T) {
 					t.Errorf("bead %q: flagged=%v, want %v (funcs=%d fan-in=%d contracts=%d)",
 						title, gotFlag, w.flag[title], bi.funcCount, len(bi.fanIn), bi.contractCount)
 				}
-				if w.note[title] && !bi.hiddenComplexity() {
-					t.Errorf("bead %q: expected hidden-complexity NOTE", title)
+				if got := bi.noted(); got != w.note[title] {
+					t.Errorf("bead %q: noted=%v, want %v (funcs=%d contracts=%d behLines=%d)",
+						title, got, w.note[title], bi.funcCount, bi.contractCount, bi.behavioralLines)
 				}
 			}
 		})

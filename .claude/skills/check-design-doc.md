@@ -42,10 +42,15 @@ runs before it was split into three `expr`-sized sub-beads). Carry it as NEEDS
 DECISION: either split the bead (own a separate `.go` file per sub-bead, give
 each its own Behavioral Specification subsection + Cross-Bead Contract entries —
 see the run-6 `grammar` split), or add a one-line `sizing rationale:` note to the
-bullet stating why the surface area is safe. A `bead-size` **NOTE** means an
-integrated bead is *under-specified* — the doc declares ≤1 function but its
-behavioral subsection is long; add the unexported helper signatures to
-`## Data Types` so its real size is visible (it may then FLAG).
+bullet stating why the surface area is safe. A `bead-size` **NOTE** is advisory, one of two shapes. *Under-specified*: an
+integrated bead declares ≤1 function but its behavioral subsection is long — add
+the unexported helper signatures to `## Data Types` so its real size is visible
+(it may then FLAG). *Dense spec*: a bead with ≤3 functions whose behavioral
+subsection is very long (≥70 lines) — a single hard translator (glob→regexp,
+chained parsers) that has stalled EXECUTE even at low integration; split it
+doc-side into named fragments or add a `sizing rationale:` note. The 70-line
+threshold is a conservative placeholder pending burn-in calibration — treat a
+borderline NOTE as a prompt to look, not a hard failure.
 
 ### 3. Judgment pass — independent
 
