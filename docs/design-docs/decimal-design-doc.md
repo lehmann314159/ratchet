@@ -431,7 +431,7 @@ Notes pins carry the values into the bead specs.
 
 ## Cross-Bead Contracts
 
-### format ↔ parse (format — round-trip)
+### format -> parse (format — round-trip)
 
 - **type**: format
 - **producer**: `format`
