@@ -607,8 +607,8 @@ cmp 2 2.0            -> 0
   `Div(-7,2, scale 0, half-up)` → `"-4"`; `Div(7,2, scale 0, half-even)` →
   `"4"`; `Div(5,2, scale 0, half-even)` → `"2"`; `Div(1,7, scale 10, half-even)`
   → `"0.1428571429"`; `Div(x, 0, …)` → `ErrDivideByZero`;
-  `Div(10,3, scale 20, half-even)` → `ErrOverflow`. `Div` rounds via `round.go`'s
-  `applyRounding`, not its own copy of the tie rule.
+  `Div(10,3, scale 20, half-even)` → `ErrOverflow`. `Div` rounds by calling the
+  `round` bead's `applyRounding` helper, not its own copy of the tie rule.
 - **Pin — `cli` / `integration` beads, output format (verbatim):** one result
   line per command; the result of a value-returning command is `d.String()`;
   `cmp` prints `"-1"`, `"0"`, or `"1"`; any failure prints `"error: " +
