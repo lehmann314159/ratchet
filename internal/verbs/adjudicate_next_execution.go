@@ -1881,7 +1881,11 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 		if err := json.Unmarshal([]byte(currentFullText), &currentBead); err != nil {
 			return fmt.Errorf("parse current bead spec for exit-criteria gate: %w", err)
 		}
-		if ok, detail := execcheck.VerifyExitCriteria(ctx, h.folderPath, currentBead.ExitCriteria); !ok {
+		// Isolated: some entrypoint beads' criteria are `go build .` / `go build
+		// -o app .`, which drop a binary in the working dir as a side effect. The
+		// gate must not litter the live project folder (n=3) — verify against a
+		// throwaway copy.
+		if ok, detail := execcheck.VerifyExitCriteriaIsolated(ctx, h.folderPath, currentBead.ExitCriteria); !ok {
 			slog.Warn("ADJUDICATE declare_success rejected by mechanical exit-criteria gate",
 				"bead_id", beadID, "detail", detail)
 			if atCap, err := h.atExecutionCap(ctx, tx, job.ProjectID, beadID, now, job.ID); err != nil || atCap {

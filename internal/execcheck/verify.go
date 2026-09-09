@@ -7,7 +7,9 @@ package execcheck
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -27,6 +29,74 @@ import (
 // passing state. Re-running it here removes all such ambiguity: no model
 // narrative involved, matching the "mechanical, not model" philosophy behind
 // forwardFileReferenceChecks and the AUDIT/RECONCILE convergence comparator.
+// VerifyExitCriteriaIsolated runs VerifyExitCriteria against a throwaway copy of
+// folderPath rather than folderPath itself, so a criterion that produces a build
+// artifact as a side effect — `go build .` drops `./<dirname>`, `go build -o app .`
+// drops `./app` — cannot litter the real project folder. Used by the ADJUDICATE
+// declare_success gate: that check is pure verification and must not mutate the
+// tree it inspects (observed n=3: exprvm-web baseline-16, fractalviz-baseline-1,
+// cron-studio run 2 all left a stray multi-MB binary in the live folder).
+//
+// If the copy cannot be made it falls back to an in-place VerifyExitCriteria — a
+// correct verdict matters more than the hygiene this wrapper adds. The top-level
+// traces/ subtree is excluded from the copy (large, and never referenced by an
+// exit criterion).
+func VerifyExitCriteriaIsolated(ctx context.Context, folderPath string, exitCriteria []string) (bool, string) {
+	if len(exitCriteria) == 0 {
+		return true, ""
+	}
+	tmp, err := os.MkdirTemp("", "ratchet-exitcheck-*")
+	if err != nil {
+		return VerifyExitCriteria(ctx, folderPath, exitCriteria)
+	}
+	defer os.RemoveAll(tmp)
+	dst := filepath.Join(tmp, "folder")
+	if err := copyTreeExcludingTop(folderPath, dst, map[string]bool{"traces": true}); err != nil {
+		return VerifyExitCriteria(ctx, folderPath, exitCriteria)
+	}
+	return VerifyExitCriteria(ctx, dst, exitCriteria)
+}
+
+// copyTreeExcludingTop copies the directory tree at src to dst (which must not
+// already exist), skipping any top-level entry whose name is in skipTop. Regular
+// files only — symlinks, devices, and sockets are ignored.
+func copyTreeExcludingTop(src, dst string, skipTop map[string]bool) error {
+	return filepath.WalkDir(src, func(p string, e os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return os.MkdirAll(dst, 0o755)
+		}
+		if skipTop[strings.SplitN(rel, string(filepath.Separator), 2)[0]] {
+			if e.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		target := filepath.Join(dst, rel)
+		if e.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if !e.Type().IsRegular() {
+			return nil
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		info, err := e.Info()
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode().Perm())
+	})
+}
+
 func VerifyExitCriteria(ctx context.Context, folderPath string, exitCriteria []string) (bool, string) {
 	for _, criterion := range exitCriteria {
 		cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
