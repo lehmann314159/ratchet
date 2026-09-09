@@ -65,12 +65,18 @@ orchestrator startup (age-gated dir cleanup only — no process hunt; the group 
 prevents new orphans, a pre-fix orphan is a one-time `pkill`). Tests:
 `TestRunGoSnippet_KillsBlockingProcessGroup`, `TestSweepStaleSnippetDirs`.
 
-### B2. Stray downstream `go build .` binary in the live folder — **hygiene, n=2**
+### B2. Stray `go build .` binary in the live folder — **DONE (`9a4f4d4`, on `main`, not deployed)**
 
-A post-EXECUTE step runs `go build .` (not `./...`) **outside** the sandbox,
-dropping a binary in the project folder that the next bead's compile sees.
-Observed baseline-16 + fractalviz-1. `memory/project_execute_workspace_hygiene`,
-plan `docs/execute-workspace-sandbox-plan.md`. Low-risk mechanical fix. ~0.5 day.
+The ADJUDICATE `declare_success` mechanical gate ran `execcheck.VerifyExitCriteria`
+against the live folder; an entrypoint bead's `go build .` / `go build -o app .`
+criterion drops a multi-MB binary there as a side effect. Observed n=3 (baseline-16,
+fractalviz-1, cron-studio run 2). EXECUTE was already fixed by PR #7's sandbox — this
+gate was the last live-folder execution of exit criteria.
+
+**Fix (shipped):** new `execcheck.VerifyExitCriteriaIsolated` — copies the folder
+(minus `traces/`) to a temp dir, verifies there, discards it; falls back in-place if
+the copy fails. The `declare_success` gate is the one caller.
+`memory/project_execute_workspace_hygiene`.
 
 ### B3. Decomposition-framework v2 follow-ups — **improve burn-in doc authoring + corpus analysability**
 
