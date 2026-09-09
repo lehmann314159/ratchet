@@ -1984,10 +1984,32 @@ func (h *AdjudicateNextExecution) escalateOnRepeatedStall(ctx context.Context, t
 	); err != nil {
 		return true, fmt.Errorf("escalate on repeated stall: %w", err)
 	}
+
+	// Classify the escalation (tag only — the escalation itself is unchanged).
+	// If ADJUDICATE already issued >=2 execute_revised specs (the specificity
+	// ratchet — each writes an ADJUDICATE-authored bead_revision) and the bead
+	// still stalls, the problem is not spec vagueness the next revision could
+	// fix: the bead exceeds the EXECUTE model's ceiling and needs a doc-side
+	// structural split (memory/project_decomposition_framework follow-up 1).
+	// Reads revisions already written; no prediction.
+	var adjRevs int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM bead_revisions WHERE bead_id = ? AND created_by_verb = ?`,
+		beadID, db.VerbAdjudicateNextExecution,
+	).Scan(&adjRevs); err != nil {
+		return true, fmt.Errorf("classify repeated stall: %w", err)
+	}
+	class, reportStatus := "repeated_stall", "escalated"
+	if adjRevs >= 2 {
+		class = "exceeds_execute_ceiling"
+		reportStatus = "escalated — bead exceeds the EXECUTE model's ceiling; recommend a doc-side structural split"
+	}
+
 	slog.Error("ESCALATION — repeated EXECUTE_BEAD stall",
 		"project_id", projectID, "bead_id", beadID,
-		"trailing_stalls", h.trailingStalls, "job_id", jobID)
-	report.WriteBead(ctx, tx, h.folderPath, beadID, "escalated")
+		"trailing_stalls", h.trailingStalls, "adjudicate_revisions", adjRevs,
+		"escalation_class", class, "job_id", jobID)
+	report.WriteBead(ctx, tx, h.folderPath, beadID, reportStatus)
 	return true, nil
 }
 

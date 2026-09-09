@@ -250,10 +250,12 @@ func buildBeadReport(ctx context.Context, tx *sql.Tx, folderPath string, beadID 
 			}
 		}
 	}
-	// Note escalation-at-cap (no adjudication row written in that case).
-	if status == "escalated" {
-		fmt.Fprintf(&b, "### After attempt %d → escalated (attempt cap reached)\n\n", len(execs))
-		b.WriteString("No adjudication written — escalated mechanically at cap.\n\n")
+	// Note a mechanical escalation (repeated stall/timeout, attempt cap, or the
+	// EXECUTE-ceiling classification) — no adjudication row is written in that
+	// case. status carries the classification verbatim.
+	if strings.HasPrefix(status, "escalated") {
+		fmt.Fprintf(&b, "### After attempt %d → %s\n\n", len(execs), status)
+		b.WriteString("Escalated mechanically — see the ESCALATION log line for the classification.\n\n")
 	}
 
 	// Compressed History

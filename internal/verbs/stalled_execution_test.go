@@ -227,6 +227,78 @@ func TestAdjudicateEscalatesOnSecondConsecutiveStall(t *testing.T) {
 	}
 }
 
+// TestAdjudicateClassifiesCeilingEscalation (B3c): when the specificity ratchet
+// has already run (>=2 ADJUDICATE-authored bead_revisions) and the bead stalls
+// again, the escalation is tagged "exceeds the EXECUTE model's ceiling" in the
+// bead report — a self-labelling signal for burn-in triage. Control flow is
+// unchanged (still escalates, no revision, no EXECUTE job).
+func TestAdjudicateClassifiesCeilingEscalation(t *testing.T) {
+	run := func(t *testing.T, adjRevs int) string {
+		d := openTestDB(t)
+		ctx := context.Background()
+		seedProject(t, d, -1, "fixture: ceiling escalation classification")
+		beadID, revID := seedBead(t, d, -1, "B01")
+		zero := 0
+		seedExecution(t, d, -1, beadID, revID, "stalled", &zero)
+		seedExecution(t, d, -1, beadID, revID, "stalled", &zero)
+		for i := 0; i < adjRevs; i++ {
+			if _, err := d.ExecContext(ctx, `
+				INSERT INTO bead_revisions
+				  (project_id, bead_id, revision_number, full_text, execution_budget,
+				   monitor_override, created_by_verb, created_at)
+				VALUES (?, ?, ?, '{"title":"B01"}', 300, 'honor', ?, '2026-01-01T00:00:00Z')`,
+				-1, beadID, 100+i, db.VerbAdjudicateNextExecution); err != nil {
+				t.Fatal(err)
+			}
+		}
+		folder := t.TempDir()
+		job := seedJob(t, d, -1, db.VerbAdjudicateNextExecution, sql.NullInt64{Int64: beadID, Valid: true})
+		out := AdjudicateNextExecutionOutput{
+			Trend: "same", BeadSpecFit: "bead_problem",
+			Reasoning: "stalled again",
+			Decision:  "execute_revised",
+			RevisedBead: &ParsedBead{
+				Title: "B01", FullText: "narrower spec", ExecutionBudget: 300, MonitorOverride: "honor",
+				OutputFiles: []string{"game.go"}, ExitCriteria: []string{"test -f game.go"},
+			},
+		}
+		inTx(t, d, func(tx *sql.Tx) error {
+			return (&AdjudicateNextExecution{trailingStalls: 2, budgetDefault: 300, folderPath: folder}).Commit(ctx, tx, job, out)
+		})
+
+		var status string
+		if err := d.QueryRowContext(ctx, `SELECT status FROM handoff_jobs WHERE id = ?`, job.ID).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != "escalated" {
+			t.Fatalf("job status = %q, want escalated", status)
+		}
+		if n := countRows(t, d, `SELECT COUNT(*) FROM handoff_jobs WHERE verb = ? AND bead_id = ?`, db.VerbExecuteBead, beadID); n != 0 {
+			t.Errorf("no EXECUTE_BEAD job should be enqueued on escalation, got %d", n)
+		}
+		data, err := os.ReadFile(filepath.Join(folder, "traces", "bead-1-report.md"))
+		if err != nil {
+			t.Fatalf("bead report not written: %v", err)
+		}
+		return string(data)
+	}
+
+	t.Run("ratchet ran → ceiling classification", func(t *testing.T) {
+		if got := run(t, 2); !strings.Contains(got, "exceeds the EXECUTE model's ceiling") {
+			t.Errorf("report missing the ceiling classification:\n%s", got)
+		}
+	})
+	t.Run("ratchet did not run → plain escalation", func(t *testing.T) {
+		got := run(t, 0)
+		if strings.Contains(got, "exceeds the EXECUTE model's ceiling") {
+			t.Errorf("report should not claim ceiling with <2 ADJUDICATE revisions:\n%s", got)
+		}
+		if !strings.Contains(got, "escalated") {
+			t.Errorf("report should still record the escalation:\n%s", got)
+		}
+	})
+}
+
 func TestAdjudicateSingleStallRetriesWithoutBudgetDoubling(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
