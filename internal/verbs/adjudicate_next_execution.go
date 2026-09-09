@@ -1000,6 +1000,15 @@ type AdjudicateNextExecution struct {
 	budgetDefault int    // cached from Run for use in Commit
 	folderPath    string // cached from Run for use in Commit
 
+	// designDoc is the whole design doc text, cached from Run so Commit's
+	// execute_revised branch can mechanically re-inject the "## Decomposition
+	// Notes" pin block(s) into the model's rewritten full_text. The model
+	// authors that revision from scratch and routinely drops the verbatim pin
+	// (CONFIRMED n=2 — lsystem runs 3 and 4), which removes the
+	// anti-re-derivation protection exactly when the bead is already failing.
+	// Empty if the doc could not be read (re-injection then no-ops).
+	designDoc string
+
 	// reRefineProbeFailed caches probeReRefineEdit's compile output when the
 	// re_refine fix the model prescribed does not type-check against the real
 	// package (a cross-file conflict no *_test.go edit can resolve). Set in Run
@@ -1113,6 +1122,16 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 	h.folderPath = project.FolderPath
 	h.trailingTimeouts = countTrailingTimeouts(ctx, d, beadID)
 	h.trailingStalls = countTrailingStalls(ctx, d, beadID)
+
+	// Cache the design doc for Commit's execute_revised pin re-injection. A
+	// read failure is non-fatal: re-injection becomes a no-op, matching the
+	// pre-existing behavior where ADJUDICATE ran without the doc at all.
+	if doc, err := loadDesignDoc(ctx, d, job.ProjectID); err != nil {
+		slog.Warn("ADJUDICATE: design doc unavailable, skipping pin re-injection on execute_revised",
+			"project_id", job.ProjectID, "error", err)
+	} else {
+		h.designDoc = doc
+	}
 
 	model, err := loadVerbModel(ctx, d, job.ProjectID, db.VerbAdjudicateNextExecution)
 	if err != nil {
@@ -1655,6 +1674,17 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 				VALUES (?, ?, ?, 'pending', ?, ?)`,
 				job.ProjectID, db.VerbExecuteBead, beadID, now, now)
 			return err
+		}
+
+		// Mechanically re-inject the design doc's Decomposition Notes pin block —
+		// the model rewrites full_text from scratch here and routinely drops the
+		// verbatim pin (CONFIRMED n=2, lsystem runs 3/4), stripping the
+		// anti-re-derivation protection just as the bead is failing. Same sweep
+		// DECOMPOSE/RECONCILE run; idempotent; no-op when nothing is pinned to
+		// this bead or the doc was unavailable.
+		if InjectDesignDocPins(h.designDoc, out.RevisedBead) {
+			slog.Info("ADJUDICATE execute_revised: re-injected design-doc pin block dropped by the model rewrite",
+				"bead_id", beadID, "bead_title", out.RevisedBead.Title)
 		}
 
 		fullText, _ := json.Marshal(out.RevisedBead)

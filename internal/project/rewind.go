@@ -152,11 +152,11 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64, opts RewindOptions)
 		return nil, fmt.Errorf("bead %d has already succeeded", beadID)
 	}
 
-	var projectFolder, projectStatus string
+	var projectFolder, projectStatus, designDocPath string
 	var maxAttempts int
 	if err := d.QueryRowContext(ctx,
-		`SELECT folder_path, status, max_execution_attempts FROM projects WHERE id = ?`, projectID,
-	).Scan(&projectFolder, &projectStatus, &maxAttempts); err != nil {
+		`SELECT folder_path, status, max_execution_attempts, design_doc_path FROM projects WHERE id = ?`, projectID,
+	).Scan(&projectFolder, &projectStatus, &maxAttempts, &designDocPath); err != nil {
 		return nil, fmt.Errorf("query project: %w", err)
 	}
 
@@ -239,6 +239,28 @@ func rewindBead(ctx context.Context, d *db.DB, beadID int64, opts RewindOptions)
 	mergedSpec.FullText = restoreSpec.FullText
 	mergedSpec.ExecutionBudget = currentExecutionBudget
 	mergedSpec.MonitorOverride = currentMonitorOverride
+
+	// Mechanically re-inject the design doc's "## Decomposition Notes" pin block
+	// for this bead. The restored prose is the last pre-ADJUDICATE revision,
+	// which normally still carries the pin DECOMPOSE injected — but this is the
+	// same mechanical guarantee every revision-writing path now makes, and it
+	// self-heals the case where an earlier round dropped it. Operate on the base
+	// prose only: a prior rewind may have appended a Human Guidance Log after
+	// the pin appendix, and injectDecompositionNotesPin normalizes by stripping
+	// from the pin header onward — splitting the log off first keeps it intact
+	// and preserves the body / pin / guidance-log ordering.
+	if designDoc, err := os.ReadFile(filepath.Join(projectFolder, designDocPath)); err != nil {
+		slog.Warn("rewind-bead: design doc unavailable, skipping pin re-injection",
+			"path", filepath.Join(projectFolder, designDocPath), "error", err)
+	} else {
+		base, notes := parseGuidanceLog(mergedSpec.FullText)
+		probe := mergedSpec
+		probe.FullText = base
+		if verbs.InjectDesignDocPins(string(designDoc), &probe) {
+			mergedSpec.FullText = renderGuidanceLog(probe.FullText, notes)
+			slog.Info("rewind-bead: re-injected design-doc pin block into restored prose", "bead_id", beadID)
+		}
+	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
 

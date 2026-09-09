@@ -302,9 +302,41 @@ unpinned values, and (b) the AST node types as having no value-vs-pointer
 statement; ≤ small N false positives on the completed-project docs
 (`tictactoe-v1`, `connect-four-v1`).
 
-### Phase 3 — reconcile the excerpt header with pinned values
+### Phase 3 — pin re-injection on every revision-writing verb + excerpt header
 
-Attacks gap #4.
+**Status: mechanical pin re-injection LANDED 2026-09-08 (branch
+`fix/adjudicate-pin-reinjection`).** The excerpt-header change (below) is still
+open — it is the live-prompt half, gated on a WRITE replay.
+
+What shipped (the mechanical half): a bead's verbatim Decomposition Notes pin
+block was being dropped by the verbs that re-author `full_text` *after*
+decomposition — CONFIRMED n=3 (lsystem runs 3 + 4 bead 2, glob-studio bead 2)
+with one non-deterministic survival (glob-studio bead 3), so a prompt nudge was
+not an option (ADJUDICATE/qwen3.6 reasons past injected notes — lsystem run 3's
+re_refine note). Fix:
+- `verbs.InjectDesignDocPins(designDoc string, bead *ParsedBead) bool` — exported
+  wrapper over the existing `injectDecompositionNotesPin` ∘
+  `extractDecompositionNotesPins` sweep DECOMPOSE/RECONCILE already run;
+  idempotent, no-op when nothing is pinned to the bead.
+- `ADJUDICATE_NEXT_EXECUTION`: caches the design doc in `Run` (`h.designDoc`,
+  non-fatal on read failure) and calls `InjectDesignDocPins` on
+  `out.RevisedBead` in Commit's `execute_revised` branch, just before the
+  revision is marshalled. `test_reject` needs nothing — it prepends guidance to
+  the *current* spec, which already carries the pin. No opt-out: on
+  `execute_revised` the tests are LOCKED and the pin asserts the same behavior;
+  a genuinely bad pin routes through `re_refine`.
+- `REWIND_BEAD` (`internal/project/rewind.go`): re-injects into the restored
+  pre-ADJUDICATE prose, operating on the guidance-log-stripped base so a prior
+  rewind's Human Guidance Log stays intact and correctly ordered (body / pin /
+  log).
+- Regression tests: `TestAdjudicateExecuteRevisedReinjectsDroppedPin`
+  (`internal/verbs`), `TestRewindBead_ReinjectsDesignDocPin` (`internal/project`).
+  Verified against the real lsystem-4 corpus (bead 2 rev 3: 0 → 3 grammar pins
+  restored, one canonical appendix).
+
+---
+
+Excerpt-header change (still open) — attacks gap #4.
 
 - When a bead's excerpt contains a `- **Pin` appendix with an exact literal, the
   header for that bead should state the pinned literal is **mandatory to

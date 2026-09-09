@@ -1278,6 +1278,25 @@ func injectDecompositionNotesPin(bead *ParsedBead, pins map[string]string) bool 
 	return true
 }
 
+// InjectDesignDocPins re-appends the design doc's "## Decomposition Notes" pin
+// block(s) for this one bead to bead.FullText — the same mechanical sweep
+// DECOMPOSE_SPEC and RECONCILE_DECOMPOSITION run at decomposition time, exposed
+// for the paths that re-author an existing bead's full_text later in its life:
+// ADJUDICATE_NEXT_EXECUTION's execute_revised revisions (the model rewrites
+// full_text from scratch and routinely drops the verbatim pin — CONFIRMED n=2,
+// lsystem runs 3 and 4) and REWIND_BEAD (internal/project). It is idempotent
+// (normalizes to exactly one canonical appendix) and a no-op when the doc pins
+// nothing to this bead's title or designDoc is empty. Returns whether FullText
+// changed.
+//
+// There is deliberately no opt-out: on execute_revised the test files are
+// LOCKED and assumed correct, and a pin describes the same behavior those tests
+// assert — a genuinely bad pin is REFINE_TESTS' problem, routed through
+// re_refine, not something execute_revised should be silently editing away.
+func InjectDesignDocPins(designDoc string, bead *ParsedBead) bool {
+	return injectDecompositionNotesPin(bead, extractDecompositionNotesPins(designDoc))
+}
+
 // --- exit-criteria ↔ prose ↔ output_files consistency (audit 2026-08-30) ---
 //
 // applyMechanicalBeadFixes repairs the syntactically-broken subset of these

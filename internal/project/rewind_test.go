@@ -923,6 +923,99 @@ func TestRewindBead_SupersedesUnknownNoteErrorsBeforeAnyDestruction(t *testing.T
 	}
 }
 
+// TestRewindBead_ReinjectsDesignDocPin verifies rewind mechanically re-appends
+// the design doc's Decomposition Notes pin block for the bead — the same
+// guarantee every revision-writing path now makes
+// (memory/project_decompose_precision Phase 3). Sets up a bead whose
+// pre-ADJUDICATE revision has LOST the pin (the gap-#1 non-deterministic drop),
+// with a real design.md that pins a value, plus a human guidance note on the
+// restored prose, and checks the merged post-rewind spec ends up with the pin
+// AND keeps the guidance log intact and correctly ordered (body / pin / log).
+func TestRewindBead_ReinjectsDesignDocPin(t *testing.T) {
+	d := openTestDB(t)
+	folder := t.TempDir()
+	seedRewindProject(t, d, 1, folder)
+	ctx := context.Background()
+
+	const designDoc = "# L-system studio\n\n## Decomposition Notes\n\n" +
+		"- **Pin — `grammar` bead, module-sequence length:** `F[+]` emits 4 modules " +
+		"(`F`, `[`, `+`, `]` — brackets are always standalone one-element modules).\n"
+	if err := os.WriteFile(filepath.Join(folder, "design.md"), []byte(designDoc), 0644); err != nil {
+		t.Fatalf("write design.md: %v", err)
+	}
+
+	res, err := d.ExecContext(ctx, `INSERT INTO beads (project_id, status) VALUES (1, 'pending')`)
+	if err != nil {
+		t.Fatalf("seed bead: %v", err)
+	}
+	beadID, _ := res.LastInsertId()
+
+	// rev1 (DECOMPOSE) — the pin was dropped here, never injected.
+	rev1 := verbs.ParsedBead{
+		Title: "grammar", FullText: "Implement ParseSystem and the module grammar.",
+		ExecutionBudget: 300, MonitorOverride: "honor",
+		OutputFiles: []string{"game.go", "game_test.go"}, ExitCriteria: []string{"go test ./..."},
+	}
+	if _, err := d.ExecContext(ctx, `
+		INSERT INTO bead_revisions
+		  (project_id, bead_id, revision_number, full_text, execution_budget,
+		   monitor_override, created_by_verb, created_at)
+		VALUES (1, ?, 1, ?, 300, 'honor', 'DECOMPOSE_SPEC', '2026-01-01T00:00:00Z')`,
+		beadID, mustMarshal(t, rev1)); err != nil {
+		t.Fatalf("seed revision 1: %v", err)
+	}
+	// rev2 (ADJUDICATE) — a reactive patch; current revision.
+	rev2 := rev1
+	rev2.FullText = rev1.FullText + " RECURRING FAILURE FIX: implement the tokenizer verbatim as ..."
+	res2, err := d.ExecContext(ctx, `
+		INSERT INTO bead_revisions
+		  (project_id, bead_id, revision_number, full_text, execution_budget,
+		   monitor_override, created_by_verb, created_at)
+		VALUES (1, ?, 2, ?, 300, 'honor', 'ADJUDICATE_NEXT_EXECUTION', '2026-01-01T02:00:00Z')`,
+		beadID, mustMarshal(t, rev2))
+	if err != nil {
+		t.Fatalf("seed revision 2: %v", err)
+	}
+	rev2ID, _ := res2.LastInsertId()
+	if _, err := d.ExecContext(ctx, `UPDATE beads SET current_revision_id = ? WHERE id = ?`, rev2ID, beadID); err != nil {
+		t.Fatalf("point bead at revision 2: %v", err)
+	}
+
+	if _, err := rewindBead(ctx, d, beadID, RewindOptions{Note: "Walk every pinned module count before writing."}); err != nil {
+		t.Fatalf("rewindBead: %v", err)
+	}
+
+	var newFullText string
+	if err := d.QueryRowContext(ctx, `
+		SELECT br.full_text FROM beads b
+		JOIN bead_revisions br ON br.id = b.current_revision_id
+		WHERE b.id = ?`, beadID).Scan(&newFullText); err != nil {
+		t.Fatalf("query post-rewind revision: %v", err)
+	}
+	var merged verbs.ParsedBead
+	if err := json.Unmarshal([]byte(newFullText), &merged); err != nil {
+		t.Fatalf("parse merged spec: %v", err)
+	}
+	if !strings.Contains(merged.FullText, "`F[+]` emits 4 modules") {
+		t.Errorf("merged full_text is missing the re-injected pin:\n%s", merged.FullText)
+	}
+	if !strings.Contains(merged.FullText, "## Human Guidance Log") ||
+		!strings.Contains(merged.FullText, "Walk every pinned module count") {
+		t.Errorf("merged full_text lost the guidance log:\n%s", merged.FullText)
+	}
+	// Ordering: base prose, then the pin appendix, then the guidance log.
+	iBase := strings.Index(merged.FullText, "Implement ParseSystem")
+	iPin := strings.Index(merged.FullText, "emits 4 modules")
+	iLog := strings.Index(merged.FullText, "## Human Guidance Log")
+	if !(iBase < iPin && iPin < iLog) {
+		t.Errorf("bad section ordering (base=%d pin=%d log=%d):\n%s", iBase, iPin, iLog, merged.FullText)
+	}
+	// The ADJUDICATE reactive patch is still discarded.
+	if strings.Contains(merged.FullText, "RECURRING FAILURE FIX") {
+		t.Error("ADJUDICATE's reactive patch survived rewind")
+	}
+}
+
 // TestRewindBead_AlreadySucceededErrors verifies rewind refuses to touch a
 // bead that already succeeded.
 func TestRewindBead_AlreadySucceededErrors(t *testing.T) {

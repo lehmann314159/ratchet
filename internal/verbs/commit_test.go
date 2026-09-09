@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"ratchet/internal/db"
@@ -652,6 +653,94 @@ func TestAdjudicateNextExecutionCommitExecuteRevised(t *testing.T) {
 	}
 	if n := countRows(t, d, `SELECT COUNT(*) FROM handoff_jobs WHERE verb = ? AND bead_id = ?`, db.VerbExecuteBead, beadID); n != 1 {
 		t.Errorf("EXECUTE_BEAD jobs = %d, want 1", n)
+	}
+}
+
+// TestAdjudicateExecuteRevisedReinjectsDroppedPin: ADJUDICATE's execute_revised
+// rewrites full_text from scratch and the model routinely drops the design doc's
+// verbatim Decomposition Notes pin block (CONFIRMED n=2 — lsystem runs 3/4,
+// memory/project_decompose_precision Phase 3). Commit must mechanically
+// re-inject it — the same sweep DECOMPOSE/RECONCILE run — so the revised spec
+// still carries the pinned value the locked tests assert.
+func TestAdjudicateExecuteRevisedReinjectsDroppedPin(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedProject(t, d, -1, "fixture: ADJUDICATE execute_revised re-injects a dropped pin")
+	beadID, revID := seedBead(t, d, -1, "grammar")
+	zero := 0
+	seedExecution(t, d, -1, beadID, revID, "stalled", &zero)
+
+	const designDoc = "## Decomposition Notes\n\n" +
+		"- **Pin — `grammar` bead, module-sequence length:** `F[+]` emits 4 modules " +
+		"(`F`, `[`, `+`, `]` — brackets are always standalone one-element modules).\n"
+
+	job := seedJob(t, d, -1, db.VerbAdjudicateNextExecution, sql.NullInt64{Int64: beadID, Valid: true})
+	h := &AdjudicateNextExecution{
+		budgetDefault: 300,
+		folderPath:    t.TempDir(),
+		designDoc:     designDoc,
+		currentBeadSpec: ParsedBead{
+			Title: "grammar", FullText: "spec for grammar",
+			OutputFiles: []string{"grammar.go"}, ExitCriteria: []string{"go test ./..."},
+		},
+	}
+	out := AdjudicateNextExecutionOutput{
+		Trend: "same", BeadSpecFit: "execution_capability_problem",
+		Reasoning: "narrowed the spec; the runner kept stalling on the full parser",
+		Decision:  "execute_revised",
+		RevisedBead: &ParsedBead{
+			// The model's rewrite: no trace of the pin block.
+			Title: "grammar", FullText: "Revised: implement ParseSystem incrementally, emit a minimal file first.",
+			OutputFiles: []string{"grammar.go"}, ExitCriteria: []string{"go test ./..."},
+			ExecutionBudget: 300, MonitorOverride: "honor",
+		},
+	}
+	inTx(t, d, func(tx *sql.Tx) error { return h.Commit(ctx, tx, job, out) })
+
+	var fullText string
+	if err := d.QueryRowContext(ctx, `
+		SELECT br.full_text FROM beads b
+		JOIN bead_revisions br ON br.id = b.current_revision_id
+		WHERE b.id = ?`, beadID).Scan(&fullText); err != nil {
+		t.Fatalf("load revised revision: %v", err)
+	}
+	var revised ParsedBead
+	if err := json.Unmarshal([]byte(fullText), &revised); err != nil {
+		t.Fatalf("unmarshal revised bead: %v", err)
+	}
+	if !strings.Contains(revised.FullText, pinAppendixHeader) {
+		t.Errorf("revised full_text is missing the pin appendix header:\n%s", revised.FullText)
+	}
+	if !strings.Contains(revised.FullText, "`F[+]` emits 4 modules") {
+		t.Errorf("revised full_text is missing the pinned value:\n%s", revised.FullText)
+	}
+	// The model's own revision text must be preserved too.
+	if !strings.Contains(revised.FullText, "implement ParseSystem incrementally") {
+		t.Errorf("re-injection clobbered the model's revised spec:\n%s", revised.FullText)
+	}
+
+	// Idempotent: a second execute_revised whose spec already carries the
+	// canonical appendix must not duplicate it.
+	beadID2, revID2 := seedBead(t, d, -1, "grammar")
+	seedExecution(t, d, -1, beadID2, revID2, "stalled", &zero)
+	job2 := seedJob(t, d, -1, db.VerbAdjudicateNextExecution, sql.NullInt64{Int64: beadID2, Valid: true})
+	h.currentBeadSpec.Title = "grammar"
+	out2 := out
+	rb := *out.RevisedBead
+	rb.FullText = revised.FullText // already has the appendix
+	out2.RevisedBead = &rb
+	inTx(t, d, func(tx *sql.Tx) error { return h.Commit(ctx, tx, job2, out2) })
+	var ft2 string
+	if err := d.QueryRowContext(ctx, `
+		SELECT br.full_text FROM beads b
+		JOIN bead_revisions br ON br.id = b.current_revision_id
+		WHERE b.id = ?`, beadID2).Scan(&ft2); err != nil {
+		t.Fatalf("load second revised revision: %v", err)
+	}
+	var revised2 ParsedBead
+	_ = json.Unmarshal([]byte(ft2), &revised2)
+	if n := strings.Count(revised2.FullText, pinAppendixHeader); n != 1 {
+		t.Errorf("pin appendix header count = %d, want 1 (idempotent):\n%s", n, revised2.FullText)
 	}
 }
 
