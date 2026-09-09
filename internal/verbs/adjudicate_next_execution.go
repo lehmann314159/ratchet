@@ -1041,6 +1041,15 @@ type AdjudicateNextExecution struct {
 	// new required test function (which is re_refine's job, not execute_revised's).
 	currentBeadSpec ParsedBead
 
+	// siblingSymbolOwners maps every Go symbol declared in another bead's
+	// on-disk scaffold files to a "title (file.go)" label, cached from Run.
+	// Commit's execute_revised path rejects a revised full_text that re-declares
+	// one of these (cron-studio run 1: the rewrite pulled `type Schedule` +
+	// `func Parse` from a sibling bead into the `field` spec, forcing a
+	// duplicate-definition compile error against the scaffold). See
+	// cross_bead_symbols.go.
+	siblingSymbolOwners map[string]string
+
 	// trailingTimeouts caches, from Run, how many of the most recent
 	// consecutive in-lineage executions ended termination_cause='timeout'.
 	// Post-decouple (docs/execute-checkpoint-decouple-plan.md) EXECUTE_BEAD
@@ -1120,6 +1129,7 @@ func (h *AdjudicateNextExecution) Run(ctx context.Context, d *db.DB, oc *ollama.
 	}
 	h.budgetDefault = project.ExecutionBudgetDefault
 	h.folderPath = project.FolderPath
+	h.siblingSymbolOwners = buildSiblingSymbolOwners(h.folderPath, beads, *currentBead)
 	h.trailingTimeouts = countTrailingTimeouts(ctx, d, beadID)
 	h.trailingStalls = countTrailingStalls(ctx, d, beadID)
 
@@ -1655,16 +1665,25 @@ func (h *AdjudicateNextExecution) Commit(ctx context.Context, tx *sql.Tx, job *d
 		lang := detectLang(h.folderPath, out.RevisedBead.OutputFiles)
 		applyMechanicalBeadFixes(lang, out.RevisedBead)
 
-		// Source-side gate: don't commit a revised spec that is internally
+		// Source-side gates: don't commit a revised spec that is internally
 		// inconsistent (an orphan -run name, a grep guard for a file the bead
-		// doesn't own) or that invents a new required test function — inventing
-		// a test function is re_refine's job, not execute_revised's. On a
-		// violation, downgrade to execute_as_is: retry the bead against its
-		// current, unmodified spec rather than a broken revision.
-		if v := beadConsistencyViolations(lang, []ParsedBead{*out.RevisedBead},
-			map[string]ParsedBead{h.currentBeadSpec.Title: h.currentBeadSpec}); len(v) > 0 {
-			slog.Warn("ADJUDICATE execute_revised downgraded to execute_as_is — revised spec failed consistency checks",
-				"bead_id", beadID, "violations", v)
+		// doesn't own), that invents a new required test function (inventing a
+		// test function is re_refine's job, not execute_revised's), or that
+		// re-declares a symbol owned by another bead. The last one has been
+		// observed live (cron-studio run 1: the rewrite pulled `type Schedule` +
+		// `func Parse` from a sibling bead into the `field` spec), producing a
+		// spec that can only compile-error against the scaffold stub — EXECUTE
+		// then stalls and the fallout is misread as an execution capability
+		// problem. On any violation, downgrade to execute_as_is: retry the bead
+		// against its current, unmodified spec rather than a broken revision.
+		var revisedViolations []string
+		revisedViolations = append(revisedViolations, beadConsistencyViolations(lang, []ParsedBead{*out.RevisedBead},
+			map[string]ParsedBead{h.currentBeadSpec.Title: h.currentBeadSpec})...)
+		revisedViolations = append(revisedViolations,
+			crossBeadSymbolContamination(*out.RevisedBead, h.siblingSymbolOwners)...)
+		if len(revisedViolations) > 0 {
+			slog.Warn("ADJUDICATE execute_revised downgraded to execute_as_is — revised spec failed a source-side gate",
+				"bead_id", beadID, "violations", revisedViolations)
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE beads SET status = 'pending' WHERE id = ?`, beadID); err != nil {
 				return fmt.Errorf("reset bead to pending: %w", err)

@@ -1,0 +1,64 @@
+Implement the cron field parsing logic in `field.go`. 
+
+Define the following types and variables:
+- `type Schedule struct { Minute, Hour, DayOfMonth, Month, DayOfWeek uint64; DomRestricted, DowRestricted bool }`
+- `var monthNames map[string]int` (initialized: jan=1, feb=2, ..., dec=12)
+- `var weekdayNames map[string]int` (initialized: sun=0, mon=1, ..., sat=6)
+
+Implement the following functions:
+
+1. `func parseValue(token string, min, max int, names map[string]int) (int, error)`
+   - Parses a single value or name. Returns error if out of range or unknown name.
+
+2. `func parseAtom(atom string, min, max int, names map[string]int) (uint64, error)`
+   - Handles `*`, `*/S`, `N/S`, `A-B`, and comma-separated lists within an atom.
+   - `*/S` steps from field minimum.
+   - `N/S` starts at N, steps by S, up to max.
+   - `A-B` is inclusive. Descending range (A > B) is an error.
+   - Step 0 is an error.
+   - Names are looked up in `names` if provided.
+
+3. `func parseField(spec string, min, max int, names map[string]int) (uint64, error)`
+   - Splits `spec` by comma. Calls `parseAtom` for each part.
+   - ORs the results into a uint64 mask.
+   - For day-of-week (`max == 7`), folds bit 7 into bit 0 and clears bit 7.
+
+4. `func Parse(expr string) (Schedule, error)`
+   - Handles macros: `@yearly`/`@annually`, `@monthly`, `@weekly`, `@daily`/`@midnight`, `@hourly`. Expand to standard cron strings.
+   - Splits by space. Must have exactly 5 fields.
+   - Calls `parseField` for each field in order: minute (0-59, nil), hour (0-23, nil), day-of-month (1-31, nil), month (1-12, monthNames), day-of-week (0-7, weekdayNames).
+   - Sets `DomRestricted = true` if the raw day-of-month field text is not `"*"`.
+   - Sets `DowRestricted = true` if the raw day-of-week field text is not `"*"`.
+   - Returns error prefixed with `<field>: ` (e.g., `minute:`, `hour:`) for field errors.
+
+Pin — `parseField` masks: as sorted value lists — minute "*/15" → [0, 15, 30, 45] (NOT [15, 30, 45]); minute "5/15" → [5, 20, 35, 50]; minute "10-30/5" → [10, 15, 20, 25, 30] (30 included); hour "*/6" → [0, 6, 12, 18]; hour "9-17" → [9, 10, 11, 12, 13, 14, 15, 16, 17]; day-of-week "1-5" and "mon-fri" and "MON-FRI" → [1, 2, 3, 4, 5]; day-of-week "mon-fri/2" → [1, 3, 5]; day-of-week "7" and "sun" and "0,7" → [0]; month "jan,jun,dec" → [1, 6, 12]; month "*/3" → [1, 4, 7, 10].
+
+Pin — atom rule shapes: `*/S` steps from the field minimum (minute `*/15` starts at 0). `N/S` means `N` through the field maximum stepping by `S` (minute `5/15` → 5, 20, 35, 50). `A-B` is inclusive of `B`. A descending range (`5-1`, `fri-mon`, `sat-sun`) is an error, not a wrap. Step `0` is an error.
+
+Pin — day-of-week 7→0 fold and error bounds: `parseField` with `max == 7` folds bit 7 into bit 0 and clears bit 7, so results only ever have bits 0–6. Day-of-week `8` is out of range `[0,7]` and is an error; day-of-week `7` is valid (Sunday). A month/weekday name in a field with no name table (minute/hour/day-of-month) is a "not a number or known name" error ("jan * * * *" fails on the minute field). Quartz `?` is not a valid atom. Field errors from `Parse` are prefixed `<field>: ` (`minute:`, …, `day-of-week:`); error-case tests assert a substring — the prefix plus the core phrase (`out of range`, `descending`, `not a number or known name`, `step`) — not the whole string.
+
+Ensure `monthNames` and `weekdayNames` are initialized correctly.
+
+Design doc Decomposition Notes pin for this bead (verbatim, must be followed exactly, not re-derived or paraphrased):
+- **Pin — `field` bead, `parseField` masks:** as sorted value lists — minute `"*/15"` →
+  `[0, 15, 30, 45]` (NOT `[15, 30, 45]`); minute `"5/15"` → `[5, 20, 35, 50]`; minute
+  `"10-30/5"` → `[10, 15, 20, 25, 30]` (30 included); hour `"*/6"` → `[0, 6, 12, 18]`;
+  hour `"9-17"` → `[9, 10, 11, 12, 13, 14, 15, 16, 17]`; day-of-week `"1-5"` and
+  `"mon-fri"` and `"MON-FRI"` → `[1, 2, 3, 4, 5]`; day-of-week `"mon-fri/2"` →
+  `[1, 3, 5]`; day-of-week `"7"` and `"sun"` and `"0,7"` → `[0]`; month `"jan,jun,dec"` →
+  `[1, 6, 12]`; month `"*/3"` → `[1, 4, 7, 10]`.
+
+- **Pin — `field` bead, atom rule shapes:** `*/S` steps from the field **minimum**
+  (minute `*/15` starts at 0). `N/S` means `N` through the field **maximum** stepping by
+  `S` (minute `5/15` → 5, 20, 35, 50). `A-B` is inclusive of `B`. A descending range
+  (`5-1`, `fri-mon`, `sat-sun`) is an **error**, not a wrap. Step `0` is an error.
+
+- **Pin — `field` bead, day-of-week 7→0 fold and error bounds:** `parseField` with
+  `max == 7` folds bit 7 into bit 0 and clears bit 7, so results only ever have bits
+  0–6. Day-of-week `8` is out of range `[0,7]` and is an error; day-of-week `7` is valid
+  (Sunday). A month/weekday name in a field with no name table (minute/hour/day-of-month)
+  is a "not a number or known name" error (`"jan * * * *"` fails on the minute field).
+  Quartz `?` is not a valid atom. Field errors from `Parse` are prefixed `<field>: `
+  (`minute:`, …, `day-of-week:`); error-case tests assert a substring — the prefix plus
+  the core phrase (`out of range`, `descending`, `not a number or known name`, `step`) —
+  not the whole string.
