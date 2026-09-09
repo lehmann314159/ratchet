@@ -77,7 +77,10 @@ lsystem/
 ├── main.go               — var templates *template.Template; func main() only
 ├── expr.go               — Token, TokenKind + constants, Lex, Expr + node types,
 │                            ParseExpr, EvalExpr
-├── grammar.go            — Module, BodyModule, Rule, System, ParseSystem
+├── grammar_modules.go    — Module, BodyModule, Rule, System (shared types),
+│                            parseModuleSequence, parseBodyModuleSequence
+├── grammar_rules.go      — parseRule
+├── grammar_system.go     — ParseSystem
 ├── rewrite.go            — MaxModules constant, Derive
 ├── turtle.go             — Segment, Interpret
 ├── render.go             — CanvasSize, Margin constants, Box, BBox, RenderSVG
@@ -99,13 +102,25 @@ scaffolding step — do not list them as SURVEY outputs.
 - `expr.go` contains: `Token`, `TokenKind` and its constants, `Lex`, the `Expr` interface
   and its node types (`NumLit`, `Ref`, `Neg`, `BinOp`), `ParseExpr`, `EvalExpr`. No
   L-system concepts (no `Module`, no `Rule`), no turtle, no HTTP.
-- `grammar.go` contains: `Module`, `BodyModule`, `Rule`, `System`, `ParseSystem`. It
-  **uses** `Lex`, `ParseExpr`, `EvalExpr`, and the `Expr` type from `expr.go` (same
-  package — no import). It does **not** define token or expression types.
+- `grammar_modules.go` contains: the four shared types `Module`, `BodyModule`, `Rule`,
+  `System` (`BodyModule.Args` is `[]Expr`, the `Expr` type from `expr.go`, same package —
+  no import), plus the unexported functions `parseModuleSequence` and
+  `parseBodyModuleSequence`. It **uses** `Lex`, `ParseExpr`, `EvalExpr`, `Expr` from
+  `expr.go`. It does **not** define token or expression types, and does **not** parse rule
+  lines, settings, or the document structure — only a single module-sequence string.
+- `grammar_rules.go` contains: `parseRule` (unexported). It **uses** `parseBodyModuleSequence`
+  and the shared types from `grammar_modules.go` — same package, no import — to parse a
+  rule body; it does **not** re-implement the module-sequence scan. No document-level
+  parsing.
+- `grammar_system.go` contains: `ParseSystem` (the one exported grammar entry point). It
+  **uses** `parseModuleSequence` (for the `axiom:` line) and `parseRule` (for rule lines).
+  It owns line splitting, comment/blank skipping, `key: value` settings, defaults, the
+  missing-axiom check, and the `[0, 12]` iteration clamp — nothing about the internal
+  structure of a module sequence or a rule.
 - `rewrite.go` contains: `MaxModules`, `Derive`. It uses `System`, `Rule`, `BodyModule`,
-  `Module` (from `grammar.go`) and `EvalExpr` (from `expr.go`). No parsing, no turtle.
-- `turtle.go` contains: `Segment`, `Interpret`. It uses `Module` (from `grammar.go`). No
-  parsing, no rewriting, no SVG, no `Box`/`BBox`.
+  `Module` (from `grammar_modules.go`) and `EvalExpr` (from `expr.go`). No parsing, no turtle.
+- `turtle.go` contains: `Segment`, `Interpret`. It uses `Module` (from
+  `grammar_modules.go`). No parsing, no rewriting, no SVG, no `Box`/`BBox`.
 - `render.go` contains: `CanvasSize`, `Margin`, `Box`, `BBox`, `RenderSVG`. It uses
   `Segment` (from `turtle.go`). It does **not** contain `Interpret` and does **not** call
   the turtle — it only consumes `[]Segment`.
@@ -119,8 +134,11 @@ scaffolding step — do not list them as SURVEY outputs.
   `const DefaultIterations`, `assemble`, `HandleIndex`, `HandleRender`, `HandleSelect`,
   `HandleSave`. No template parsing, no re-implementation of `Studio`/`Derive`/`Interpret`.
 - Do NOT put `Interpret` in `render.go` or `RenderSVG` in `turtle.go`.
-- Do NOT put `Module`/`Rule`/`System` in `expr.go` — they belong in `grammar.go`.
-- Do NOT put `Token`/`Expr` in `grammar.go` — they belong in `expr.go`.
+- Do NOT put `Module`/`Rule`/`System` in `expr.go` — they belong in `grammar_modules.go`.
+- Do NOT put `Token`/`Expr` in `grammar_modules.go` — they belong in `expr.go`.
+- Do NOT merge `grammar_modules.go` / `grammar_rules.go` / `grammar_system.go` back into one
+  file, and do NOT move a function between them. `parseRule` lives in `grammar_rules.go`
+  even though `ParseSystem` calls it. There is no `grammar.go`.
 - Do NOT put `PageView` or `Preset` in `templates.go` — they belong in `handlers.go`.
 - Do NOT put any `Handle*` function in `templates.go` or `studio.go`.
 - Do NOT put `var templates` anywhere except `main.go`.
@@ -189,7 +207,7 @@ func ParseExpr(toks []Token, pos int) (expr Expr, next int, err error)
 // exactly 0 is an error ("division by zero").
 func EvalExpr(e Expr, env map[string]float64) (float64, error)
 
-// ---- grammar.go ----
+// ---- grammar_modules.go ----  (bead: grammar-modules — shared types + module-sequence parsing)
 
 // Module is a concrete module in a derived string: a one-byte symbol plus its evaluated
 // numeric arguments. The bracket tokens are Module{Sym: '['} and Module{Sym: ']'} with
@@ -222,9 +240,43 @@ type System struct {
     Rules      []Rule
 }
 
+// parseBodyModuleSequence parses one module-sequence string — a rule body, or the raw
+// text after "axiom:" — into a FLAT []BodyModule. It is a single left-to-right scan (see
+// the Behavioral Specification, "Module sequences"). '[' and ']' each become their own
+// BodyModule{Sym: '[' | ']'} with no args; they are never merged, nested, or matched
+// here. A module symbol immediately followed by '(' takes the text up to the matching
+// ')' as its argument list, which is split on top-level commas and each part parsed with
+// Lex + ParseExpr into an Expr — the argument expressions are NOT evaluated. Returns a
+// plain error (no line number — the caller prefixes one) on any malformed module,
+// unbalanced '(', trailing/double comma, or stray character.
+func parseBodyModuleSequence(src string) ([]BodyModule, error)
+
+// parseModuleSequence parses a module-sequence string whose arguments must all be
+// constants: it calls parseBodyModuleSequence, then EvalExpr(arg, map[string]float64{})
+// for every argument expression, producing a concrete []Module. An argument that
+// references a parameter — or otherwise fails under the empty environment — is an error.
+// This is the axiom form.
+func parseModuleSequence(src string) ([]Module, error)
+
+// ---- grammar_rules.go ----  (bead: grammar-rules)
+
+// parseRule parses one production line (already TrimSpace'd, known to contain "->") into
+// a Rule. lineNum is the 1-based source line; parseRule prefixes it onto every error it
+// returns, including errors bubbled up from parseBodyModuleSequence for the body. It
+// splits on the FIRST "->". In the head part, the substring before the first '(' (or all
+// of it when there is no '(') must be exactly one ASCII letter; an optional
+// "(name, name, …)" after that letter — still before "->" — is the formal parameter
+// list (Rule.Params, in order; arity == len(Params)). Parameters are never read from the
+// body. The body is parsed with parseBodyModuleSequence. See the Behavioral
+// Specification, "Rule lines".
+func parseRule(line string, lineNum int) (Rule, error)
+
+// ---- grammar_system.go ----  (bead: grammar-system)
+
 // ParseSystem parses a whole source document: blank lines and lines beginning with '#'
-// are ignored; a line containing "->" is a production rule; any other non-blank line
-// must be "key: value" for key in {angle, step, heading, iterations, axiom}. axiom is
+// are ignored; a line containing "->" is a production rule (delegated to parseRule); any
+// other non-blank line must be "key: value" for key in {angle, step, heading,
+// iterations, axiom}. The axiom value is parsed with parseModuleSequence. axiom is
 // required. Returns an error (with a 1-based line number) on any malformed line, an
 // unknown key, a missing axiom, or an axiom argument that is not a constant expression.
 // Iterations is clamped to [0, 12] before returning.
@@ -353,6 +405,9 @@ var _ TokenKind = TokNum
 var _ func(string) ([]Token, error) = Lex
 var _ func([]Token, int) (Expr, int, error) = ParseExpr
 var _ func(Expr, map[string]float64) (float64, error) = EvalExpr
+var _ func(string) ([]BodyModule, error) = parseBodyModuleSequence
+var _ func(string) ([]Module, error) = parseModuleSequence
+var _ func(string, int) (Rule, error) = parseRule
 var _ func(string) (System, error) = ParseSystem
 var _ func(System, int) ([]Module, error) = Derive
 var _ func([]Module, float64, float64, float64) ([]Segment, error) = Interpret
@@ -415,50 +470,80 @@ The most natural wrong implementations:
 - **Consuming trailing tokens** — after parsing one argument, `ParseExpr` must stop at the
   comma, not error on it.
 
-### `ParseSystem(src string) (System, error)`
+The grammar stage is three sub-beads, dependency order `grammar-modules` →
+`grammar-rules` → `grammar-system`. `grammar-modules` and `grammar-rules` implement
+unexported helpers in their own files; `grammar-system` implements the one exported
+entry point `ParseSystem` and does no low-level scanning itself.
 
-Split `src` on `"\n"`. For each line, `strings.TrimSpace` it, then:
-1. Empty, or starts with `#` → skip.
-2. Contains `"->"` → a **rule** (below).
-3. Otherwise it must contain `":"`. The key is everything before the first `:`
-   (trimmed), the value everything after (trimmed). Keys:
-   - `angle`, `step`, `heading` → `strconv.ParseFloat(value, 64)` into the field.
-   - `iterations` → `strconv.Atoi(value)` into the field.
-   - `axiom` → parse `value` as a **module sequence** (below) in which every argument
-     expression must evaluate under the **empty** environment (a constant); an axiom
-     argument that references a parameter is an error.
-   - any other key → error.
-4. A non-blank line that is neither a comment, a rule, nor `key: value` → error.
+### Module sequences (`grammar-modules` bead: `parseBodyModuleSequence`, `parseModuleSequence`)
 
-After all lines: a missing `axiom` is an error. `Iterations` is clamped: `< 0 → 0`,
-`> 12 → 12`. Defaults for unset settings: `Angle 90`, `Step 1`, `Heading 0`,
-`Iterations 0`.
-
-**Rule syntax.** `head -> body`, split on the first `->`. The `head` substring **before**
-the first `(` (or all of `head` when there is no `(`) must be **exactly one ASCII
-letter** — an empty head (`-> body`), a multi-letter head (`AB -> …`), or a non-letter
-head is a malformed-line error reported with its 1-based line number (never a panic and
-never a silent truncation to the first character). After that one letter, an optional
-`(name, name, …)` gives the formal parameters; a `(` not matched by a trailing `)` is an
-error, and an empty parameter name is an error. `Rule.Head` is that one letter;
-`Rule.Params` is the parameter names in order; the rule's arity is `len(Params)`.
-
-**Module sequence syntax** (used for `axiom` and rule bodies). A left-to-right scan:
+**`parseBodyModuleSequence(src string) ([]BodyModule, error)`** — one left-to-right scan
+of a single module-sequence string (a rule body, or the text after `axiom:`):
 - whitespace is skipped;
-- `[` and `]` each emit a bracket module;
+- `[` and `]` each emit their own bracket module (`BodyModule{Sym: '[' | ']'}`, no args);
 - a letter, or `+`, or `-`, is a module symbol; if the **very next** character is `(`,
   everything up to the matching `)` (tracking nested parens) is the argument text —
   otherwise the module has no arguments;
 - any other character is an error.
-- Argument text is split into comma-separated expressions with `Lex` + `ParseExpr`. An
-  empty argument list (`F()`) yields no args. A trailing comma, or two commas in a row,
-  is an error.
+- Argument text is split into comma-separated expressions with `Lex` + `ParseExpr`
+  (each `ParseExpr` must land its `next` index on a comma or the end). An empty argument
+  list (`F()`) yields no args. A trailing comma, or two commas in a row, is an error.
+- The argument expressions are stored as `[]Expr` and **not evaluated** here.
+- Errors carry **no** line number — `parseRule` and `ParseSystem` prefix the source
+  line themselves.
+
+**`parseModuleSequence(src string) ([]Module, error)`** — the **constant** form, used
+for the axiom. It calls `parseBodyModuleSequence`, then `EvalExpr(e, map[string]float64{})`
+for every argument expression `e`, building `[]Module` with concrete `Args []float64`.
+An argument that references a parameter (or otherwise fails under the empty environment)
+is an error. Bracket modules pass through unchanged (`Module{Sym: '[' | ']'}`, no args).
+
+The sequence is always a **flat list** — `[` and `]` are ordinary one-element modules,
+never merged with a neighbour or with each other, never folded into an argument, never
+nested at parse time. Matching `[` to `]` is the turtle's job, not the parser's. See the
+`grammar-modules` pin in Decomposition Notes for the worked module counts (`F[+]` → 4,
+`F[+F]F` → 6, `F(1)[+(25)F(1)]` → 5, `[]` → 2).
 
 **The `+`/`-` ambiguity is resolved by context.** At the module-sequence level, a leading
 `+` or `-` is a **module symbol** (turn). Inside a module's parentheses we are parsing an
 **expression**, so `+` and `-` are **operators**. `+(a)` is the module `+` with one
 argument expression `a`. `A(s-1)` is the module `A` with one argument `s-1`. `A(-x)` is
 the module `A` with one argument `-x` (unary minus).
+
+### Rule lines (`grammar-rules` bead: `parseRule`)
+
+**`parseRule(line string, lineNum int) (Rule, error)`** — `line` is one already-trimmed
+source line known to contain `->`. Split on the **first** `->`. The `head` substring
+**before** the first `(` (or all of `head` when there is no `(`) must be **exactly one
+ASCII letter** — an empty head (`-> body`), a multi-letter head (`AB -> …`), or a
+non-letter head is a malformed-line error (never a panic, never a silent truncation to
+the first character). After that one letter, an optional `(name, name, …)` gives the
+formal parameters; a `(` not matched by a trailing `)` is an error, and an empty
+parameter name is an error. `Rule.Head` is that one letter; `Rule.Params` is the
+parameter names in order; the rule's arity is `len(Params)`. Parameters are **never**
+parsed from the body. The body (everything after the first `->`) is parsed with
+`parseBodyModuleSequence` — `parseRule` does not re-implement that scan. Every error
+`parseRule` returns is prefixed with `lineNum` (a 1-based line number), including errors
+bubbled up from the body parse.
+
+### `ParseSystem` (`grammar-system` bead)
+
+`ParseSystem(src string) (System, error)`. Split `src` on `"\n"`. For each line
+(1-based index `n`), `strings.TrimSpace` it, then:
+1. Empty, or starts with `#` → skip.
+2. Contains `"->"` → `parseRule(line, n)`; append the returned `Rule` to `System.Rules`.
+3. Otherwise it must contain `":"`. The key is everything before the first `:`
+   (trimmed), the value everything after (trimmed). Keys:
+   - `angle`, `step`, `heading` → `strconv.ParseFloat(value, 64)` into the field.
+   - `iterations` → `strconv.Atoi(value)` into the field.
+   - `axiom` → `parseModuleSequence(value)` into `System.Axiom`; an error from it
+     (e.g. an axiom argument that references a parameter) is a parse error for line `n`.
+   - any other key → error (with line `n`).
+4. A non-blank line that is neither a comment, a rule, nor `key: value` → error (line `n`).
+
+After all lines: a missing `axiom` is an error. `Iterations` is clamped: `< 0 → 0`,
+`> 12 → 12`. Defaults for unset settings: `Angle 90`, `Step 1`, `Heading 0`,
+`Iterations 0`.
 
 ### `Derive(sys System, iterations int) ([]Module, error)`
 
@@ -627,6 +712,18 @@ Every `POST` handler calls `r.ParseForm()` and **ignores its error** — proceed
 whatever fields parsed (`r.PostForm.Get` returns `""` for anything missing, and an empty
 `source` then flows through `Studio` as an ordinary parse error shown inline). Never
 return an HTTP error for a `ParseForm` failure.
+
+**Form-body encoding — load-bearing for every `httptest` request in the handlers and
+integration beads.** The body is `application/x-www-form-urlencoded`, so `r.ParseForm()`
+decodes `+` as a **space** and requires a literal plus to arrive as `%2B`. An L-system
+`source` contains literal `+` and `-` (turn symbols) and a literal newline. A test that
+builds the body by hand as `"source=axiom: F(1) +(90) F(1)\n&iterations=0"` is **wrong** —
+`r.PostForm.Get("source")` then returns `axiom: F(1)  (90) F(1)` (the `+` became a space),
+`Studio` errors, and the response has no `<svg>`. **Build every request body with
+`url.Values{"source": {src}, "iterations": {"0"}}.Encode()`** (which percent-encodes
+`+` → `%2B`, space → `+`, newline → `%0A`) and set
+`Content-Type: application/x-www-form-urlencoded`. Do **not** hand-roll a `+`-preserving
+parser in the handler — `r.ParseForm()` on a correctly-encoded body is the contract.
 
 All four handlers build a `PageView` the same way — call this **assemble(source, svg,
 iterations, errMsg)**:
@@ -849,24 +946,53 @@ All start at `(0, 0)` heading `0`, with `angleDefault = 90`, `stepDefault = 1`.
 
 ## Cross-Bead Contracts
 
-### expr → grammar (data-shape)
+### expr → grammar-modules (data-shape)
 
 - **type**: data-shape
 - **producer**: expr (`expr.go`)
-- **consumer**: grammar (`grammar.go`)
+- **consumer**: grammar-modules (`grammar_modules.go`)
 - **interface**: `type Token struct { Kind TokenKind; Text string }`, `type Expr interface{ isExpr() }`, `func Lex(src string) ([]Token, error)`, `func ParseExpr(toks []Token, pos int) (Expr, int, error)`, `func EvalExpr(e Expr, env map[string]float64) (float64, error)`
-- **notes**: `grammar.go`'s module-sequence parser, when it reads a module's parenthesised
-  argument text, calls `Lex` on that text and then `ParseExpr` repeatedly (once per
-  comma-separated argument), checking that `ParseExpr`'s returned `next` index lands on a
-  comma or the end of the token slice. For `axiom` arguments it then calls
-  `EvalExpr(expr, map[string]float64{})` and treats an error (e.g. an unbound parameter)
-  as a parse error. Same package — no import; `expr.go` must be decomposed before
-  `grammar.go` so grammar's tests run against the real lexer/parser/evaluator.
+- **notes**: `parseBodyModuleSequence`, when it reads a module's parenthesised argument
+  text, calls `Lex` on that text and then `ParseExpr` repeatedly (once per comma-separated
+  argument), checking that `ParseExpr`'s returned `next` index lands on a comma or the end
+  of the token slice. It stores the returned `Expr` values unevaluated. `parseModuleSequence`
+  additionally calls `EvalExpr(expr, map[string]float64{})` on each and treats an error
+  (e.g. an unbound parameter) as a parse error. Same package — no import; `expr` must be
+  decomposed before `grammar-modules` so its tests run against the real
+  lexer/parser/evaluator.
 
-### grammar → rewrite (data-shape)
+### grammar-modules → grammar-rules (data-shape)
 
 - **type**: data-shape
-- **producer**: grammar (`grammar.go`)
+- **producer**: grammar-modules (`grammar_modules.go`)
+- **consumer**: grammar-rules (`grammar_rules.go`)
+- **interface**: `func parseBodyModuleSequence(src string) ([]BodyModule, error)`, `type BodyModule struct { Sym byte; Args []Expr }`
+- **notes**: `parseRule` calls `parseBodyModuleSequence` on the substring after the first
+  `->` to build `Rule.Body`. It must not re-implement the module-sequence scan or the
+  bracket handling. `parseBodyModuleSequence` returns errors with no line-number prefix;
+  `parseRule` wraps them with its `lineNum`. Same package — no import; `grammar-modules`
+  is decomposed before `grammar-rules`.
+
+### grammar-modules + grammar-rules → grammar-system (protocol)
+
+- **type**: protocol
+- **producer**: grammar-modules (`grammar_modules.go`), grammar-rules (`grammar_rules.go`)
+- **consumer**: grammar-system (`grammar_system.go`)
+- **interface**: `func parseModuleSequence(src string) ([]Module, error)`, `func parseRule(line string, lineNum int) (Rule, error)`
+- **notes**: `ParseSystem` does no low-level scanning. For the `axiom:` line it calls
+  `parseModuleSequence(value)` and stores the result in `System.Axiom`. For every line
+  containing `->` it calls `parseRule(line, n)` where `n` is the 1-based line index and
+  appends the `Rule` to `System.Rules`. `ParseSystem` owns only: line splitting,
+  blank/`#` skipping, `key: value` settings (`angle`/`step`/`heading` via
+  `strconv.ParseFloat`, `iterations` via `strconv.Atoi`), unknown-key errors, the
+  missing-`axiom` error, unset-setting defaults, and the `[0, 12]` iteration clamp. Same
+  package — no import; decompose order is `grammar-modules` → `grammar-rules` →
+  `grammar-system`.
+
+### grammar-system → rewrite (data-shape)
+
+- **type**: data-shape
+- **producer**: grammar-system (`grammar_system.go`), types from grammar-modules (`grammar_modules.go`)
 - **consumer**: rewrite (`rewrite.go`)
 - **interface**: `type Module struct { Sym byte; Args []float64 }`, `type BodyModule struct { Sym byte; Args []Expr }`, `type Rule struct { Head byte; Params []string; Body []BodyModule }`, `type System struct { Angle, Step, Heading float64; Iterations int; Axiom []Module; Rules []Rule }`, `func ParseSystem(src string) (System, error)`
 - **notes**: `Derive` reads `sys.Axiom` and `sys.Rules` only (not `sys.Iterations` — the
@@ -876,10 +1002,10 @@ All start at `(0, 0)` heading `0`, with `angleDefault = 90`, `stepDefault = 1`.
   modules (`Sym` is the ASCII bracket byte, `Args` empty) are copied verbatim and never
   matched.
 
-### grammar → turtle (data-shape)
+### grammar-modules → turtle (data-shape)
 
 - **type**: data-shape
-- **producer**: grammar (`grammar.go`) — via rewrite
+- **producer**: grammar-modules (`Module` in `grammar_modules.go`) — reaches the turtle via rewrite
 - **consumer**: turtle (`turtle.go`)
 - **interface**: `type Module struct { Sym byte; Args []float64 }`
 - **notes**: `Interpret` switches on `Module.Sym`. It acts on `'F'`, `'f'`, `'+'`, `'-'`,
@@ -901,7 +1027,7 @@ All start at `(0, 0)` heading `0`, with `angleDefault = 90`, `stepDefault = 1`.
 ### pipeline composition → studio (protocol)
 
 - **type**: protocol
-- **producer**: expr + grammar + rewrite + turtle + render
+- **producer**: expr + grammar-system + rewrite + turtle + render
 - **consumer**: studio (`studio.go`)
 - **interface**: `func Studio(source string, iterations int) (string, error)`
 - **notes**: `Studio` calls, in this exact order: `ParseSystem(source)` →
@@ -974,37 +1100,60 @@ All start at `(0, 0)` heading `0`, with `angleDefault = 90`, `stepDefault = 1`.
 
 1. **expr** — `Token`/`TokenKind`, `Lex`, `Expr` + nodes, `ParseExpr`, `EvalExpr`. No
    dependencies. Owns `expr.go`.
-2. **grammar** — `Module`, `BodyModule`, `Rule`, `System`, `ParseSystem`. Depends on bead
-   1. Owns `grammar.go`.
-3. **rewrite** — `MaxModules`, `Derive`. Depends on beads 1 and 2. Owns `rewrite.go`.
-4. **turtle** — `Segment`, `Interpret`. Depends on bead 2 (`Module`). Owns `turtle.go`.
-5. **render** — `CanvasSize`, `Margin`, `Box`, `BBox`, `RenderSVG`. Depends on bead 4
+2. **grammar-modules** — the four shared types (`Module`, `BodyModule`, `Rule`, `System`)
+   plus `parseModuleSequence` and `parseBodyModuleSequence`, all in one file. Depends on
+   bead 1. Owns `grammar_modules.go` (and its `grammar_modules_test.go`). Scope is a single
+   module-sequence string — a flat scan producing `[]BodyModule` (args unevaluated), and
+   the constant `[]Module` form for the axiom. No rule-line parsing, no document structure.
+3. **grammar-rules** — `parseRule`. Depends on bead 2. Owns `grammar_rules.go`. Parses one
+   `head -> body` line: one-ASCII-letter head before the first `(`, optional
+   formal-parameter list, body delegated to `parseBodyModuleSequence`. Line-number
+   prefixing of its own errors. No document structure.
+4. **grammar-system** — `ParseSystem`. Depends on beads 2 and 3. Owns `grammar_system.go`.
+   Line splitting, blank/`#` skipping, `key: value` settings, unknown-key/missing-axiom
+   errors, unset-setting defaults, `[0, 12]` iteration clamp. Delegates the `axiom:` value
+   to `parseModuleSequence` and every `->` line to `parseRule`. (Decompose order 2 → 3 → 4
+   is a valid topological sort of the DAG even though 4 depends directly on both 2 and 3.)
+5. **rewrite** — `MaxModules`, `Derive`. Depends on beads 1 and 4. Owns `rewrite.go`.
+6. **turtle** — `Segment`, `Interpret`. Depends on bead 2 (`Module`). Owns `turtle.go`.
+7. **render** — `CanvasSize`, `Margin`, `Box`, `BBox`, `RenderSVG`. Depends on bead 6
    (`Segment`). Owns `render.go`.
-6. **studio** — `Studio`. Depends on beads 2, 3, 4, 5. Owns `studio.go`. Its exit
+8. **studio** — `Studio`. Depends on beads 4, 5, 6, 7. Owns `studio.go`. Its exit
    criterion runs the whole chain on a fixed source and asserts the exact SVG string —
    not `go build`.
-7. **save** — `SavedImage`, `SaveSVG`, `ListSaved`, `SavedDir`, `saveMu`. No dependency on
+9. **save** — `SavedImage`, `SaveSVG`, `ListSaved`, `SavedDir`, `saveMu`. No dependency on
    the L-system beads. Owns `save.go`.
-8. **templates** — `InitTemplates`, `RenderPage`, `RenderResult`. Decompose **before**
-   handlers so the handler bead's httptest assertions run against real template output.
-   Owns `templates.go`.
-9. **handlers** — `Preset`, `Presets`, `DefaultIterations`, `PageView`, `assemble`,
-   `HandleIndex`, `HandleRender`, `HandleSelect`, `HandleSave`. Depends on beads 6, 7, 8.
-   Every handler bead exit criterion is an `httptest` smoke test (not `go build`): at
-   minimum one request/response per handler, asserting status + one structural property.
-   For `GET /`, `POST /render`, `POST /select`, `POST /save`: the response body contains
-   `id="app"` and, for a valid system, contains `<svg`. Add one assertion that
-   `POST /render` with `source` = `"nonsense"` returns **HTTP 200** with a body containing
-   `class="error"`, and one that `POST /select` with `preset=plant` returns a body
-   containing `<textarea` whose contents include `X ->` (the plant source loaded into the
-   editor). Owns `handlers.go`.
-10. **main** — `var templates`, `func main()`. Wires the mux. Depends on bead 9. Owns
+10. **templates** — `InitTemplates`, `RenderPage`, `RenderResult`. Decompose **before**
+    handlers so the handler bead's httptest assertions run against real template output.
+    Owns `templates.go`.
+11. **handlers** — `Preset`, `Presets`, `DefaultIterations`, `PageView`, `assemble`,
+    `HandleIndex`, `HandleRender`, `HandleSelect`, `HandleSave`. Depends on beads 8, 9, 10.
+    Every handler bead exit criterion is an `httptest` smoke test (not `go build`): at
+    minimum one request/response per handler, asserting status + one structural property.
+    For `GET /`, `POST /render`, `POST /select`, `POST /save`: the response body contains
+    `id="app"` and, for a valid system, contains `<svg`. Add one assertion that
+    `POST /render` with `source` = `"nonsense"` returns **HTTP 200** with a body containing
+    `class="error"`, and one that `POST /select` with `preset=plant` returns a body
+    containing `<textarea` and the substring `angle: 25` — the first line of the plant
+    preset source, loaded into the editor. The `POST /render` valid-system request uses
+    `source` = `"axiom: F(1) +(90) F(1)\n"` — **encode it with `url.Values.Encode()`**, see
+    the form-body encoding note in Behavioral Specification → Handlers; a hand-built body
+    with a raw `+` is decoded as a space and the response then has no `<svg>`. **Do not
+    assert on `X ->` or `F+` in the `/select` body: `html/template`
+    HTML-escapes `<textarea>` content, so `X -> F+[[X]…` renders as `X -&gt; F&#43;[[X]…`
+    in the response bytes. Assert on a substring of the source that has no HTML-special
+    characters (`angle: 25`, or `[[X]-X]` which is passed through unescaped) — the logical
+    property "plant source is in the editor", not an incidental raw-string form.** Owns
+    `handlers.go`.
+12. **main** — `var templates`, `func main()`. Wires the mux. Depends on bead 11. Owns
     `main.go`.
-11. **integration** — one bounded `httptest` scenario (below).
+13. **integration** — one bounded `httptest` scenario (below).
 
 **Integration bead — one bounded scenario:** stand up `httptest.NewServer` with the real
-mux; issue `POST /render` with form values `source=axiom: F(1) +(90) F(1)` and
-`iterations=0`; assert HTTP 200, that the response body contains `id="app"`, and that it
+mux; issue `POST /render` with form fields `source` = `"axiom: F(1) +(90) F(1)\n"` and
+`iterations` = `"0"`, **the body built with `url.Values{...}.Encode()`** (a raw `+` in a
+hand-built body decodes to a space — see Behavioral Specification → Handlers → form-body
+encoding). Assert HTTP 200, that the response body contains `id="app"`, and that it
 contains the exact substring
 `<path d="M 20.000 780.000 L 780.000 780.000 M 780.000 780.000 L 780.000 20.000"`.
 Do **not** also test `/select`, `/save`, and the gallery here — those are covered by the
@@ -1054,10 +1203,10 @@ re-derive or paraphrase):**
   `A(s) -> F(s)[+(25)A(s*0.6)][-(25)A(s*0.6)]` → step 1 module sequence
   `F(1) [ +(25) A(0.6) ] [ -(25) A(0.6) ]`. Separately: `axiom: A A(2)`, `A(s) -> F(s)`
   → step 1 `A F(2)` (bare `A` unmatched, copied).
-- **Pin — `grammar` bead, `ParseSystem` malformed rule head:** `A -> B` parses;
+- **Pin — `grammar-rules` bead, `parseRule` malformed rule head:** `A -> B` parses;
   `AB -> C` is an error (multi-letter head); `-> B` is an error, **not** a panic (empty
   head). Every error carries a 1-based line number.
-- **Pin — `grammar` bead, rule head vs. formal parameters:** in a rule line
+- **Pin — `grammar-rules` bead, rule head vs. formal parameters:** in a rule line
   `head -> body`, the rule head is the substring of `head` **before the first `(`** (or
   all of it when there is no `(`), and that substring must be exactly one ASCII letter.
   Any `(name, name, …)` that follows the letter — still before the `->` — is the
@@ -1066,6 +1215,16 @@ re-derive or paraphrase):**
   `A -> B` → `Head 'A'`, `Params` empty; `A(x, y) -> …` → `Params ["x", "y"]`. An
   unclosed `(` in the head is an error; an empty parameter name (`A() -> …`,
   `A(,) -> …`) is an error.
+- **Pin — `grammar-modules` bead, module-sequence length (`axiom` values and rule bodies):**
+  a module sequence is a **flat list**; `[` and `]` are each their own one-element
+  module in it (`Sym` `'['` or `']'`, no args), never merged with a neighbour, with
+  each other, or into an argument, and never nested at parse time. Worked:
+  `F[+]` → **4** modules `F`, `[`, `+`, `]`; `F[+F]F` → **6** modules
+  `F`, `[`, `+`, `F`, `]`, `F`; `F(1)[+(25)F(1)]` → **5** modules
+  `F(1)`, `[`, `+(25)`, `F(1)`, `]`; `[]` → **2**. Matching `[` to `]` is the turtle's
+  job (`Interpret`'s stack), never the parser's. (Consistent with the `rewrite` step-1
+  worked example above, which lists `F(1)`, `[`, `+(25)`, `A(0.6)`, `]`, `[`, `-(25)`,
+  `A(0.6)`, `]` as nine modules.)
 - **Pin — `turtle` bead, `Interpret`:** start `(0,0)` heading `0`, `angleDefault 90`,
   `stepDefault 1`. `F(1) +(90) F(1)` → segments `{0,0,1,0}`, `{1,0,1,1}` (both exact).
   `F(1) [ +(90) F(1) ] F(1)` → **three** segments `{0,0,1,0}`, `{1,0,1,1}`, `{1,0,2,0}`
@@ -1090,8 +1249,10 @@ re-derive or paraphrase):**
   temp dir, `ListSaved` returns them in the order
   `["0000000000000000002.svg", "0000000000000000001.svg"]` and ignores any non-`.svg`
   file. `ListSaved` on a missing path → `(nil, nil)`.
-- **Pin — `integration` bead:** `POST /render` with `source=axiom: F(1) +(90) F(1)` and
-  `iterations=0` → HTTP 200, body contains `id="app"` and the exact substring
+- **Pin — `integration` bead:** `POST /render` with `source` = `"axiom: F(1) +(90) F(1)\n"`
+  and `iterations` = `"0"`, body encoded with `url.Values{...}.Encode()` (a raw `+` in a
+  hand-built body decodes to a space) → HTTP 200, body contains `id="app"` and the exact
+  substring
   `<path d="M 20.000 780.000 L 780.000 780.000 M 780.000 780.000 L 780.000 20.000"`.
 
 ## Open Questions

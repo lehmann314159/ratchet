@@ -1086,7 +1086,9 @@ func TestExtractDecompositionNotesPins_RealDocs(t *testing.T) {
 		multiPinBead    string
 		wantMultiPinMin int
 	}{
-		{"../../docs/design-docs/lsystem-studio-design-doc.md", "grammar", 2},
+		// grammar was split doc-side into grammar-modules/-rules/-system
+		// (lsystem run 6); grammar-rules carries both parseRule pins.
+		{"../../docs/design-docs/lsystem-studio-design-doc.md", "grammar-rules", 2},
 		{"../../docs/design-docs/fractalviz-design-doc.md", "fractal-core", 4},
 		// handlers-templates: the Bytecode-by-error-type pin (target name wraps
 		// to the line before "bead") AND the template-package pin.
@@ -1164,7 +1166,7 @@ func TestUnconsumedPinTargets_CorpusGate(t *testing.T) {
 		},
 		{
 			"lsystem — clean", "../../docs/design-docs/lsystem-studio-design-doc.md",
-			[]string{"expr", "grammar", "rewrite", "turtle", "render", "studio", "save", "templates", "handlers", "main", "integration"},
+			[]string{"expr", "grammar-modules", "grammar-rules", "grammar-system", "rewrite", "turtle", "render", "studio", "save", "templates", "handlers", "main", "integration"},
 			nil,
 		},
 	}
