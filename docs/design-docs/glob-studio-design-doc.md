@@ -165,11 +165,14 @@ type Token struct {
 //   - A run of one '*' -> TokStar. A run of two or more '*' that forms a whole
 //     segment (bounded by '/' or the start/end of the pattern) -> TokDoubleStar;
 //     otherwise the whole run -> a single TokStar.
-//   - '[' begins a class: Lex skips a leading '!' or '^', then skips a single
-//     leading ']' ONLY if another character precedes the next ']' (so '[]a]' has
-//     body ']a', but '[]', '[!]', '[^]' are classes with an empty body). It
-//     scans to the closing ']' and emits one TokClass whose Text is the body.
-//     Lex does NOT check the body for validity (Parse rejects an empty body).
+//   - '[' begins a class: an optional leading '!' or '^' is consumed into the
+//     body first, then Lex skips a single leading ']' ONLY if another character
+//     precedes the next ']' (so '[]a]' has body ']a', but '[]' has an empty
+//     body — '[!]' and '[^]' are NOT empty: their body is just the negation
+//     character itself, "!" or "^", since that leading char (not a ']') never
+//     triggers the skip-one-leading-']' rule). It scans to the closing ']' and
+//     emits one TokClass whose Text is the body. Lex does NOT check the body
+//     for validity (Parse rejects an empty body — only '[]' qualifies).
 //   - '\' escapes the next character, which is emitted as a literal. A '\' with no
 //     following character is an error.
 // Errors (exact strings): "dangling backslash"; "unterminated character class".
@@ -343,14 +346,19 @@ var _ []Preset = Presets
 
 Single left-to-right scan. `\` consumes the next character and contributes it to
 the current literal run (so `\a` and `a` lex identically; `\*` becomes a literal
-`*`). `[` starts a class scan: skip an optional leading `!` or `^`, then skip a
-single leading `]` **only if at least one more character precedes the next `]`**
-(so `[]a]` has body `]a` and `[]]` has body `]`, but `[]`, `[!]`, and `[^]` are
-recognized as classes with an **empty body** — `Token.Text` is `""`, `"!"`, or
-`"^"` — and `Lex` does **not** error on them); then scan to the next `]`. If the
-end of the pattern is reached before a closing `]` → return the exact error
-string `"unterminated character class"` from `Lex`. An empty-body class is
-`Lex`-valid and reaches `Parse`, which rejects it (`"empty character class"`).
+`*`). `[` starts a class scan: an optional leading `!` or `^` is consumed into
+the body first, then Lex skips a single leading `]` **only if at least one more
+character precedes the next `]`** (so `[]a]` has body `]a` and `[]]` has body
+`]`). Only `[]` has a genuinely **empty body** (`Token.Text` `""`) — `[!]` and
+`[^]` are **not** empty: their body is just the negation character itself
+(`Token.Text` `"!"` or `"^"`), because that leading character is not a `]` and
+so never triggers the skip-one-leading-`]` rule; `Lex` does **not** error on any
+of the three. Then scan to the next `]`. If the end of the pattern is reached
+before a closing `]` → return the exact error string `"unterminated character
+class"` from `Lex`. All three (`[]`, `[!]`, `[^]`) are `Lex`-valid and reach
+`Parse`, which rejects all of them with the same error (`"empty character
+class"`) regardless of whether `Token.Text` was `""`, `"!"`, or `"^"` — "empty"
+in `Parse`'s sense means "no class members," not "zero-length `Token.Text`".
 The class body emitted in `Token.Text` keeps the leading `!` or `^` but not the
 brackets. A run of `*` is
 counted; it becomes `TokDoubleStar` only if its length is >= 2 **and** the
