@@ -44,7 +44,7 @@ That distinction is exactly why, today, the same-looking `ChatWithTools` call is
 - **Tool-loop verbs** (WRITE, CRITIQUE, JUDGE) drop the format constraint entirely. No schema, no bare `"json"`, nothing — just a defensive parse-and-repair pass on whatever text comes back, once tools have actually been used.
 - **ADJUDICATE** stays on the plain, unconstrained `"json"` default, because its model's tool-calling is native — routed through a completely separate mechanism in Ollama that the content-format grammar never touches in the first place, so none of the above problems ever applied to it.
 
-Three configurations for calls that look identical from the outside, and the correct one for any given verb isn't a property of the verb at all — it's a property of whichever model happens to be assigned to it this week. That's a real, unresolved tension: nothing today re-derives the right configuration automatically when a model gets swapped in a bakeoff, so it has already quietly broken once (the same JSON-grammar conflict, hitting two different newly-tried models on two separate later occasions, for the identical underlying reason).
+Three configurations for calls that look identical from the outside, and the correct one for any given verb isn't a property of the verb at all — it's a property of whichever model happens to be assigned to it this week. That's a real, unresolved tension: nothing today re-derives the right configuration automatically when a model gets swapped in a bakeoff, so it has already quietly broken twice (the same JSON-grammar conflict, hitting two different newly-tried models on two separate later occasions, for the identical underlying reason).
 
 ## The cache you don't have to think about, until the hardware you do
 

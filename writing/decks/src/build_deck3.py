@@ -240,8 +240,9 @@ content_slide(prs, 19, TOTAL, LABEL, "Does the Monitor Still Earn Its Keep?", "N
         "That contention stalled EXECUTE's own token delivery, tripped the stream-idle "
         "watchdog, and produced a flatly wrong diagnosis: logged as \"crashed at startup,\" "
         "when a healthy generation had been stalled by its own supervisor.",
-        ("The deeper fix — ", "parse the verdict correctly, poll less often, use a smaller "
-         "model — is written up and explicitly deferred, not done."),
+        ("A partial fix already shipped — ", "the monitor's own output is now capped at 256 "
+         "tokens, which helped. The deeper fix — parse the verdict correctly, poll less "
+         "often, use a smaller model — is written up and explicitly deferred, not done."),
     ], bullet_size=13.5, top_bullets=Inches(2.0), bullets_height=Inches(4.8))
 
 # 20 — throughline
