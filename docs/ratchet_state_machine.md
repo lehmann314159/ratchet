@@ -11,7 +11,7 @@ Four diagrams, from outermost to innermost:
 4. **Generic job status** — the low-level `handoff_jobs.status` FSM that every verb call goes through underneath diagrams 2 and 3.
 
 Render with a Mermaid-capable viewer (VS Code preview, GitHub, mermaid.live). The
-`diagrams/*.png` images were last regenerated 2026-09-03 from the Mermaid source
+`diagrams/*.png` images were last regenerated 2026-09-14 from the Mermaid source
 below (extracted block-by-block into `X.mmd`) via
 `npx @mermaid-js/mermaid-cli@11.16.0 -i X.mmd -o X.png -b white -s 3`, and
 `docs/state-machine.pdf` is built from this file with those images inlined
@@ -85,8 +85,8 @@ stateDiagram-v2
     CERTIFY_MANIFEST --> SURVEY_SPEC : final_decision = reject<br/>(reject count < 5)
     CERTIFY_MANIFEST --> BOOTSTRAP_FAILED : final_decision = reject<br/>(reject count >= 5)
 
-    DECOMPOSE_SPEC --> AUDIT_DECOMPOSITION : passed the forward<br/>file-reference check
-    DECOMPOSE_SPEC --> BOOTSTRAP_FAILED : bead-ordering violation persists<br/>past redecompose cap of 3<br/>(under the cap, DECOMPOSE_SPEC just re-runs<br/>with the violations in its prompt)
+    DECOMPOSE_SPEC --> AUDIT_DECOMPOSITION : passed the structural checks
+    DECOMPOSE_SPEC --> BOOTSTRAP_FAILED : bead-ordering, forward-file-reference,<br/>or bead-list merge/drop violation persists<br/>past redecompose cap of 3<br/>(under the cap, DECOMPOSE_SPEC just re-runs<br/>with the violations in its prompt)
 
     AUDIT_DECOMPOSITION --> DECOMPOSITION_APPROVED : overall_verdict = no_issues
     AUDIT_DECOMPOSITION --> RECONCILE_DECOMPOSITION : overall_verdict = issues_found
@@ -115,12 +115,15 @@ stateDiagram-v2
 Notes:
 - `AUDIT_DECOMPOSITION` with `no_issues` skips `RECONCILE_DECOMPOSITION` — reconcile only runs when audit found something to fix.
 - **`redecompose` / `reconcile_rejected` retry loops** (drawn only as their escalation
-  edges above, to keep the diagram readable): a mechanical forward-file-reference /
-  bead-ordering check runs on the proposed decomposition. `DECOMPOSE_SPEC` failing it
-  records a `redecompose` `audit_reconcile_rounds` row and re-enqueues `DECOMPOSE_SPEC`
-  with the violations in its next prompt; at `decomposeRedecomposeCap` (3) the project
-  is `full_stopped`. `RECONCILE_DECOMPOSITION` failing it on its *own* proposed fix
-  records a `reconcile_rejected` row and re-enqueues `RECONCILE_DECOMPOSITION`; at
+  edges above, to keep the diagram readable): a mechanical structural check runs on the
+  proposed decomposition — a forward file-reference, a bead-ordering violation, *or* a
+  proposed bead set that merges or drops a bead the design doc's own numbered list calls
+  for (`beadStructureViolations`; an extra, doc-unrequested integration bead is exempt —
+  splitting is left to the author and the bead-size lint, not gated here). `DECOMPOSE_SPEC`
+  failing it records a `redecompose` `audit_reconcile_rounds` row and re-enqueues
+  `DECOMPOSE_SPEC` with the violations in its next prompt; at `decomposeRedecomposeCap` (3)
+  the project is `full_stopped`. `RECONCILE_DECOMPOSITION` failing it on its *own* proposed
+  fix records a `reconcile_rejected` row and re-enqueues `RECONCILE_DECOMPOSITION`; at
   `reconcileRejectCap` (3) the job is escalated. Neither is a model judgment call.
 
 ## 3. Per-bead pipeline
@@ -146,7 +149,7 @@ stateDiagram-v2
 
         EXECUTE_BEAD --> EXECUTE_BEAD : infra_failure at startup<br/>(retried, cap 3 consecutive)
         EXECUTE_BEAD --> ESCALATED : infra_failure x3 consecutive<br/>(internal/execution/window.go:293)
-        EXECUTE_BEAD --> ANALYZE_EXECUTION : termination_cause recorded<br/>(success / timeout /<br/>monitor_terminated / monitor_force_killed /<br/>no_write)
+        EXECUTE_BEAD --> ANALYZE_EXECUTION : termination_cause recorded<br/>(success / timeout / stalled /<br/>monitor_terminated / monitor_force_killed /<br/>no_write)
 
         ANALYZE_EXECUTION --> COMPRESS_ANALYSIS
         COMPRESS_ANALYSIS --> ADJUDICATE_NEXT_EXECUTION
@@ -174,33 +177,62 @@ stateDiagram-v2
 ![Per-bead pipeline diagram](diagrams/3_bead_pipeline.png)
 
 **Mechanical gates on ADJUDICATE's decisions.** The model's decision is not taken
-on trust — three of them pass through a ground-truth check first:
-- `declare_success` runs `execcheck.VerifyExitCriteria` against the files on
-  disk. If the bead's exit-criteria command doesn't actually pass, the success
-  is rejected: the bead goes back to `pending` for another `EXECUTE_BEAD` (or
-  escalates if already at `max_execution_attempts`)
-  (`adjudicate_next_execution.go`, `declare_success` case).
-- `execute_revised` runs a source-side gate on the proposed spec (orphan `-run`
-  name, grep guard for a file the bead doesn't own, a newly-invented required
-  test function — that last one is `re_refine`'s job). On a violation it
-  **downgrades to `execute_as_is`**: retry against the current unmodified spec
-  rather than commit a broken revision.
+on trust:
+- `declare_success` runs `execcheck.VerifyExitCriteriaIsolated` against a **copy**
+  of the files on disk, not the live project folder — an entrypoint bead's own
+  `go build -o app .` exit criterion was dropping a multi-MB binary into the real
+  tree as a side effect of merely *checking* it (`n=3`, fixed `9a4f4d4`). If the
+  criteria command doesn't actually pass in the copy, the success is rejected: the
+  bead goes back to `pending` for another `EXECUTE_BEAD` (or escalates if already
+  at `max_execution_attempts`) (`adjudicate_next_execution.go`, `declare_success`
+  case).
+- `execute_revised` runs a source-side gate on the proposed spec: an orphan `-run`
+  name, a grep guard for a file the bead doesn't own, a symbol already declared by
+  a *sibling* bead's on-disk scaffold (`cross_bead_symbols.go`, `buildSiblingSymbolOwners`
+  — added after a live incident where a revised spec told the agent to redefine
+  another bead's type in this bead's file), or a newly-invented required test
+  function (that last one is `re_refine`'s job, not `execute_revised`'s). On a
+  violation it **downgrades to `execute_as_is`**: retry against the current
+  unmodified spec rather than commit a broken revision.
+- Every `execute_revised` commit also re-runs `InjectDesignDocPins` against the
+  new `full_text` — a full-text rewrite of a bead's spec is exactly the kind of
+  edit that can silently drop a verbatim Decomposition-Notes pin block, so the
+  pin is mechanically re-appended rather than trusted to survive the rewrite.
 - `applyMechanicalBeadFixes` normalizes the revised spec (e.g. `go test` with no
   test file) the same way DECOMPOSE/RECONCILE do at decomposition time.
 
-**Trailing-timeout budget escalation (fail-fast).** On the **first** in-lineage
-execution that ends `termination_cause = timeout` and every one after, an
-`execute_as_is` / `execute_revised` retry has its `execution_budget`
-**mechanically doubled** (capped at 8× the project default: 900 → 1800 → 3600 →
-7200), regardless of the budget the model returned — a weak model can't be
-relied on to classify a stub-file timeout correctly. ADJUDICATE is also handed a
-"Fast path" note telling it to issue `execute_revised` with `trend = same`,
-`bead_spec_fit = execution_capability_problem`, and to prepend exactly one
-"write a compiling skeleton first" sentence — deliberately *not* a full spec
-rewrite (added prescriptiveness on a timeout retry was found to make the agent
-spiral). `monitor_terminated` is excluded: there, more wall-clock makes things
-worse. `re_refine` is never chosen for a timeout (the tests were never reached).
-See `countTrailingTimeouts` / `enforcedTimeoutBudget` / `timeoutBudgetNote` in
+**Mechanical stall/timeout detection (EXECUTE_BEAD).** Timing is fixed, not
+budget-derived: a soft checkpoint every `execCheckpointInterval` (12m) and a hard
+backstop at `execAbsoluteCeiling` (45m) — `execution_budget` is no longer read for
+timing at all (the column stays in the schema, inert; `execute_revised` still
+floors a stored value at the project default). A `progressTracker` judges a turn
+"productive" only if a `write_file` call leaves an in-scope output file at a
+content hash it hasn't held before this attempt — a no-op rewrite or an
+A→B→A revert doesn't count. Several fast paths can end the attempt as `stalled`
+well before the hard ceiling: an empty-turn streak, three consecutive identical
+tool calls, two consecutive length-cap "thinking with no output" turns, or no
+forward progress since the last soft checkpoint (which first injects one
+graceful-finalize directive and grants one more turn before giving up). If the
+hard ceiling itself fires with genuine progress still happening and no stall
+condition met, the cause is `timeout` instead.
+
+`timeout` and `stalled` get different treatment from ADJUDICATE. A `timeout` is
+read as a **scope** signal, not a speed problem — `timeoutExecutionNote` steers
+`execute_revised` toward narrowing the spec, never toward "try again with more
+room." (The earlier behavior — doubling `execution_budget` on repeated timeouts,
+900s → 1800s → 3600s → 7200s — was retired once checkpoint/ceiling stopped being
+budget-derived: a bigger window bought more thrashing, not more correctness; see
+the EXECUTE-model bakeoff, `project_execute_model_bakeoff`.) A second
+**consecutive** `timeout` escalates automatically (`escalateOnRepeatedTimeout`),
+mirroring a second consecutive `stalled` (`escalateOnRepeatedStall`) — `re_refine`
+is never chosen for either (the tests were never reached). A repeated-stall
+escalation is additionally tagged "EXECUTE-ceiling" in its report when ADJUDICATE
+had already tried two `execute_revised` rewrites first — the bead itself likely
+needs a doc-side split, not another revision. `monitor_terminated` /
+`monitor_force_killed` sit outside all of this: MONITOR_EXECUTION killing the
+process externally is not a timing decision EXECUTE_BEAD made about itself. See
+`countTrailingTimeouts` / `countTrailingStalls` / `escalateOnRepeatedTimeout` /
+`escalateOnRepeatedStall` / `timeoutExecutionNote` / `stalledExecutionNote` in
 `adjudicate_next_execution.go`.
 
 **`MONITOR_EXECUTION` is not in this chain.** It's a parallel watchdog subprocess (`ratchet monitor`, spawned alongside `execute-bead` by `RunExecutionWindow`, `internal/execution/window.go:149`) that polls the trace file, asks its own model FIRE/NO_FIRE, and can SIGTERM/SIGKILL the running `EXECUTE_BEAD` process — which is how `termination_cause` becomes `monitor_terminated` or `monitor_force_killed`. It has no `handoff_jobs` row of its own.
@@ -246,9 +278,11 @@ stateDiagram-v2
 | 5 | `EXECUTE_BEAD` (via execution window) | `infraFailureCap` (3) consecutive startup crashes | job escalated | `internal/execution/window.go:293` |
 | 6 | `ADJUDICATE_NEXT_EXECUTION` | `execute_as_is` / `execute_revised` / `test_reject` / a `declare_success` whose exit-criteria gate failed, at `max_execution_attempts` (`atExecutionCap`) | job escalated | `adjudicate_next_execution.go:~1835` |
 | 7 | `ADJUDICATE_NEXT_EXECUTION` | `re_refine` past `refinementCycleCap` | job escalated | `adjudicate_next_execution.go:~1674` |
-| 8 | any verb (generic) | strikes exceed flat tolerance of 2 on malformed/invalid output | job escalated | `orchestrator/dispatch.go:~113` |
-| 9 | `DECOMPOSE_SPEC` | bead-ordering / forward-file-reference violations persist to `decomposeRedecomposeCap` (3) | project full_stopped | `decompose_spec.go:~264` |
-| 10 | `RECONCILE_DECOMPOSITION` | its own proposed fix keeps reintroducing an ordering violation to `reconcileRejectCap` (3) | job escalated | `reconcile_decomposition.go:~476` |
+| 8 | `ADJUDICATE_NEXT_EXECUTION` | two consecutive `stalled` terminations on the same bead lineage (`execute_as_is`/`execute_revised` only) | job escalated (tagged "EXECUTE-ceiling" if ≥2 prior `execute_revised` rewrites) | `escalateOnRepeatedStall`, `adjudicate_next_execution.go:1978` |
+| 9 | `ADJUDICATE_NEXT_EXECUTION` | two consecutive `timeout` terminations on the same bead lineage | job escalated | `escalateOnRepeatedTimeout`, `adjudicate_next_execution.go:2025` |
+| 10 | any verb (generic) | strikes exceed flat tolerance of 2 on malformed/invalid output | job escalated | `orchestrator/dispatch.go:~113` |
+| 11 | `DECOMPOSE_SPEC` | bead-ordering / forward-file-reference / bead-list merge-or-drop violations persist to `decomposeRedecomposeCap` (3) | project full_stopped | `decompose_spec.go:~264` |
+| 12 | `RECONCILE_DECOMPOSITION` | its own proposed fix keeps reintroducing a violation to `reconcileRejectCap` (3) | job escalated | `reconcile_decomposition.go:~476` |
 
 `rewind-bead` is the sanctioned recovery path for any of the per-bead escalations while the bead hasn't succeeded — it resets to `REFINE_TESTS_WRITE` cycle 1 and stubs impl files, so it always discards whatever implementation exists on disk. `resume-project` only ever re-dispatches bead 1 (or, for a cascade project, re-enters through `enqueueDecompositionApproved`). `full-stop-project` is the manual equivalent of a project-wide escalation.
 
