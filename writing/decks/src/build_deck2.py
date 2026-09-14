@@ -3,16 +3,16 @@ sys.path.insert(0, "/private/tmp/claude-501/-Users-mike-Documents-GitHub-ratchet
 from deck_common import *
 
 DECK = 2
-LABEL = "RATCHET · PART 2/5 · VERBS & THE FLEET"
+LABEL = "RATCHET · PART 2/6 · VERBS & THE FLEET"
 prs = new_deck()
 TOTAL = 29
 
 title_slide(prs, DECK, "Verbs and the Fleet",
     "The architecture, in the detail that lets you argue with it",
-    "Part 2 of 5. Quick recap: a design doc gets broken into beads — small, independently "
+    "Part 2 of 6. Quick recap: a design doc gets broken into beads — small, independently "
     "verifiable units of work — and each one is driven through a fixed sequence of narrow "
     "model calls called verbs. This piece is about how that actually works.",
-    series_total=5)
+    series_total=6)
 
 # 2
 content_slide(prs, 2, TOTAL, LABEL, "Foundations", "The database is the ground truth",

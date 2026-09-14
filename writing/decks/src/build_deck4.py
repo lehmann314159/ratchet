@@ -3,15 +3,15 @@ sys.path.insert(0, "/private/tmp/claude-501/-Users-mike-Documents-GitHub-ratchet
 from deck_common import *
 
 DECK = 4
-LABEL = "RATCHET · PART 4/5 · ZERO DOMAIN KNOWLEDGE"
+LABEL = "RATCHET · PART 4/6 · ZERO DOMAIN KNOWLEDGE"
 prs = new_deck()
 TOTAL = 17
 
 title_slide(prs, DECK, "Write for Zero Domain Knowledge",
     "Writing a spec precise enough for a model that won't fill your gaps kindly",
-    "Part 4 of 5. The single hardest skill in the whole system: removing every gap a small "
+    "Part 4 of 6. The single hardest skill in the whole system: removing every gap a small "
     "model could misinterpret, before it ever gets the chance to guess.",
-    title_size=40, series_total=5)
+    title_size=40, series_total=6)
 
 # 2 the test
 quote_slide(prs, 2, TOTAL, LABEL, "The Test",
@@ -168,8 +168,8 @@ closing_slide(prs, 17, TOTAL, LABEL,
     "Precision has to be built, checked, and re-verified —",
     "the same way any other part of a reliable system is. That's the whole trade this piece "
     "has been describing.",
-    next_label="The Burn-In — a full account of the deliberate stress-test, what it found, "
-               "and what surprised even the people running it.")
+    next_label="Draft, Check, Sign Off — the workflow that turns rough prose into a design "
+               "doc the pipeline is allowed to trust.")
 
 out = "/Users/mike/Documents/GitHub/ratchet/writing/decks/04-write-for-zero-domain-knowledge.pptx"
 import os

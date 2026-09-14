@@ -68,4 +68,4 @@ The honest cost is that writing a design doc this way is slower than describing 
 
 ---
 
-*Last in the series: [The Burn-In](https://claude.ai/code/artifact/46056184-99b7-4196-a475-170ad8d0f586) — the deliberate stress-test of everything described in these three pieces, what it found, and what surprised even the people running it.*
+*Next: [Draft, Check, Sign Off](https://claude.ai/code/artifact/f8159d21-e0b1-4529-8aab-d79de63f597b) — where a design doc precise enough for this actually comes from: the workflow that turns rough prose into a doc the pipeline is allowed to trust.*

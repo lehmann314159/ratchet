@@ -3,16 +3,16 @@ sys.path.insert(0, "/private/tmp/claude-501/-Users-mike-Documents-GitHub-ratchet
 from deck_common import *
 
 DECK = 3
-LABEL = "RATCHET · PART 3/5 · FORMAT, THINK, TURN"
+LABEL = "RATCHET · PART 3/6 · FORMAT, THINK, TURN"
 prs = new_deck()
 TOTAL = 21
 
 title_slide(prs, DECK, "Format, Think, Turn",
     "The wire-level mechanics of talking to the fleet over Ollama",
-    "Part 3 of 5. Almost everything in the first two pieces traces back to decisions made "
+    "Part 3 of 6. Almost everything in the first two pieces traces back to decisions made "
     "at the level of a single call to a model — and almost none of it looks like calling "
     "Claude's API.",
-    title_size=46, series_total=5)
+    title_size=46, series_total=6)
 
 # 2
 content_slide(prs, 2, TOTAL, LABEL, "The Call Underneath the Call", "Chat and ChatWithTools",
