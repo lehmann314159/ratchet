@@ -129,9 +129,12 @@ content_slide(prs, 9, TOTAL, LABEL, "Job Status", "Underneath everything",
     bullets=[
         "Every verb call: pending → running → complete, with failed_retry (2 strikes, flat "
         "across every verb) and escalated as the only other ways out.",
+        ("failed_retry has a second, unrelated trigger: ", "the orchestrator restarting a "
+         "job that was mid-flight when it crashed. Costs nothing against the strike count — "
+         "the job wasn't wrong, the process just didn't finish."),
         ("EXECUTE_BEAD is the exception. ", "It runs as its own supervised subprocess with "
          "its own retry accounting, not the generic path."),
-    ], bullet_size=19)
+    ], bullet_size=17)
 
 # ============================================================ 10 — diagram: job status
 slide = diagram_header(prs, 10, TOTAL, LABEL, "Diagram 4 of 4", "Generic job status",
