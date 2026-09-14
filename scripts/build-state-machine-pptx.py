@@ -19,7 +19,7 @@ from deck_common import _set_run
 
 LABEL = "RATCHET · STATE MACHINE REFERENCE"
 prs = new_deck()
-TOTAL = 16
+TOTAL = 17
 
 # ---------------------------------------------------------------- 1: title
 slide = add_slide(prs, bg=INK)
@@ -87,8 +87,9 @@ content_slide(prs, 4, TOTAL, LABEL, "Project Status — Notes", "What decides wh
         ("fixture is terminal by design. ", "In-place renumbered to a negative id, never "
          "dispatched again. clone-project (from any status, including fixture) spawns a "
          "brand-new project row — a deep copy, not a transition of this row."),
-        ("paused can also reach fixture directly ", "(save-fixture CLI) — the paused "
-         "project's inert pending job moves with it. Omitted above for diagram clarity."),
+        ("\"pause knob\" is one of three triggers: ", "pause_after_reconcile, "
+         "pause_after_verb, or pause_after_bead_id (see docs/fixtures.md). paused can also "
+         "reach fixture directly via save-fixture CLI — both omitted above for clarity."),
     ], bullet_size=16, top_bullets=Inches(2.1), bullets_height=Inches(4.7))
 
 # ---------------------------------------------------------------- 5: diagram — bootstrap
@@ -241,8 +242,22 @@ add_edge(slide, running, 0, retry, 2, label="Validate fails, strikes ≤ 2", elb
 add_edge(slide, retry, 2, running, 0, label="reclaimed", elbow=True, label_nudge=(1.6, 0), label_size=9)
 add_edge(slide, running, 2, esc, 0, label="strikes exceeded", elbow=True, label_size=9)
 
-# ---------------------------------------------------------------- 13: escalation table
-table_slide(prs, 13, TOTAL, LABEL, "Escalation Points", "Every way a job reaches escalated, or a project full_stopped",
+# ---------------------------------------------------------------- 13: job status notes
+content_slide(prs, 13, TOTAL, LABEL, "Job Status — Notes", "Two facts the diagram compresses away",
+    bullets=[
+        ("The strike tolerance is a flat 2 — ", "across every single verb, not tuned per "
+         "verb (verbTolerance, queue.go:19). A verb with a harder job to get right doesn't "
+         "get more slack than one with an easy job."),
+        ("failed_retry has two distinct causes that look identical from outside: ", "a "
+         "handler.Validate failure still under tolerance (drawn above), or the orchestrator "
+         "restarting mid-job (resetStaleRunning) — the job wasn't wrong, the process just "
+         "didn't finish. Both land a job back in the same queue, reclaimed the same way."),
+        "EXECUTE_BEAD is still the one exception to all of this — it never enters this "
+        "generic path; its own supervised loop is Diagram 3.",
+    ], bullet_size=16, top_bullets=Inches(2.1), bullets_height=Inches(4.7))
+
+# ---------------------------------------------------------------- 14: escalation table
+table_slide(prs, 14, TOTAL, LABEL, "Escalation Points", "Every way a job reaches escalated, or a project full_stopped",
     headers=["#", "Where", "Trigger", "Result"],
     rows=[
         ["1", "RECONCILE_DECOMPOSITION", "audit/reconcile round cap hit, unresolved", "job escalated"],
@@ -260,7 +275,7 @@ table_slide(prs, 13, TOTAL, LABEL, "Escalation Points", "Every way a job reaches
     ], col_widths=[0.5, 2.6, 5.2, 2.7], font_size=10.5, top=Inches(1.95))
 
 # ---------------------------------------------------------------- 14: cascade iterations
-content_slide(prs, 14, TOTAL, LABEL, "Cascade Iterations (Loop-Mode)", "clone-project --design-doc <new.md>",
+content_slide(prs, 15, TOTAL, LABEL, "Cascade Iterations (Loop-Mode)", "clone-project --design-doc <new.md>",
     bullets=[
         "Creates a new project in the same lineage, inheriting the baseline's beads, "
         "bead_revisions, and full execution/adjudication history — then overwrites the "
@@ -278,7 +293,7 @@ content_slide(prs, 14, TOTAL, LABEL, "Cascade Iterations (Loop-Mode)", "clone-pr
     ], bullet_size=13.5, top_bullets=Inches(2.15), bullets_height=Inches(4.65))
 
 # ---------------------------------------------------------------- 15: recovery tools
-two_col_slide(prs, 15, TOTAL, LABEL, "Recovery Tools", "Four ways a human intervenes",
+two_col_slide(prs, 16, TOTAL, LABEL, "Recovery Tools", "Four ways a human intervenes",
     left_head="PER-BEAD",
     left_items=[
         ("rewind-bead — ", "the sanctioned path for any per-bead escalation. Resets to "
@@ -313,7 +328,7 @@ _set_run(r2, "This deck is a presentable view of that file, not a replacement fo
              "Mermaid source via mermaid-cli; this deck is built straight from the same facts "
              "via scripts/build-state-machine-pptx.py. When the .md changes, re-run both.",
           size=16, color=RGBColor(0xC9, 0xCD, 0xD2), font=BODY_FONT)
-add_footer_dark(slide, 16, TOTAL, LABEL)
+add_footer_dark(slide, 17, TOTAL, LABEL)
 
 out = "/Users/mike/Documents/GitHub/ratchet/docs/state-machine.pptx"
 prs.save(out)
