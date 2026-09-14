@@ -3,15 +3,16 @@ sys.path.insert(0, "/private/tmp/claude-501/-Users-mike-Documents-GitHub-ratchet
 from deck_common import *
 
 DECK = 2
-LABEL = "RATCHET · PART 2/4 · VERBS & THE FLEET"
+LABEL = "RATCHET · PART 2/5 · VERBS & THE FLEET"
 prs = new_deck()
 TOTAL = 29
 
 title_slide(prs, DECK, "Verbs and the Fleet",
     "The architecture, in the detail that lets you argue with it",
-    "Part 2 of 4. Quick recap: a design doc gets broken into beads — small, independently "
+    "Part 2 of 5. Quick recap: a design doc gets broken into beads — small, independently "
     "verifiable units of work — and each one is driven through a fixed sequence of narrow "
-    "model calls called verbs. This piece is about how that actually works.")
+    "model calls called verbs. This piece is about how that actually works.",
+    series_total=5)
 
 # 2
 content_slide(prs, 2, TOTAL, LABEL, "Foundations", "The database is the ground truth",
@@ -348,8 +349,8 @@ closing_slide(prs, 29, TOTAL, LABEL,
     "None of it makes the models smarter.",
     "It makes their mistakes cheap to catch, and their good decisions easy to tell apart "
     "from lucky ones.",
-    next_label="Write for Zero Domain Knowledge — the craft of writing a spec precise enough "
-               "for a 30B model to build correctly on the first pass.")
+    next_label="Format, Think, Turn — the wire-level mechanics of talking to this fleet "
+               "over Ollama, and why almost none of it looks like calling Claude's API.")
 
 out = "/Users/mike/Documents/GitHub/ratchet/writing/decks/02-verbs-and-the-fleet.pptx"
 import os

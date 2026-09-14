@@ -3,14 +3,15 @@ sys.path.insert(0, "/private/tmp/claude-501/-Users-mike-Documents-GitHub-ratchet
 from deck_common import *
 
 DECK = 1
-LABEL = "RATCHET · PART 1/4"
+LABEL = "RATCHET · PART 1/5"
 prs = new_deck()
 
 title_slide(prs, DECK, "Ratchet",
     "Teaching a fleet of small local models to build working software",
-    "Part 1 of 4 — the light, orienting piece. Three deep dives follow: the architecture "
-    "and model fleet, the craft of writing specs precise enough for small models, and a "
-    "full account of the recent burn-in.")
+    "Part 1 of 5 — the light, orienting piece. Four deep dives follow: the architecture "
+    "and model fleet, the wire-level mechanics of talking to it over Ollama, the craft of "
+    "writing specs precise enough for small models, and a full account of the recent burn-in.",
+    series_total=5)
 
 TOTAL = 18
 

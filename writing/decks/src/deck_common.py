@@ -176,9 +176,9 @@ def add_gear(slide, left=Inches(11.85), top=Inches(0.5), size=Inches(0.5), color
 
 # ---------------------------------------------------------------- slide kinds
 
-def title_slide(prs, deck_index, deck_title, subtitle, description, title_size=54):
+def title_slide(prs, deck_index, deck_title, subtitle, description, title_size=54, series_total=4):
     slide = add_slide(prs, bg=INK)
-    add_kicker(slide, f"Ratchet · Part {deck_index} of 4", color=RGBColor(0x9A, 0xC7, 0xD3),
+    add_kicker(slide, f"Ratchet · Part {deck_index} of {series_total}", color=RGBColor(0x9A, 0xC7, 0xD3),
                top=Inches(2.35))
     box, tf = add_textbox(slide, Inches(0.9), Inches(2.85), Inches(11.5), Inches(1.15))
     p = tf.paragraphs[0]
@@ -196,7 +196,7 @@ def title_slide(prs, deck_index, deck_title, subtitle, description, title_size=5
     _set_run(r3, description, size=15, color=RGBColor(0x9A, 0x9F, 0xA6), font=BODY_FONT)
     # series dots
     dot_y = Inches(6.85)
-    for i in range(4):
+    for i in range(series_total):
         c = RGBColor(0x9A, 0xC7, 0xD3) if (i + 1) == deck_index else RGBColor(0x3A, 0x3E, 0x44)
         dot = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(0.95 + i * 0.35), dot_y, Inches(0.16), Inches(0.16))
         dot.fill.solid()

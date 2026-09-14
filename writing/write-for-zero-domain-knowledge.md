@@ -1,4 +1,4 @@
-*Third in a series on Ratchet. [The first piece](https://claude.ai/code/artifact/168dda2b-2945-41dc-920e-abc5458b22a4) is the overview; [the second](https://claude.ai/code/artifact/79e0d9bd-aa5b-4b84-ac34-690c4e1d9f31) goes deep on the architecture and model fleet. This one is about the single hardest skill in the whole system: writing a spec precise enough for a model that won't fill your gaps kindly.*
+*Fourth in a series on Ratchet. [The first piece](https://claude.ai/code/artifact/168dda2b-2945-41dc-920e-abc5458b22a4) is the overview; [the second](https://claude.ai/code/artifact/79e0d9bd-aa5b-4b84-ac34-690c4e1d9f31) goes deep on the architecture and model fleet; [the third](https://claude.ai/code/artifact/059f0cd4-6cb7-4de1-ac32-6dd5413add1a) covers the wire-level mechanics of talking to that fleet over Ollama. This one is about the single hardest skill in the whole system: writing a spec precise enough for a model that won't fill your gaps kindly.*
 
 ## The test
 

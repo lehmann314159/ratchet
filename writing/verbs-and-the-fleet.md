@@ -182,4 +182,4 @@ Everything above is in service of three properties the project treats as non-neg
 
 ---
 
-*Next: [Write for Zero Domain Knowledge](https://claude.ai/code/artifact/3638f7a6-2456-4d16-b69c-852b0756ad93) — the craft of writing a design doc precise enough for a 30B model to build correctly on the first pass, and the tooling built to enforce it.*
+*Next: [Format, Think, Turn](https://claude.ai/code/artifact/059f0cd4-6cb7-4de1-ac32-6dd5413add1a) — the wire-level mechanics of talking to this fleet over Ollama, and why almost none of it looks like calling Claude's API.*
