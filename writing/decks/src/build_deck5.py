@@ -5,7 +5,7 @@ from deck_common import *
 DECK = 5
 LABEL = "RATCHET · PART 5/6 · DRAFT, CHECK, SIGN OFF"
 prs = new_deck()
-TOTAL = 16
+TOTAL = 17
 
 title_slide(prs, DECK, "Draft, Check, Sign Off",
     "Where a spec precise enough for this actually comes from",
@@ -70,38 +70,60 @@ content_slide(prs, 6, TOTAL, LABEL, "The Mechanical Scan", "The naive version, a
     bullets=[
         "checkdesigndoc parses the doc by section, applies keyword-triggered rules, prints "
         "a report — an over-flagging report a human reads, never a pass/fail gate.",
-        "The first arithmetic check flagged any \"identifier operator identifier\" pattern "
-        "— and lit up on every single Go pointer type, because g *Game reads exactly like "
-        "arithmetic to a regex that doesn't know Go syntax.",
+        "The first arithmetic check — one of eighteen catalogued ambiguity classes — "
+        "flagged any \"identifier operator identifier\" pattern, and lit up on every single "
+        "Go pointer type, because g *Game reads exactly like arithmetic to a regex that "
+        "doesn't know Go syntax.",
         "Rebuilt around actual arithmetic language instead — \"sum of,\" \"the formula,\" "
         "\"FNV,\" \"hash of\" — cleared by a computed number nearby. Geometry went the other "
         "way: \"above\"/\"below\" dropped entirely once they turned out to almost always be "
         "ordinary cross-references, not geometric claims.",
     ], bullet_size=15, top_bullets=Inches(2.1), bullets_height=Inches(4.7))
 
-# 7 two more checks
-content_slide(prs, 7, TOTAL, LABEL, "Two Sharper Checks", "construction-form and bead-size",
+# 7 NEW — the five mechanical classes, named
+table_slide(prs, 7, TOTAL, LABEL, "Five of Eighteen Get a Keyword Scan", "The rest need judgment — no shortcut around that",
+    headers=["Class", "What it catches", "What clears it"],
+    rows=[
+        ["1 — Geometry", "Relative-direction language with no coordinate math: "
+         "\"diagonally,\" \"clockwise,\" \"toward/forward/backward,\" \"row above/below\"",
+         "A Δrow/Δcol, a (±n,±n) pair, or an algebraic delta (a1→b2) nearby"],
+        ["2 — Arithmetic", "\"sum of,\" \"the formula,\" \"FNV,\" \"hash of,\" \"modulo\" "
+         "with no result stated", "A literal computed number nearby (= n, e.g. n, → n)"],
+        ["6 — Symbolic refs", "\"use the X type from Y,\" \"as defined above,\" \"the "
+         "standard value\"", "A literal value given on the same line"],
+        ["7 — Entry point", "main.go named as an output file", "The literal string "
+         "\"package main\" appearing anywhere in the doc"],
+        ["17 — Category phrase", "\"standard,\" \"normal,\" \"usual,\" \"conventional\" "
+         "next to a rules/procedure noun", "Nothing — every hit stays flagged; see next"],
+    ], col_widths=[2.3, 5.7, 4.9], font_size=13, top=Inches(2.25))
+
+# 8 two more checks
+content_slide(prs, 8, TOTAL, LABEL, "Two Sharper Checks, Same Tool", "construction-form and bead-size",
     bullets=[
         ("construction-form ", "flags a Cross-Bead Contract that enumerates a polymorphic "
          "type's variants without ever saying pointer or value — the exact defect from the "
          "expression-VM story, where two independent beads picked opposite constructions of "
          "the same undeclared type."),
-        ("bead-size ", "flags a Decomposition Notes entry that owns too many functions and "
-         "is wired too tightly into other beads' work — calibrated against the project's "
-         "own history until it caught every bead known to have actually spiraled."),
-    ], bullet_size=17)
+        ("bead-size ", "flags a Decomposition Notes entry that owns 4 or more functions "
+         "and is wired into 3 or more prior beads or Cross-Bead Contracts — calibrated "
+         "against the project's own history until it caught every bead known to have "
+         "actually spiraled and flagged none known to have run clean."),
+        "Neither is one of the eighteen catalogued ambiguity classes — they're structural "
+        "checks living in the same tool, catching a different shape of gap.",
+    ], bullet_size=15, top_bullets=Inches(2.1), bullets_height=Inches(4.7))
 
-# 8 the class judgment can't catch
-quote_slide(prs, 8, TOTAL, LABEL, "The One Class Judgment Can't Catch",
+# 9 class 17, named and explained
+quote_slide(prs, 9, TOTAL, LABEL, "Class 17 — The One Judgment Can't Catch",
     "\"Standard movement rules\" is invisible to a reviewer who shares the author's "
     "fluency — for the identical reason the author didn't notice writing it.",
-    "This class gets a mechanical pre-filter treated as authoritative, on purpose, not "
-    "just as a backstop: not \"judgment usually misses it\" but structurally can't catch "
-    "it, because the fluency that makes a reviewer fast is the same fluency that makes "
-    "them blind to this one shape of gap.", quote_color=ACCENT)
+    "Every other mechanical class is a cheap first-pass filter alongside a judgment "
+    "pass that catches what it misses. Class 17 gets the mechanical hit treated as "
+    "authoritative instead — not \"judgment usually misses it\" but structurally can't, "
+    "because the fluency that makes a reviewer fast is the same fluency that makes them "
+    "blind to a category name standing in for the rule it names.", quote_color=ACCENT)
 
-# 9 check-design-doc orchestration
-content_slide(prs, 9, TOTAL, LABEL, "check-design-doc", "Mirrors DECOMPOSE → AUDIT → RECONCILE, one layer earlier",
+# 10 check-design-doc orchestration
+content_slide(prs, 10, TOTAL, LABEL, "check-design-doc", "Mirrors DECOMPOSE → AUDIT → RECONCILE, one layer earlier",
     bullets=[
         "Runs the mechanical scan first, keeps every path:line hit.",
         "Separately dispatches a fresh subagent with nothing but the doc and the current "
@@ -112,8 +134,8 @@ content_slide(prs, 9, TOTAL, LABEL, "check-design-doc", "Mirrors DECOMPOSE → A
         "manufacturing findings to look thorough is its own kind of failure.",
     ], bullet_size=16)
 
-# 10 reconciliation table
-table_slide(prs, 10, TOTAL, LABEL, "Reconciling Two Independent Opinions", "The asymmetric rule",
+# 11 reconciliation table
+table_slide(prs, 11, TOTAL, LABEL, "Reconciling Two Independent Opinions", "The asymmetric rule",
     headers=["Site flagged by…", "Becomes", "Rule"],
     rows=[
         ["Both passes", "One item, source \"both\"", "Straightforward agreement."],
@@ -125,8 +147,8 @@ table_slide(prs, 10, TOTAL, LABEL, "Reconciling Two Independent Opinions", "The 
          "something mechanical can't reach."],
     ], col_widths=[3, 4, 7], font_size=14, top=Inches(2.15))
 
-# 11 sign-off
-content_slide(prs, 11, TOTAL, LABEL, "Sign-Off", "Every row starts as \"needs decision\"",
+# 12 sign-off
+content_slide(prs, 12, TOTAL, LABEL, "Sign-Off", "Every row starts as \"needs decision\"",
     bullets=[
         "Resolving a row means one of three things happens explicitly: apply the "
         "suggested rewrite, apply a different answer, or affirmatively waive it — with "
@@ -139,21 +161,21 @@ content_slide(prs, 11, TOTAL, LABEL, "Sign-Off", "Every row starts as \"needs de
         "separate action. Nothing about a clean report auto-starts anything.",
     ], bullet_size=15, top_bullets=Inches(2.1), bullets_height=Inches(4.7))
 
-# 12 section: what it found for real
+# 13 section: what it found for real
 section_slide(prs, "What It Found, the First Time It Ran for Real",
     "Four docs, already scheduled to run, during burn-in prep",
     note="The workflow's own design notes are candid that it hadn't been run on a doc "
          "nobody had drafted with the tool already in mind. This was that test.")
 
-# 13 tier-3 numbers
-stat_slide(prs, 13, TOTAL, LABEL, "The Tier-3 Run", "20 / 4",
+# 14 tier-3 numbers
+stat_slide(prs, 14, TOTAL, LABEL, "The Tier-3 Run", "20 / 4",
     "genuine ambiguities found · shared by the hand-verified reference implementations",
     "About fifteen were doc-only imprecision the reference implementation happened to "
     "sidestep. Four were sharper: the reference implementation had faithfully carried "
     "the same gap forward rather than exposing it.")
 
-# 14 the bug that beat the reference impl
-content_slide(prs, 14, TOTAL, LABEL, "The Bug the Doc and the Reference Shared", "One implementation, internally consistent, still wrong",
+# 15 the bug that beat the reference impl
+content_slide(prs, 15, TOTAL, LABEL, "The Bug the Doc and the Reference Shared", "One implementation, internally consistent, still wrong",
     bullets=[
         "A decimal library's coefficient range was stated as including math.MinInt64 — "
         "but the library's own Neg and Abs can't actually negate that value. The doc's "
@@ -166,8 +188,8 @@ content_slide(prs, 14, TOTAL, LABEL, "The Bug the Doc and the Reference Shared",
         "single build to expose the seam.",
     ], bullet_size=15, top_bullets=Inches(2.1), bullets_height=Inches(4.7))
 
-# 15 a new class born from convergence
-quote_slide(prs, 15, TOTAL, LABEL, "A New Class, Born From Convergence",
+# 16 a new class born from convergence
+quote_slide(prs, 16, TOTAL, LABEL, "Class 18, Born From Convergence",
     "Three of four independent subagents, on three unrelated docs, raised the same kind "
     "of gap without being told to look for it.",
     "A function or CLI command with more than one validation guard that can fail "
@@ -175,7 +197,7 @@ quote_slide(prs, 15, TOTAL, LABEL, "A New Class, Born From Convergence",
     "one wins. Now the checklist's eighteenth class — about as strong a signal as this "
     "catalogue ever produces that a class is real, not one reviewer's idiosyncratic taste.")
 
-closing_slide(prs, 16, TOTAL, LABEL,
+closing_slide(prs, 17, TOTAL, LABEL,
     "The reviewing model is drawn from the same fleet as everything else in this series —",
     "same blind spots, same fallibility. What changes is the arrangement: drafting and "
     "checking never share a memory of the same conversation, a mechanical scan runs "
