@@ -23,35 +23,37 @@ quote_slide(prs, 2, TOTAL, LABEL, "The Test",
 # 3 field guide intro
 content_slide(prs, 3, TOTAL, LABEL, "A Field Guide to the Gaps", "18 classes, each earned by an actual incident",
     bullets=[
-        ("Geometry & arithmetic ", "want the computed number, not the formula. \"Moves toward "
-         "lower row indices\" isn't precise until Δrow/Δcol are stated."),
-        ("Ownership ", "needs field-level precision — independent copy, or shared reference? "
-         "Judgment-only; no keyword scan resolves it."),
+        ("Geometry (1) & arithmetic (2) ", "want the computed number, not the formula. \"Moves "
+         "toward lower row indices\" isn't precise until Δrow/Δcol are stated."),
+        ("Ownership (3) ", "needs field-level precision — independent copy, or shared "
+         "reference? Judgment-only; no keyword scan resolves it."),
         "Both generalize past their origin domain — arithmetic went from board-game geometry "
         "to an FNV-1a hash worked all the way through.",
     ], bullet_size=18)
 
 # 4 construction form story pt1
-content_slide(prs, 4, TOTAL, LABEL, "The Stickiest Class", "How a value gets constructed, not just its type",
+content_slide(prs, 4, TOTAL, LABEL, "The Stickiest Failure Shape", "How a value gets constructed, not just its type",
     bullets=[
+        "Not itself one of the eighteen numbered classes — it needed a different kind of "
+        "check than any of them, which is exactly why it's worth telling as a story.",
         "A VM's AST nodes were shown as value literals throughout. The scaffold's interface "
         "was satisfied by both a value and a pointer — nothing forced either choice.",
         "One bead: the parser picked pointers, the test (same doc) picked values. Days later, "
         "a different bead hit the identical defect independently.",
-        "Two independent beads, two independent models, one un-pinned decision.",
-    ], bullet_size=18)
+    ], bullet_size=17)
 
 # 5 construction form pt2
-quote_slide(prs, 5, TOTAL, LABEL, "The Stickiest Class — cont.",
+quote_slide(prs, 5, TOTAL, LABEL, "The Stickiest Failure Shape — cont.",
     "Even the hand-verified \"known-good\" reference implementation, built later to grade "
     "candidate models, had the same pointer/value inconsistency baked in.",
     "Nobody wrote it carelessly — the ambiguity in the original spec was load-bearing enough "
     "that a deliberately-careful reference implementation reproduced it anyway. The fix wasn't "
-    "\"be more careful\" — it was a mechanical check flagging any shared type crossing a bead "
-    "boundary with no explicit pointer-or-value statement.")
+    "\"be more careful\" — it was a dedicated mechanical check (construction-form), outside "
+    "the eighteen-class catalogue, flagging any shared type crossing a bead boundary with no "
+    "explicit pointer-or-value statement.")
 
 # 6 standard rules class
-content_slide(prs, 6, TOTAL, LABEL, "The Sharpest Finding", "\"Standard movement rules\" — zero content, and invisible",
+content_slide(prs, 6, TOTAL, LABEL, "Class 17 — The Sharpest Finding", "\"Standard movement rules\" — zero content, and invisible",
     bullets=[
         "A chess doc described knight/bishop/rook/queen movement as \"standard\" — a category "
         "name standing in for the rule. An independent reviewer caught six other real problems "
@@ -70,7 +72,7 @@ quote_slide(prs, 7, TOTAL, LABEL, "The Sharpest Finding — the consequence",
     "reader, human or model, won't consciously notice anything is missing.", quote_color=ACCENT)
 
 # 8 guard precedence
-content_slide(prs, 8, TOTAL, LABEL, "Newest Addition", "Guard precedence: which error wins?",
+content_slide(prs, 8, TOTAL, LABEL, "Class 18 — Newest Addition", "Guard precedence: which error wins?",
     bullets=[
         "When more than one validation check can fail on the same input, and each maps to a "
         "different error, the check order has to be stated explicitly.",

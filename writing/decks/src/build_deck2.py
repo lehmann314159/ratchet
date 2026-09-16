@@ -177,9 +177,10 @@ content_slide(prs, 13, TOTAL, LABEL, "One Level Deeper", "Verification the model
         "to check their own reasoning while they're still forming it.",
         ("run_go_snippet ", "— CRITIQUE, JUDGE, ADJUDICATE, and WRITE can all run a real "
          "snippet of Go and read back the actual output, mid-turn."),
-        "\"This input produces this error\" or \"these two values are equal\" gets tested "
-        "against a live interpreter, instead of simulated correctly inside the model's head "
-        "and hoped to be right.",
+        ("A real call, from the burn-in: ", "ADJUDICATE, deciding whether a done-indicator "
+         "renders as the literal word \"true\" or a CSS class, ran the actual server response "
+         "through strings.Contains — settling a contradiction no amount of reasoning about "
+         "the doc's prose could settle on its own."),
         "Less mentally tracing code. More propose-a-check, read-back-what-happened.",
     ], bullet_size=17, top_bullets=Inches(2.1), bullets_height=Inches(4.7))
 
