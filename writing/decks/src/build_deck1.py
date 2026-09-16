@@ -33,15 +33,21 @@ content_slide(prs, 2, TOTAL, LABEL, "The Primer", "What changes when the model i
 # 3
 content_slide(prs, 3, TOTAL, LABEL, "The Primer", "Four ways a small model fails that Claude mostly doesn't",
     bullets=[
-        ("Ambiguity gets guessed at. ", "\"Trim trailing whitespace\" gets a mix of inconsistent "
-         "interpretations across a hundred functions, silently."),
-        ("Structured output fights reasoning. ", "One core model never once emitted a tool call "
-         "under a JSON-format constraint — 0 of 139 recorded calls. A structural conflict, not a prompting bug."),
-        ("They get stuck. ", "Looping on the same failed compile error, or burning the whole "
-         "response budget \"thinking\" without ever answering."),
-        ("They lie about success — unknowingly. ", "A model that writes a file has no way to "
-         "confirm it landed on disk with the right bytes. It has to be checked."),
-    ], bullet_size=17, top_bullets=Inches(2.05), bullets_height=Inches(4.8))
+        ("Ambiguity gets guessed at, inconsistently. ", "A VM's AST nodes were spec'd as plain "
+         "value literals, forcing no choice on pointer-vs-value. One bead's test and its own "
+         "implementation picked opposite constructions of the identical type; days later, an "
+         "unrelated bead reproduced the identical defect independently."),
+        ("Structured output fights reasoning — structurally, not by accident. ", "qwen3:32b's "
+         "template writes a tool call as literal <tool_call> text inside the exact channel a "
+         "JSON-format grammar constrains — \"<\" isn't legal JSON. Zero tool calls got through, "
+         "out of 139 recorded attempts."),
+        ("They get stuck, past where a frontier model would stop. ", "One reasoning stream "
+         "climbed past 14,500 tokens and kept climbing, burning its whole turn budget before "
+         "producing an answer — there was no per-turn cap yet to catch it."),
+        ("They report success without knowing better. ", "A spec-revision step once handed "
+         "back a response that stopped mid-token, its pinned literals sheared off the end — a "
+         "completely normal \"done\" status attached to output nobody had checked the length of."),
+    ], bullet_size=16, top_bullets=Inches(2.05), bullets_height=Inches(4.8))
 
 # 4
 stat_slide(prs, 4, TOTAL, LABEL, "The Primer", "Assembly line,",
