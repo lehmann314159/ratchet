@@ -65,6 +65,14 @@ class Diagram:
     def __init__(self, kicker, title, caption=None):
         self.fig, self.ax = plt.subplots(figsize=(SLIDE_W, SLIDE_H), dpi=DPI)
         ax = self.ax
+        # Full-bleed axes: without this, matplotlib's default margins compress
+        # the data coordinate system relative to the physical figure, so 1
+        # data-unit no longer equals 1 inch — harmless here since every box
+        # width below is a fixed literal, not derived from a text-width
+        # measurement, but it's a latent trap for any future addition that
+        # sizes a shape to fit measured text (see turn-eval-tiers.py, which
+        # hit exactly this).
+        self.fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
         ax.set_xlim(0, SLIDE_W)
         ax.set_ylim(0, SLIDE_H)
         ax.invert_yaxis()  # pptx-style top-left origin, y grows downward
